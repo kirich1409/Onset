@@ -1,0 +1,133 @@
+# SwiftLint configuration for Onset (soft layer).
+#
+# This is the *soft* layer of the checks stack: an autonomous agent may edit this
+# file, so the critical bans below (no_print, no_network) are DUPLICATED inline in
+# `.github/workflows/ci.yml` job `hard-gates`, which the agent cannot edit (the prod
+# PAT lacks `workflows:write`). The hard-gate grep is the airtight authority; these
+# custom rules are a fast local mirror so a developer (or agent) sees the violation
+# at commit time via the pre-commit hook instead of only in CI.
+#
+# Pinned SwiftLint version in CI: 0.63.3 (portable_swiftlint.zip). Run with --strict,
+# which promotes every warning to a build failure.
+
+# Paths to lint. Sources of the SPM package + the app target.
+included:
+  - Packages/OnsetKit/Sources
+  - onset
+
+# Never lint generated, build, or test directories. Tests are allowed to use print()
+# and may contain string literals, so they are excluded from the custom bans too.
+excluded:
+  - Packages/OnsetKit/.build
+  - Packages/OnsetKit/Tests
+  - onsetTests
+  - onsetUITests
+  - .build
+  - DerivedData
+  - build
+
+# Rules that overlap with swift-format are disabled here to avoid a formatter war:
+# swift-format owns whitespace, indentation, line breaks, import ordering, trailing
+# commas, and brace placement. SwiftLint focuses on semantics / smells only.
+disabled_rules:
+  - trailing_whitespace          # swift-format owns whitespace
+  - trailing_comma               # swift-format owns trailing commas
+  - opening_brace                # swift-format owns brace placement
+  - statement_position           # swift-format owns statement positioning
+  - colon                        # swift-format owns spacing
+  - comma                        # swift-format owns comma spacing
+  - return_arrow_whitespace      # swift-format owns operator spacing
+  - vertical_whitespace          # swift-format owns blank lines
+  - todo                         # TODO/FIXME tracked elsewhere, not a lint failure
+
+opt_in_rules:
+  - empty_count
+  - empty_string
+  - first_where
+  - last_where
+  - contains_over_filter_count
+  - contains_over_first_not_nil
+  - explicit_init
+  - redundant_nil_coalescing
+  - force_unwrapping
+  - implicitly_unwrapped_optional
+  - overridden_super_call
+  - prohibited_super_call
+
+# Soft baseline: keep complexity rules advisory so they do not block a placeholder
+# stage. They tighten as real code lands.
+line_length:
+  warning: 120
+  error: 200
+  ignores_comments: true
+  ignores_urls: true
+
+file_length:
+  warning: 500
+  error: 1000
+
+type_body_length:
+  warning: 300
+  error: 500
+
+function_body_length:
+  warning: 60
+  error: 120
+
+identifier_name:
+  min_length:
+    warning: 2
+    error: 1
+  max_length:
+    warning: 50
+    error: 60
+  excluded:
+    - id
+    - x
+    - y
+    - z
+    - dx
+    - dy
+    - pt
+    - to
+
+type_name:
+  min_length:
+    warning: 3
+    error: 2
+  max_length:
+    warning: 50
+    error: 60
+
+# Custom bans — local mirror of the hard-gates. ICU (NSRegularExpression) syntax,
+# so \b and \s are valid here (unlike the BSD-grep hard-gate, which uses POSIX
+# classes). Severity:error so --strict and non-strict both block.
+custom_rules:
+  no_print:
+    name: "No print()"
+    # \bprint\s*\( — bare print( call. The sanctioned replacement is the Logger facade.
+    # Known sharp edge: false positives inside string literals / comments are accepted;
+    # the airtight authority is the hard-gate grep, this is the fast local mirror.
+    regex: '\bprint\s*\('
+    message: "print() is banned. Use the Logger facade (see CLAUDE.md logging conventions)."
+    severity: error
+
+  no_network:
+    name: "No network APIs"
+    # Tripwire mirroring the hard-gate. NFR-SEC: Onset is local-only — no network,
+    # telemetry, or analytics. Real enforcement is review + entitlements; this flags
+    # an accidental import early.
+    regex: '\b(URLSession|URLRequest|NWConnection|getaddrinfo)\b|\bsocket\s*\('
+    message: "Network APIs are banned (NFR-SEC local-only). Recordings never leave the device."
+    severity: error
+
+  hardcoded_ui_string:
+    name: "Hardcoded UI string"
+    # NFR-I18N: user-facing strings live in the String Catalog (.xcstrings). Flags a
+    # bare string literal passed to SwiftUI Text(_:). swiftlint custom rules do not
+    # support per-path scoping, so this rule is repo-wide; on the current placeholder
+    # tree it has zero matches (onsetApp uses Text(verbatim:)). Severity:warning so it
+    # nudges without (yet) blocking — under CI --strict a real violation WOULD fail.
+    regex: 'Text\(\s*"[^"]+"\s*\)'
+    message: "Hardcoded UI string. Use a String Catalog key, or Text(verbatim:) for non-localized debug text (NFR-I18N)."
+    severity: warning
