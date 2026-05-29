@@ -16,3 +16,5 @@ struct OnsetApp: App {
         }
     }
 }
+
+// codeql-pr-probe: temporary diagnostic change — do not merge
