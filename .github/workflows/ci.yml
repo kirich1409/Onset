@@ -1,0 +1,189 @@
+# Onset CI — the trust root of the autonomous-merge model.
+#
+# WHY THIS FILE IS SPECIAL: the production agent operates with a PAT that lacks
+# `workflows:write`, so it CANNOT edit this file. Every hard guarantee that must
+# survive an agent loosening the soft layer (scripts/*.sh, .swiftlint.yml,
+# Package.swift) is therefore reproduced INLINE here in job `hard-gates`. The soft
+# layer is a fast local mirror; this workflow is the airtight authority.
+#
+# CHECK NAME CONTRACT (byte-for-byte — a branch-protection ruleset matches on these
+# exact strings; a typo is a silent permanent auto-merge deadlock):
+#   hard-gates, build-test-app, test-package, lint
+#
+# Package.swift lives at Packages/OnsetKit/Package.swift (NOT repo root), so every
+# `swift ...` invocation runs from that directory.
+#
+# No actions/cache for DerivedData: a poisoned cache producing a false green is more
+# dangerous in an autonomous-merge model than a slow clean build.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hard-gates:
+    name: hard-gates
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      # no-print: a bare print( call in non-test app/library Swift sources is banned;
+      # the Logger facade is the sanctioned replacement. KNOWN SHARP EDGE: this grep
+      # also matches print( inside Swift comments and string literals — accepted as a
+      # deliberately blunt hard gate. Scope is *.swift only (NOT .xcstrings/.md/etc.),
+      # excluding test dirs, otherwise a false positive would block ALL PRs and only
+      # the repo owner (workflows:write) could unblock them — breaking autonomy.
+      # BSD grep on the runner: \s works (Apple grep accepts it), but \b does NOT, so
+      # word boundary is expressed as (^|[^A-Za-z_]) with the POSIX [[:space:]] class.
+      - name: no-print
+        run: |
+          set -euo pipefail
+          if /usr/bin/grep -REn --include='*.swift' \
+               '(^|[^A-Za-z_])print[[:space:]]*\(' \
+               Packages/OnsetKit/Sources onset \
+             | /usr/bin/grep -Ev '(/Tests/|Tests\.swift|Tests/)' \
+             | /usr/bin/grep -Ev '/onsetTests/|/onsetUITests/' ; then
+            echo "::error::no-print: a bare print( call found in non-test sources. Use the Logger facade."
+            exit 1
+          fi
+          echo "no-print: OK"
+
+      # no-network (tripwire): NFR-SEC says Onset is local-only — no network, telemetry,
+      # or analytics. This is SIGNALLING, not airtight (real enforcement is review +
+      # entitlements). Same *.swift-only, test-excluded scope as no-print.
+      - name: no-network
+        run: |
+          set -euo pipefail
+          if /usr/bin/grep -REn --include='*.swift' \
+               '(URLSession|URLRequest|NWConnection|getaddrinfo|socket[[:space:]]*\()' \
+               Packages/OnsetKit/Sources onset \
+             | /usr/bin/grep -Ev '(/Tests/|Tests\.swift|Tests/)' \
+             | /usr/bin/grep -Ev '/onsetTests/|/onsetUITests/' ; then
+            echo "::error::no-network: a network API reference found (NFR-SEC local-only). Recordings never leave the device."
+            exit 1
+          fi
+          echo "no-network: OK"
+
+      # deps-audit: NFR-STACK — Apple frameworks only. No CocoaPods anywhere, and no
+      # remote SPM packages in the Xcode project. The inline allowlist is EMPTY: adding
+      # even a dev-test dependency requires the repo owner to edit this workflow.
+      - name: deps-audit
+        run: |
+          set -euo pipefail
+          if /usr/bin/find . -name 'Podfile' -o -name 'Podfile.lock' | /usr/bin/grep -q . ; then
+            echo "::error::deps-audit: CocoaPods detected (Podfile/Podfile.lock). NFR-STACK: Apple frameworks only."
+            /usr/bin/find . -name 'Podfile' -o -name 'Podfile.lock'
+            exit 1
+          fi
+          if /usr/bin/grep -REn 'XCRemoteSwiftPackageReference' onset.xcodeproj/project.pbxproj ; then
+            echo "::error::deps-audit: remote SPM package reference in project.pbxproj. Inline allowlist is empty; owner must approve."
+            exit 1
+          fi
+          echo "deps-audit: OK"
+
+      # layer-graph: the ONLY guardian of the layer boundaries that survives an agent
+      # editing Package.swift (the compiler's import check is not tamper-resistant once
+      # the manifest itself is editable). Re-derives the graph from `swift package
+      # dump-package` and asserts the inward-dependency contract strictly. jq is present
+      # on macos-26. Any violation -> non-zero exit with a clear message.
+      #
+      #   Domain.dependencies        == []
+      #   Application.dependencies   == {Domain}
+      #   Infrastructure.dependencies== {Domain}
+      #   Presentation.dependencies  == {Application, Domain}
+      #   nothing depends on Presentation
+      #   Application and Infrastructure do not depend on each other
+      - name: layer-graph
+        working-directory: Packages/OnsetKit
+        run: |
+          set -euo pipefail
+          swift package dump-package > /tmp/onset-package.json
+          jq -e '
+            # Map of library-target name -> sorted list of its target dependency names.
+            ( [ .targets[]
+                | select(.type == "regular")
+                | { (.name): ( [ .dependencies[].byName[0] ] | sort ) }
+              ] | add ) as $deps
+            | ($deps.Domain         == [])
+              and ($deps.Application    == ["Domain"])
+              and ($deps.Infrastructure == ["Domain"])
+              and ($deps.Presentation   == ["Application","Domain"])
+          ' /tmp/onset-package.json > /dev/null || {
+            echo "::error::layer-graph: dependency graph violates the inward-layer contract."
+            echo "Expected: Domain=[]  Application=[Domain]  Infrastructure=[Domain]  Presentation=[Application,Domain]"
+            echo "Actual:"
+            jq '[ .targets[] | select(.type=="regular") | { (.name): ([.dependencies[].byName[0]] | sort) } ] | add' /tmp/onset-package.json
+            exit 1
+          }
+          echo "layer-graph: OK"
+
+  build-test-app:
+    name: build-test-app
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install xcbeautify
+        run: brew install xcbeautify
+
+      # UI tests are skipped: they require code signing and can hang headlessly (Phase 2).
+      # Code signing fully disabled for the headless runner.
+      - name: Build and test app target
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project onset.xcodeproj \
+            -scheme onset \
+            -destination 'platform=macOS' \
+            -skip-testing:onsetUITests \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            | xcbeautify
+
+  test-package:
+    name: test-package
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: swift test
+        working-directory: Packages/OnsetKit
+        run: swift test
+
+  lint:
+    name: lint
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      # swift-format from the Xcode toolchain (deterministic with the runner's Xcode).
+      # Same invocation as scripts/check.sh --lint, with an explicit --configuration so
+      # there is no auto-discovery ambiguity. --strict promotes warnings to failures.
+      - name: swift-format lint
+        run: |
+          set -euo pipefail
+          xcrun swift-format lint --strict --recursive \
+            --configuration .swift-format \
+            Packages/OnsetKit/Sources Packages/OnsetKit/Tests onset onsetTests onsetUITests
+
+      # SwiftLint pinned to 0.63.3 via the portable release artifact (NOT brew — brew is
+      # non-deterministic). portable_swiftlint.zip is a universal macOS binary (runs on
+      # arm64). --strict promotes warnings to failures.
+      - name: Install SwiftLint 0.63.3 (portable)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/portable_swiftlint.zip \
+            https://github.com/realm/SwiftLint/releases/download/0.63.3/portable_swiftlint.zip
+          mkdir -p /tmp/swiftlint-0.63.3
+          unzip -o -q /tmp/portable_swiftlint.zip -d /tmp/swiftlint-0.63.3
+          /tmp/swiftlint-0.63.3/swiftlint version
+
+      - name: SwiftLint
+        run: /tmp/swiftlint-0.63.3/swiftlint lint --strict --config .swiftlint.yml

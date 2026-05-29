@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		AA10000000000000000001 /* Presentation in Frameworks */ = {isa = PBXBuildFile; productRef = AA10000000000000000002 /* Presentation */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		567BC3022FC98DAB009322DB /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -52,6 +56,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AA10000000000000000001 /* Presentation in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +117,7 @@
 			);
 			name = onset;
 			packageProductDependencies = (
+				AA10000000000000000002 /* Presentation */,
 			);
 			productName = onset;
 			productReference = 567BC2F22FC98DAA009322DB /* onset.app */;
@@ -195,6 +201,9 @@
 			);
 			mainGroup = 567BC2E92FC98DAA009322DB;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				AA10000000000000000003 /* XCLocalSwiftPackageReference "Packages/OnsetKit" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 567BC2F32FC98DAA009322DB /* Products */;
 			projectDirPath = "";
@@ -573,6 +582,21 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		AA10000000000000000003 /* XCLocalSwiftPackageReference "Packages/OnsetKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/OnsetKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AA10000000000000000002 /* Presentation */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA10000000000000000003 /* XCLocalSwiftPackageReference "Packages/OnsetKit" */;
+			productName = Presentation;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 567BC2EA2FC98DAA009322DB /* Project object */;
 }

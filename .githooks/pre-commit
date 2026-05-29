@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#
+# pre-commit hook — runs the soft lint layer before a commit.
+#
+# This is fail-fast convenience only: it is bypassable with `git commit --no-verify`,
+# so it is NOT a security boundary. The airtight authority is CI (.github/workflows/
+# ci.yml). Enable it once per clone with: scripts/setup-hooks.sh
+#
+# No third-party frameworks, no Python — plain bash calling the repo's check script.
+
+set -euo pipefail
+
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${HOOK_DIR}/.." && pwd)"
+
+exec "${REPO_ROOT}/scripts/check.sh" --lint
