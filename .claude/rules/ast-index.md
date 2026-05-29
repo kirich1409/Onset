@@ -1,5 +1,7 @@
 # ast-index Rules
 
+> **Платформа проекта — macOS** (Swift, AppKit/SwiftUI). В ast-index нет отдельного типа `macos`: тип `ios` — это общий **Swift/ObjC**-индексатор, он же корректен для macOS. `ast-index stats` показывает «iOS (Swift/ObjC)» — это про язык, не про платформу таргета. При rebuild использовать `--project-type ios` (или автодетект).
+
 ## Mandatory Search Rules
 
 1. **ALWAYS use ast-index FIRST** for any code search task
