@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Проект
 
-**Onset** — нативное **macOS**-приложение (Swift, Apple Silicon, deployment target macOS 26.5) для одновременной записи экрана, внешней камеры и микрофона в **раздельные синхронизируемые файлы** для монтажа. Bundle id `dev.androidbroadcast.onset`.
+**Onset** — нативное **macOS**-приложение (Swift, Apple Silicon, deployment target macOS 26.0) для одновременной записи экрана, внешней камеры и микрофона в **раздельные синхронизируемые файлы** для монтажа. Bundle id `dev.androidbroadcast.onset`.
 
 > Внимание: `ast-index` определяет проект как «iOS (Swift/ObjC)» по эвристике — это **macOS**-таргет (`SDKROOT = macosx`). Команды/destination всегда для macOS.
 
