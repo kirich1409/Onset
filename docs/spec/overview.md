@@ -4,7 +4,6 @@ product: Onset
 date: 2026-05-29
 status: approved
 platform: [desktop]
-supersedes: docs/specs/2026-05-29-macos-screen-camera-recorder.md
 ---
 
 # Onset — Overview (общая часть)

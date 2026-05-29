@@ -16,5 +16,11 @@ xcuserdata/
 .build/
 .swiftpm/
 
+# Claude Code — ignore personal/local state, keep shareable config
+# (e.g. .claude/settings.json, .claude/agents, .claude/skills, .claude/hooks могут коммититься)
+.claude/agent-memory/
+.claude/settings.local.json
+.claude/**/*.local.json
+
 # Misc
 *.log

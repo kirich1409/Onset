@@ -9,7 +9,7 @@ status: draft
 
 # Test Plan: Screen Capture
 
-Полный консолидированный план — `docs/testplans/macos-screen-camera-recorder-test-plan.md` (TC-ids стабильны между документами). Здесь — срез по фиче.
+Команды верификации и log-маппинг — `docs/spec/testing.md`. TC-id стабильны across feature-планов. Здесь — срез по фиче.
 
 ## Test Cases (owned)
 

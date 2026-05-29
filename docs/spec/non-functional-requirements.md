@@ -34,7 +34,7 @@ binding: all-features
 - **TEST-2 (автоматизация):** L1–L3 (и L4 где автоматизируемо) гоняются в CI на каждый PR (см. NFR-CI). L5 — документированный чек-лист на референс-железе.
 - **TEST-3 (design-for-test):** чистые функции и протокол-швы как первичный механизм. Обязательно unit-тестируемы без железа: `Validator`, `SampleRouter` (fan-out + `isAlive`), atomic start (drop PTS<T, warm-up→T), gap-fill до fan-out, `CMSyncConvertTime`, **`DegradationLadder` как чистый decider-автомат**. Фейки: `EncodingWriter`/`CaptureSource`/`ClockProviding`. DI через composition root; никаких скрытых синглтонов на hot path.
 - **TEST-4 (coverage-gate):** каждый публичный символ покрыт тестом или помечён trivial-no-test (data-class/enum). Критические пути (синхронизация, дропы, атомарный старт, валидация, маршрутизация) — 100% unit-покрытие. Метрика покрытия — не самоцель; гейт по публичному API и критическим путям.
-- **TEST-5 (инфраструктура):** XCTest для unit/integration/UI-instrumentation; swift-snapshot-testing (additive) для визуальной регрессии UI; `manual-tester`/MCP-раннер для ui-scenario; скрипты пост-анализа файлов (`ffprobe`/`AVAsset`, см. Appendix A консолидированного тест-плана) для L5.
+- **TEST-5 (инфраструктура):** XCTest для unit/integration/UI-instrumentation; swift-snapshot-testing (additive) для визуальной регрессии UI; `manual-tester`/MCP-раннер для ui-scenario; скрипты пост-анализа файлов (`ffprobe`/`AVAsset`, см. [`testing.md`](testing.md) Appendix A) для L5.
 - **TEST-6 (регрессии):** автор изменения, ломающего тесты, чинит их в том же PR; `@Ignore` без ссылки на трекер запрещён.
 - **Верификация:** наличие тестов на каждый AC (см. per-feature test-plans), зелёный CI, coverage-gate в пайплайне.
 

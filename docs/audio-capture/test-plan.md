@@ -9,7 +9,7 @@ status: draft
 
 # Test Plan: Audio Capture
 
-Консолидированный план — `docs/testplans/macos-screen-camera-recorder-test-plan.md`. Срез по фиче.
+Команды верификации и log-маппинг — `docs/spec/testing.md`; TC-id стабильны across feature-планов. Срез по фиче.
 
 ## Test Cases (owned)
 
