@@ -11,7 +11,7 @@ supersedes: docs/specs/2026-05-29-macos-screen-camera-recorder.md
 
 **Onset** — нативное macOS-приложение (Swift, Apple Silicon, macOS 26+) для одновременной записи экрана, внешней камеры и микрофона в **раздельные синхронизируемые файлы** для последующего монтажа. Название нейтрально к функциям (от «on set»), масштабируется на будущие режимы (композиция/наложение).
 
-Это корневой документ. Общая техническая основа — [`architecture.md`](architecture.md). **Кросс-каттинг нефункциональные требования (обязательны для всех фич)** — [`non-functional-requirements.md`](non-functional-requirements.md): производительность, автоматизированное тестирование/покрытие, нативный стек, расширяемость архитектуры, error-handling/crash-safety, CI/CD, security/privacy, a11y/локализация. Документация по фичам — в `docs/<feature>/` (spec.md + test-plan.md). Источник исследования — [`docs/research/research-macos-screen-camera-recorder.md`](../research/research-macos-screen-camera-recorder.md).
+Это корневой документ. Общая техническая основа — [`architecture.md`](architecture.md). **Кросс-каттинг нефункциональные требования (обязательны для всех фич)** — [`non-functional-requirements.md`](non-functional-requirements.md): производительность, автоматизированное тестирование/покрытие, нативный стек, расширяемость архитектуры, error-handling/crash-safety, CI/CD, security/privacy, a11y/локализация. Документация по фичам — в `docs/<feature>/` (spec.md + test-plan.md). Спеки консолидируют результаты предварительного исследования (рабочий артефакт, в репозитории не хранится).
 
 > NFR — не «по возможности», а контракт: каждая фича и каждый PR проверяются против релевантных NFR; нарушение критичных (PERF/TEST/STACK/EXT) — блокер.
 
