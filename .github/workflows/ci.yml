@@ -35,7 +35,7 @@ jobs:
     name: hard-gates
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       # no-print: a bare print( call in non-test app/library Swift sources is banned;
       # the Logger facade is the sanctioned replacement. KNOWN SHARP EDGE: this grep
@@ -146,22 +146,22 @@ jobs:
     name: build-test-app
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: Install xcbeautify
         run: brew install xcbeautify
 
       # build-for-testing (not xcodebuild test): compiles app + onsetTests bundle and
       # proves Presentation links into the final product, but does NOT execute tests.
-      # Rationale: the macos-26 runner currently ships macOS 26.4; running tests with a
-      # 26.5 deployment target on a 26.4 host is rejected by xcodebuild at launch time.
-      # Lowering the deployment target is not an option (26.5 is a product requirement).
-      # Real unit logic is covered by job `test-package` (swift test, macOS 26.0 compat —
-      # passes on 26.4 runners today). Executing onsetTests (app-level) and onsetUITests
-      # (require signing + display) is deferred to Phase 2 when a macOS ≥ 26.5 runner is
-      # available. The app-test target currently holds only the Xcode template stub; all
-      # substantive unit coverage lives in the SPM package.
-      # UI tests are skipped: they require code signing and can hang headlessly (Phase 2).
+      # Rationale: the onsetTests app-level target currently holds only the Xcode template
+      # stub — all substantive unit coverage lives in the SPM package and is executed by job
+      # `test-package` (swift test). Executing the app-hosted onsetTests requires launching
+      # the host app, which can hang on a headless runner; guarding `main` with a flake-prone
+      # job that covers only a stub is not worth the risk. Switch this step to `xcodebuild test`
+      # (drop -skip-testing only for onsetUITests) once real app-level tests exist.
+      # Deployment target was lowered to macOS 26.0 (>= would also run on the 26.4 runner host),
+      # so the previous 26.5-vs-26.4 host mismatch is no longer the blocker.
+      # UI tests are skipped: they require code signing and can hang headlessly.
       # Code signing fully disabled for the headless runner.
       - name: Build and test app target
         run: |
@@ -180,7 +180,7 @@ jobs:
     name: test-package
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       - name: swift test
         working-directory: Packages/OnsetKit
@@ -190,7 +190,7 @@ jobs:
     name: lint
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
       # swift-format from the Xcode toolchain (deterministic with the runner's Xcode).
       # Same invocation as scripts/check.sh --lint, with an explicit --configuration so
