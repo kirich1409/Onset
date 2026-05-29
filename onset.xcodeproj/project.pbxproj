@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		AA10000000000000000001 /* Presentation in Frameworks */ = {isa = PBXBuildFile; productRef = AA10000000000000000002 /* Presentation */; };
+		AA10000000000000000004 /* Infrastructure in Frameworks */ = {isa = PBXBuildFile; productRef = AA10000000000000000005 /* Infrastructure */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,6 +58,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AA10000000000000000001 /* Presentation in Frameworks */,
+				AA10000000000000000004 /* Infrastructure in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -118,6 +120,7 @@
 			name = onset;
 			packageProductDependencies = (
 				AA10000000000000000002 /* Presentation */,
+				AA10000000000000000005 /* Infrastructure */,
 			);
 			productName = onset;
 			productReference = 567BC2F22FC98DAA009322DB /* onset.app */;
@@ -403,6 +406,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = onset/onset.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -411,8 +415,8 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = onset/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -435,6 +439,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = onset/onset.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -443,8 +448,8 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = onset/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -595,6 +600,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AA10000000000000000003 /* XCLocalSwiftPackageReference "Packages/OnsetKit" */;
 			productName = Presentation;
+		};
+		AA10000000000000000005 /* Infrastructure */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA10000000000000000003 /* XCLocalSwiftPackageReference "Packages/OnsetKit" */;
+			productName = Infrastructure;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
