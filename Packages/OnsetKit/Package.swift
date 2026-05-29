@@ -34,5 +34,7 @@ let package = Package(
             resources: [.process("Resources/Localizable.xcstrings")]
         ),
         .testTarget(name: "DomainTests", dependencies: ["Domain"]),
+        .testTarget(name: "ApplicationTests", dependencies: ["Application", "Domain"]),
+        .testTarget(name: "PresentationTests", dependencies: ["Presentation", "Application", "Domain"]),
     ]
 )
