@@ -151,12 +151,22 @@ jobs:
       - name: Install xcbeautify
         run: brew install xcbeautify
 
+      # build-for-testing (not xcodebuild test): compiles app + onsetTests bundle and
+      # proves Presentation links into the final product, but does NOT execute tests.
+      # Rationale: the macos-26 runner currently ships macOS 26.4; running tests with a
+      # 26.5 deployment target on a 26.4 host is rejected by xcodebuild at launch time.
+      # Lowering the deployment target is not an option (26.5 is a product requirement).
+      # Real unit logic is covered by job `test-package` (swift test, macOS 26.0 compat —
+      # passes on 26.4 runners today). Executing onsetTests (app-level) and onsetUITests
+      # (require signing + display) is deferred to Phase 2 when a macOS ≥ 26.5 runner is
+      # available. The app-test target currently holds only the Xcode template stub; all
+      # substantive unit coverage lives in the SPM package.
       # UI tests are skipped: they require code signing and can hang headlessly (Phase 2).
       # Code signing fully disabled for the headless runner.
       - name: Build and test app target
         run: |
           set -euo pipefail
-          xcodebuild test \
+          xcodebuild build-for-testing \
             -project onset.xcodeproj \
             -scheme onset \
             -destination 'platform=macOS' \
