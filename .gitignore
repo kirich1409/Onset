@@ -1,0 +1,26 @@
+# Process / working artifacts (not part of the product)
+swarm-report/
+
+# macOS
+.DS_Store
+
+# Xcode (for upcoming Onset app)
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Claude Code — ignore personal/local state, keep shareable config
+# (e.g. .claude/settings.json, .claude/agents, .claude/skills, .claude/hooks могут коммититься)
+.claude/agent-memory/
+.claude/settings.local.json
+.claude/**/*.local.json
+
+# Misc
+*.log
