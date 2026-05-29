@@ -1,0 +1,20 @@
+# Process / working artifacts (not part of the product)
+swarm-report/
+
+# macOS
+.DS_Store
+
+# Xcode (for upcoming Onset app)
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Misc
+*.log
