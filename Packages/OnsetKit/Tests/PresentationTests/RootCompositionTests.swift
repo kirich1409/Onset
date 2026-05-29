@@ -1,7 +1,16 @@
+import Domain
 import Testing
 
 @testable import Application
 @testable import Presentation
+
+// MARK: - Test helpers
+
+/// Minimal fake `PermissionsProviding` for tests that don't care about TCC state.
+private final class AlwaysAuthorizedPermissions: PermissionsProviding, @unchecked Sendable {
+    func status(for kind: PermissionKind) -> PermissionStatus { .authorized }
+    func request(_ kind: PermissionKind) async -> PermissionStatus { .authorized }
+}
 
 // MARK: - RootComposition smoke tests
 
@@ -15,18 +24,19 @@ struct RootCompositionTests {
 
     @Test("RootComposition constructs without crashing")
     func rootCompositionConstructs() {
-        let root = RootComposition()
-        // Smoke: all three application-layer objects are accessible.
+        let root = RootComposition(permissions: AlwaysAuthorizedPermissions())
+        // Smoke: all application-layer objects are accessible.
         // Non-optional lets are by construction non-nil — the meaningful assertion is
         // that RootComposition() completes and its graph is reachable.
         _ = root.coordinator
         _ = root.settingsStore
         _ = root.healthMonitor
+        _ = root.permissions
     }
 
     @Test("coordinator, settingsStore, and healthMonitor are the same instances wired by the root")
     func rootCompositionWiresIdenticalInstances() async {
-        let root = RootComposition()
+        let root = RootComposition(permissions: AlwaysAuthorizedPermissions())
         // RootComposition creates shared instances and passes them by reference.
         // The coordinator holds settingsStore and healthMonitor as private lets, so we
         // verify the root's public properties refer to the same objects it constructed

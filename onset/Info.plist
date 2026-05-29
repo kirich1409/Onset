@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Onset records your camera to a separate video file alongside the screen recording.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Onset records microphone audio to a separate file alongside the screen recording.</string>
+</dict>
+</plist>
