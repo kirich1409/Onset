@@ -9,5 +9,5 @@ import Domain
 public enum RootComposition {
     public static let appLayer = "Presentation"
     public static let applicationLayer = ApplicationPlaceholder.layer
-    public static let domainLayer = DomainPlaceholder.layer
+    public static let domainLayer = "Domain"
 }

@@ -5,5 +5,5 @@ import Domain
 // SettingsStore, RuntimeHealthMonitor, etc.
 public enum ApplicationPlaceholder {
     public static let layer = "Application"
-    public static let dependsOn = DomainPlaceholder.layer
+    public static let dependsOn = "Domain"
 }

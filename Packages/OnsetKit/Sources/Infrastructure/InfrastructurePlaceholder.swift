@@ -5,5 +5,5 @@ import Domain
 // VideoToolbox / CoreMedia). Infrastructure depends only on Domain.
 public enum InfrastructurePlaceholder {
     public static let layer = "Infrastructure"
-    public static let dependsOn = DomainPlaceholder.layer
+    public static let dependsOn = "Domain"
 }
