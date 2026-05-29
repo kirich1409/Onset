@@ -1,6 +1,7 @@
 import CoreMedia
 import Foundation
 import Testing
+
 @testable import Application
 @testable import Domain
 
@@ -27,6 +28,8 @@ private final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
 }
 
 private final class FakeEncodingWriter: EncodingWriter, @unchecked Sendable {
+    // Always healthy; cannot exercise the isolateAndContinue failure path —
+    // extend for #36 failure-mode tests.
     var health: WriterHealth = .alive
     var isAlive: Bool = true
 
@@ -53,8 +56,8 @@ struct ApplicationDITests {
             clock: clock,
             healthMonitor: monitor,
             settingsStore: store,
-            sources: [source],
-            writers: [writer]
+            makeSources: { [source] },
+            makeWriter: { writer }
         )
 
         // Verify the coordinator is live (start/stop are smoke-tested below)
@@ -97,10 +100,12 @@ struct ApplicationDITests {
 
     @Test("DI graph is constructible without a concrete clock (nil seam)")
     func coordinatorNoClockSeam() async {
-        let store = SettingsStore()
+        let suiteName = "test-nil-clock-\(UUID())"
+        let store = SettingsStore(defaults: UserDefaults(suiteName: suiteName)!)
+        defer { UserDefaults().removePersistentDomain(forName: suiteName) }
         let monitor = RuntimeHealthMonitor()
         let coordinator = RecordingSessionCoordinator(
-            clock: nil,   // concrete ClockProviding not yet available (#34)
+            clock: nil,  // concrete ClockProviding not yet available (#34)
             healthMonitor: monitor,
             settingsStore: store
         )

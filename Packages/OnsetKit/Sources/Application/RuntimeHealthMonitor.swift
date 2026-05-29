@@ -4,9 +4,11 @@ import Foundation
 
 /// Monitors runtime health signals and surfaces them to the session coordinator.
 ///
-/// Runs as an `actor` so its state is safe to read from any concurrency context,
-/// and so it can be injected into `RecordingSessionCoordinator` (also an actor)
-/// without requiring `@unchecked Sendable`.
+/// Runs as an `actor` because it will own mutable aggregated runtime stats
+/// (DroppedFrameStats accumulation, #39) on the control plane. Actor isolation
+/// ensures those mutations are safe without locks. (A plain `final class` holding
+/// only the immutable `ProcessInfo` `let` would be implicitly `Sendable`, but this
+/// type is designed to grow stateful aggregation — actor is the right primitive here.)
 ///
 /// Current capability: reads the system thermal state on demand via `ProcessInfo`.
 ///

@@ -16,9 +16,9 @@ import Domain
 ///   `clock: nil` until a concrete implementation lands. The composition root will
 ///   inject the real clock here once `#34` is merged — no other file needs to change.
 ///
-/// - Note: Capture sources (#25/#26/#28) and encoding writers (#32) are empty arrays
-///   until those Infrastructure implementations exist; the coordinator is constructed
-///   now so the DI graph is wired and exercisable in tests.
+/// - Note: Capture sources (#25/#26/#28) and encoding writers (#32) are per-session
+///   factories until those Infrastructure implementations exist; the coordinator is
+///   constructed now so the DI graph is wired and exercisable in tests.
 @MainActor
 public final class RootComposition {
 
@@ -38,11 +38,11 @@ public final class RootComposition {
         let store = SettingsStore()
         let monitor = RuntimeHealthMonitor()
         let sessionCoordinator = RecordingSessionCoordinator(
-            clock: nil,        // Concrete ClockProviding lands in #34
+            clock: nil,  // Concrete ClockProviding lands in #34
             healthMonitor: monitor,
-            settingsStore: store,
-            sources: [],       // Infrastructure sources land in #25/#26/#28
-            writers: []        // Infrastructure writers land in #32
+            settingsStore: store
+                // makeSources / makeWriter: default placeholder factories are used until
+                // Infrastructure sources (#25/#26/#28) and writers (#32) are wired.
         )
 
         self.settingsStore = store
