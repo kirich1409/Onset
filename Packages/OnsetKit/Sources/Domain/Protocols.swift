@@ -10,7 +10,7 @@ public enum SourceKind: Sendable, Equatable {
 }
 
 /// Identifies the track type inside an output file.
-public enum TrackKind: Sendable, Equatable {
+public enum TrackKind: Sendable, Equatable, Hashable {
     case video
     case audio
 }
@@ -22,7 +22,10 @@ public enum TrackKind: Sendable, Equatable {
 /// The recording session owns the one canonical `ClockProviding` instance and passes it
 /// into each `CaptureSource` and `EncodingWriter` so that all components share the same
 /// timing reference without reaching into Infrastructure.
-public protocol ClockProviding {
+///
+/// Implementers are responsible for their own thread-safety (typically backed by
+/// `CMClockGetHostTimeClock()` which is already safe to call from any thread).
+public protocol ClockProviding: Sendable {
     /// The underlying host-time `CMClock` used as the reference for all PTS conversions.
     var referenceClock: CMClock { get }
 
@@ -42,7 +45,11 @@ public protocol ClockProviding {
 ///
 /// Implementations live in Infrastructure. Domain never imports ScreenCaptureKit or
 /// AVFoundation directly; this protocol is the seam that keeps the boundary clean.
-public protocol CaptureSource: AnyObject {
+///
+/// Implementers are responsible for their own thread-safety. Capture callbacks run on
+/// dedicated GCD serial queues (`com.app.capture.{screen,camera,audio}`); implementers
+/// must not introduce actor hops on the hot sample path.
+public protocol CaptureSource: AnyObject, Sendable {
     /// The kind of media this source captures.
     var kind: SourceKind { get }
 
@@ -59,6 +66,9 @@ public protocol CaptureSource: AnyObject {
     func start(emittingTo sink: any SampleSink) throws
 
     /// Stops capturing. Must be idempotent.
+    ///
+    /// Non-throwing by design (matches architecture.md). Stop failures surface via the
+    /// session-level `isolateAndContinue` path rather than through an error on this call.
     func stop()
 }
 
@@ -68,7 +78,11 @@ public protocol CaptureSource: AnyObject {
 ///
 /// Implemented by `SampleRouter` in Application. The router fans out to the writers
 /// and enforces backpressure / lossless audio semantics before forwarding.
-public protocol SampleSink: AnyObject {
+///
+/// Implementers are responsible for their own thread-safety. `receive(_:kind:)` is
+/// called from GCD capture queues and must be safe to invoke without any actor isolation.
+/// Lossless audio is enforced at this seam — implementations must never drop audio samples.
+public protocol SampleSink: AnyObject, Sendable {
     /// Called by a `CaptureSource` for every sample it produces.
     ///
     /// Implementations must be safe to call from a GCD capture queue; no actor
@@ -83,13 +97,16 @@ public protocol SampleSink: AnyObject {
 ///
 /// Implemented by `AVAssetWriterPipeline` in Infrastructure.
 ///
-/// - Note on `isAlive` thread safety: **implementers must back this property with an
-///   atomic load using acquire/release semantics** (e.g. `OSAllocatedUnfairLock` or
-///   `Atomic<Bool>`) — not a lock, and not an actor-isolated stored property — because
-///   `isAlive` may be polled from the recording-session control plane concurrently with
-///   sample delivery callbacks. The protocol declares the requirement; enforcement is the
-///   implementer's responsibility.
-public protocol EncodingWriter: AnyObject {
+/// Implementers are responsible for their own thread-safety. All methods may be called
+/// from GCD capture queues or the session control plane concurrently.
+///
+/// - Note on `isAlive`/`health` relationship: `isAlive == true` implies `health == .alive`.
+///   `isAlive` is the **hot-path atomic subset** — polled wait-free from the sample thread
+///   using acquire/release semantics (e.g. `OSAllocatedUnfairLock` or `Atomic<Bool>`).
+///   `health` is the richer **control-plane signal** that may lag `isAlive` slightly; it
+///   carries additional states (`.partial`, `.failed`) readable by the session coordinator.
+///   Never use `health` on the sample path — poll `isAlive` there instead.
+public protocol EncodingWriter: AnyObject, Sendable {
     /// Prepares the writer for the described output. Must be called before `beginSession`.
     func prepare(_ descriptor: OutputDescriptor) throws
 
@@ -107,7 +124,7 @@ public protocol EncodingWriter: AnyObject {
 
     /// `true` as long as the writer is able to accept and process samples.
     ///
-    /// Implementers must back this with an atomic load (acquire/release semantics),
-    /// NOT a lock — see type-level note above.
+    /// Backed by an atomic load (acquire/release semantics), NOT a lock — see the
+    /// type-level note on the `isAlive`/`health` relationship above.
     var isAlive: Bool { get }
 }

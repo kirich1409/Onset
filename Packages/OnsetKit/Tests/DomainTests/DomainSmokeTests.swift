@@ -8,13 +8,13 @@ import Testing
 // These fakes exist solely to demonstrate that the Domain protocols (#17) are
 // sufficient to build test doubles without any Infrastructure dependency.
 
-private final class FakeClock: ClockProviding {
+private final class FakeClock: ClockProviding, @unchecked Sendable {
     let referenceClock: CMClock = CMClockGetHostTimeClock()
     func now() -> CMTime { .zero }
     func convert(_ t: CMTime, from src: CMClock) -> CMTime { t }
 }
 
-private final class FakeCaptureSource: CaptureSource {
+private final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
     let kind: SourceKind
     let sourceClock: CMClock = CMClockGetHostTimeClock()
     private(set) var configured = false
@@ -27,14 +27,14 @@ private final class FakeCaptureSource: CaptureSource {
     func stop() { started = false }
 }
 
-private final class FakeSampleSink: SampleSink {
+private final class FakeSampleSink: SampleSink, @unchecked Sendable {
     private(set) var receivedKinds: [SourceKind] = []
     func receive(_ buf: CMSampleBuffer, kind: SourceKind) {
         receivedKinds.append(kind)
     }
 }
 
-private final class FakeEncodingWriter: EncodingWriter {
+private final class FakeEncodingWriter: EncodingWriter, @unchecked Sendable {
     private(set) var prepared = false
     private(set) var sessionBegan = false
     var health: WriterHealth = .alive
@@ -125,16 +125,16 @@ struct DomainValueTypeTests {
             container: .mov,
             tracks: [.video, .audio]
         )
+        // package init — accessible within OnsetKit; external clients cannot call this.
         let recording = RecordingConfiguration(
             sources: [config],
-            outputs: [output],
-            codec: .hevc,
-            container: .mov
+            outputs: [output]
         )
         #expect(recording.sources.count == 1)
         #expect(recording.outputs.count == 1)
-        #expect(recording.codec == .hevc)
-        #expect(recording.container == .mov)
+        // Codec/container live on each OutputDescriptor; there is no top-level duplicate.
+        #expect(recording.outputs[0].codec == .hevc)
+        #expect(recording.outputs[0].container == .mov)
     }
 }
 
@@ -158,15 +158,38 @@ struct DomainProtocolFakeTests {
     }
 
     @Test("FakeSampleSink is constructible and conforms to SampleSink")
-    func sampleSinkFakeConforms() {
-        // Proves the fake can be built; actual receive() is tested via CaptureSource.
-        let sink: any SampleSink = FakeSampleSink()
-        #expect(sink is FakeSampleSink)
+    func sampleSinkFakeConforms() throws {
+        let fake = FakeSampleSink()
+        let sink: any SampleSink = fake
+
+        // Construct a minimal timing-only CMSampleBuffer (no data, no format description).
+        // The fake never inspects the buffer content, so an empty buffer is sufficient.
+        var buffer: CMSampleBuffer?
+        let status = CMSampleBufferCreate(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: nil,
+            dataReady: true,
+            makeDataReadyCallback: nil,
+            refcon: nil,
+            formatDescription: nil,
+            sampleCount: 0,
+            sampleTimingEntryCount: 0,
+            sampleTimingArray: nil,
+            sampleSizeEntryCount: 0,
+            sampleSizeArray: nil,
+            sampleBufferOut: &buffer
+        )
+        #expect(status == noErr)
+        let buf = try #require(buffer)
+
+        sink.receive(buf, kind: .audio)
+        #expect(fake.receivedKinds == [.audio])
     }
 
     @Test("FakeEncodingWriter is constructible and conforms to EncodingWriter")
     func encodingWriterFakeConforms() throws {
-        let writer: any EncodingWriter = FakeEncodingWriter()
+        let fake = FakeEncodingWriter()
+        let writer: any EncodingWriter = fake
         let output = OutputDescriptor(
             destination: URL(fileURLWithPath: "/tmp/out.mov"),
             codec: .hevc,
@@ -177,5 +200,8 @@ struct DomainProtocolFakeTests {
         writer.beginSession(atSourceTime: .zero)
         #expect(writer.health == .alive)
         #expect(writer.isAlive == true)
+        // Assert dispatch: cast to concrete fake to prove methods were actually called.
+        #expect(fake.prepared == true)
+        #expect(fake.sessionBegan == true)
     }
 }

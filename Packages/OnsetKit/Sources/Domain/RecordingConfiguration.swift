@@ -27,26 +27,35 @@ public enum ValidationIssue: Error, Sendable, Equatable {
 
 /// A guaranteed-realizable recording configuration.
 ///
-/// Constructed by the Validator (#31); `init` is non-public so external modules cannot
-/// fabricate an unvalidated configuration. The only way to obtain a value of this type is
-/// through a successful validation pass.
+/// Constructed **only** by the Validator (#31, Infrastructure module). The init is
+/// `package` (not `public`) so that the Validator — which lives in a separate Swift
+/// module within the same OnsetKit package — can construct values of this type, while
+/// external clients of OnsetKit cannot fabricate an unvalidated configuration.
+///
+/// The "only Validator constructs this" invariant is upheld by convention and code
+/// review: other same-package targets could technically call the `package init`, but
+/// only the Validator is architecturally permitted to do so.
 ///
 /// Carries all parameters the `RecordingSessionCoordinator` needs to set up capture
 /// sources and encoding writers without any further validation.
-///
-/// - Note: No `public init` is declared. For a `public struct`, the synthesised
-///   memberwise initialiser has `internal` access by default, which is the enforcement
-///   mechanism: code outside this module cannot construct a value of this type directly.
 public struct RecordingConfiguration: Sendable, Equatable {
     /// Per-source capture parameters, one entry per active source.
     public let sources: [SourceConfiguration]
 
     /// Output file descriptors — typically one per source group (e.g. screen+audio, camera).
+    ///
+    /// Each descriptor carries its own `codec` and `container`; outputs may legitimately
+    /// differ (e.g. the screen file uses HEVC in MOV while the camera file uses H.264 in MP4).
+    /// There is no top-level codec/container on `RecordingConfiguration` — per-output is authoritative.
     public let outputs: [OutputDescriptor]
 
-    /// Video codec to apply across all video tracks.
-    public let codec: CodecKind
-
-    /// Container format for all output files.
-    public let container: ContainerKind
+    /// Designated initialiser. `package` access lets same-package modules (i.e. the
+    /// Validator in Infrastructure) construct validated configurations; public callers cannot.
+    package init(
+        sources: [SourceConfiguration],
+        outputs: [OutputDescriptor]
+    ) {
+        self.sources = sources
+        self.outputs = outputs
+    }
 }

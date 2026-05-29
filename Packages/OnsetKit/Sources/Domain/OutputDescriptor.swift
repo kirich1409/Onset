@@ -33,13 +33,16 @@ public struct OutputDescriptor: Sendable, Equatable {
     public let container: ContainerKind
 
     /// The set of tracks this file contains (e.g. `[.video]`, `[.audio]`, `[.video, .audio]`).
-    public let tracks: [TrackKind]
+    ///
+    /// Invariant: `tracks` must be non-empty (enforced by the Validator, #31).
+    /// Using `Set` eliminates the duplicate-track illegal state representable by `[TrackKind]`.
+    public let tracks: Set<TrackKind>
 
     public init(
         destination: URL,
         codec: CodecKind,
         container: ContainerKind,
-        tracks: [TrackKind]
+        tracks: Set<TrackKind>
     ) {
         self.destination = destination
         self.codec = codec

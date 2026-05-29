@@ -3,6 +3,9 @@
 /// Created by the recording session when setting up a capture pipeline. All fields
 /// carry the validated, realizable values chosen by the coordinator — no validation
 /// logic lives here.
+///
+/// - Note: Currently models video parameters (resolution/fps). Audio source parameters
+///   (sample rate, channel count) are introduced with audio capture (#28).
 public struct SourceConfiguration: Sendable, Equatable {
     /// The kind of source these parameters target.
     public let kind: SourceKind
