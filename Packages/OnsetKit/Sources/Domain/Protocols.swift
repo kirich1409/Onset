@@ -128,3 +128,26 @@ public protocol EncodingWriter: AnyObject, Sendable {
     /// type-level note on the `isAlive`/`health` relationship above.
     var isAlive: Bool { get }
 }
+
+// MARK: - DropReason
+
+/// The reason a video frame was dropped by the `SampleRouter` backpressure mechanism.
+///
+/// Audio samples are never dropped (lossless audio guarantee). `DropReason` applies to
+/// video tracks only.
+///
+/// - Note: Issue #39 (`DroppedFrameStats`) will consume this enum to build per-source
+///   drop summaries that are included in the `recording.stop` event.
+public enum DropReason: Sendable, Equatable, CaseIterable {
+    /// The bounded video queue for this source was full; oldest frame evicted.
+    case captureBound
+
+    /// The `CVPixelBuffer` / `IOSurface` pool was exhausted; no buffer available to retain.
+    case poolExhausted
+
+    /// The hardware VideoToolbox encoder input queue was full; frame could not be submitted.
+    case encoderBound
+
+    /// Disk write throughput is saturated; the writer's input queue rejected the frame.
+    case diskBound
+}
