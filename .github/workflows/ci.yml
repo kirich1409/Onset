@@ -26,12 +26,16 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Least-privilege: all jobs are read-only consumers (no status writes needed).
+permissions:
+  contents: read
+
 jobs:
   hard-gates:
     name: hard-gates
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
       # no-print: a bare print( call in non-test app/library Swift sources is banned;
       # the Logger facade is the sanctioned replacement. KNOWN SHARP EDGE: this grep
@@ -70,15 +74,19 @@ jobs:
           fi
           echo "no-network: OK"
 
-      # deps-audit: NFR-STACK — Apple frameworks only. No CocoaPods anywhere, and no
-      # remote SPM packages in the Xcode project. The inline allowlist is EMPTY: adding
-      # even a dev-test dependency requires the repo owner to edit this workflow.
+      # deps-audit: NFR-STACK — Apple frameworks only. No CocoaPods anywhere, no
+      # remote SPM packages in the Xcode project, and no external SPM dependencies in
+      # Package.swift. The inline allowlist is EMPTY: adding even a dev-test dependency
+      # requires the repo owner to edit this workflow.
       - name: deps-audit
         run: |
           set -euo pipefail
-          if /usr/bin/find . -name 'Podfile' -o -name 'Podfile.lock' | /usr/bin/grep -q . ; then
+          if /usr/bin/find . \( -name 'Podfile' -o -name 'Podfile.lock' \) \
+               -not -path '*/.build/*' -not -path '*/DerivedData/*' \
+             | /usr/bin/grep -q . ; then
             echo "::error::deps-audit: CocoaPods detected (Podfile/Podfile.lock). NFR-STACK: Apple frameworks only."
-            /usr/bin/find . -name 'Podfile' -o -name 'Podfile.lock'
+            /usr/bin/find . \( -name 'Podfile' -o -name 'Podfile.lock' \) \
+              -not -path '*/.build/*' -not -path '*/DerivedData/*'
             exit 1
           fi
           if /usr/bin/grep -REn 'XCRemoteSwiftPackageReference' onset.xcodeproj/project.pbxproj ; then
@@ -99,11 +107,20 @@ jobs:
       #   Presentation.dependencies  == {Application, Domain}
       #   nothing depends on Presentation
       #   Application and Infrastructure do not depend on each other
+      #
+      # The closed-set clause (keys == [...]) ensures a new regular target with an
+      # illegal edge (e.g. depending on Presentation) cannot silently pass the assertion
+      # by simply not being enumerated.
       - name: layer-graph
         working-directory: Packages/OnsetKit
         run: |
           set -euo pipefail
           swift package dump-package > /tmp/onset-package.json
+          # deps-audit: no external SPM dependencies in Package.swift (NFR-STACK).
+          jq -e '.dependencies == []' /tmp/onset-package.json > /dev/null || {
+            echo "::error::deps-audit: external SPM dependency in Package.swift (NFR-STACK: Apple frameworks only, allowlist empty)."
+            exit 1
+          }
           jq -e '
             # Map of library-target name -> sorted list of its target dependency names.
             ( [ .targets[]
@@ -114,9 +131,11 @@ jobs:
               and ($deps.Application    == ["Domain"])
               and ($deps.Infrastructure == ["Domain"])
               and ($deps.Presentation   == ["Application","Domain"])
+              and (($deps | keys) == ["Application","Domain","Infrastructure","Presentation"])
           ' /tmp/onset-package.json > /dev/null || {
             echo "::error::layer-graph: dependency graph violates the inward-layer contract."
             echo "Expected: Domain=[]  Application=[Domain]  Infrastructure=[Domain]  Presentation=[Application,Domain]"
+            echo "Closed-set expected targets: Application, Domain, Infrastructure, Presentation"
             echo "Actual:"
             jq '[ .targets[] | select(.type=="regular") | { (.name): ([.dependencies[].byName[0]] | sort) } ] | add' /tmp/onset-package.json
             exit 1
@@ -127,7 +146,7 @@ jobs:
     name: build-test-app
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
       - name: Install xcbeautify
         run: brew install xcbeautify
@@ -136,7 +155,7 @@ jobs:
       # Code signing fully disabled for the headless runner.
       - name: Build and test app target
         run: |
-          set -o pipefail
+          set -euo pipefail
           xcodebuild test \
             -project onset.xcodeproj \
             -scheme onset \
@@ -151,7 +170,7 @@ jobs:
     name: test-package
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
       - name: swift test
         working-directory: Packages/OnsetKit
@@ -161,7 +180,7 @@ jobs:
     name: lint
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
 
       # swift-format from the Xcode toolchain (deterministic with the runner's Xcode).
       # Same invocation as scripts/check.sh --lint, with an explicit --configuration so
@@ -181,6 +200,9 @@ jobs:
           set -euo pipefail
           curl -fsSL -o /tmp/portable_swiftlint.zip \
             https://github.com/realm/SwiftLint/releases/download/0.63.3/portable_swiftlint.zip
+          # TOFU-pin for SwiftLint 0.63.3 official release artifact.
+          # SHA-256 verified against https://github.com/realm/SwiftLint/releases/download/0.63.3/portable_swiftlint.zip
+          echo "fb045e85e7cb3374f42a4840b6b85a0106302afa69035c0c6f29af4a44c810b6  /tmp/portable_swiftlint.zip" | shasum -a 256 -c -
           mkdir -p /tmp/swiftlint-0.63.3
           unzip -o -q /tmp/portable_swiftlint.zip -d /tmp/swiftlint-0.63.3
           /tmp/swiftlint-0.63.3/swiftlint version
