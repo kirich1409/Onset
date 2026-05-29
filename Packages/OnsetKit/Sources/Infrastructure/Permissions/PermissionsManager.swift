@@ -2,22 +2,24 @@ import AVFoundation
 import CoreGraphics
 import Domain
 import Foundation
+import UserNotifications
 
 // MARK: - PermissionsManager
 
-/// Infrastructure implementation of `PermissionsProviding`.
+/// Infrastructure implementation of `PermissionsProviding` and `NotificationPermissionProviding`.
 ///
 /// Wraps native TCC APIs:
 /// - **Screen Recording**: CoreGraphics `CGPreflightScreenCaptureAccess` / `CGRequestScreenCaptureAccess`
 /// - **Camera**: `AVCaptureDevice.authorizationStatus(for: .video)` / `requestAccess(for: .video)`
 /// - **Microphone**: `AVCaptureDevice.authorizationStatus(for: .audio)` / `requestAccess(for: .audio)`
+/// - **Notifications**: `UNUserNotificationCenter.notificationSettings()` / `requestAuthorization(options:)`
 ///
 /// `UserDefaults` is injected via the initializer (mirroring `SettingsStore`) — the manager
 /// never reaches `UserDefaults.standard` inside method bodies (AC: no hidden-singleton access).
 ///
 /// A `final class` (not an actor) because `status(for:)` is synchronous; actor isolation
 /// would force the method async or `nonisolated`, which adds friction without benefit.
-public final class PermissionsManager: PermissionsProviding {
+public final class PermissionsManager: PermissionsProviding, NotificationPermissionProviding {
 
     // MARK: - Dependencies
 
@@ -122,6 +124,45 @@ public final class PermissionsManager: PermissionsProviding {
         return result
     }
 
+    // MARK: - NotificationPermissionProviding
+
+    /// Returns the current notification authorization status without presenting a dialog.
+    ///
+    /// Reads `UNUserNotificationCenter.notificationSettings()` asynchronously — there is no
+    /// synchronous accessor for notification authorization status on macOS.
+    public func authorizationStatus() async -> PermissionStatus {
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        let result = PermissionsManager.mapNotificationStatus(settings.authorizationStatus)
+        Log.emitPermission(type: "notifications", status: "preflight:\(result.logLabel)")
+        return result
+    }
+
+    /// Requests notification authorization (alert + sound), then returns the resulting status.
+    ///
+    /// The `UNAuthorizationOptions` (`.alert`, `.sound`) are hardcoded here in Infrastructure —
+    /// they do not cross the Domain boundary. On a thrown error (e.g. the system refuses the
+    /// request), the error is logged and `.denied` is returned immediately — the thrown error
+    /// indicates the authorization was not granted, and re-reading `authorizationStatus()` on
+    /// a fresh install would return `.notDetermined` rather than `.denied`, violating the
+    /// conservative-fallback contract.
+    public func requestAuthorization() async -> PermissionStatus {
+        Log.emitPermission(type: "notifications", status: "requesting")
+        do {
+            _ = try await UNUserNotificationCenter.current()
+                .requestAuthorization(options: [.alert, .sound])
+        } catch {
+            Log.permission.warning(
+                "UNUserNotificationCenter.requestAuthorization failed: \(String(reflecting: error), privacy: .public)"
+            )
+            return .denied
+        }
+        // Re-read the authoritative status from settings after the request, consistent with
+        // how camera/mic request() reads AVCaptureDevice.authorizationStatus after requestAccess.
+        let result = await authorizationStatus()
+        Log.emitPermission(type: "notifications", status: "requested:\(result.logLabel)")
+        return result
+    }
+
     // MARK: - Internal mapping
 
     /// Maps `AVAuthorizationStatus` to `PermissionStatus`.
@@ -145,6 +186,37 @@ public final class PermissionsManager: PermissionsProviding {
             // Log at warning level so a future OS enum addition is surfaced, not silently coerced.
             Log.permission.warning(
                 "AVAuthorizationStatus unknown raw=\(avStatus.rawValue, privacy: .public); treating as denied"
+            )
+            return .denied
+        }
+    }
+
+    /// Maps `UNAuthorizationStatus` to `PermissionStatus`.
+    ///
+    /// Extracted as a `static func` so it can be unit-tested without touching the live OS.
+    /// `UNAuthorizationStatus` is an imported non-frozen Obj-C enum; `@unknown default`
+    /// handles any future cases safely (mirror of `mapAVStatus` conservative strategy).
+    static func mapNotificationStatus(_ status: UNAuthorizationStatus) -> PermissionStatus {
+        switch status {
+        case .notDetermined:
+            return .notDetermined
+        case .denied:
+            return .denied
+        case .authorized:
+            return .authorized
+        case .provisional:
+            // Provisional delivery (quiet, no interruption) still delivers notifications.
+            // The interrupting fallback is the NSStatusItem indicator (#42), so provisional
+            // counts as authorized for this seam's purposes.
+            return .authorized
+        // Note: .ephemeral is @available(macOS, unavailable) — App-Clip-only, not reachable
+        // on macOS. The case cannot appear in this switch; the @unknown default covers it
+        // defensively if Apple ever adds an analogous case in a future macOS SDK.
+        @unknown default:
+            // Future UNAuthorizationStatus value: treat as denied (safe conservative fallback).
+            // Log at warning level so a future OS enum addition is surfaced, not silently coerced.
+            Log.permission.warning(
+                "UNAuthorizationStatus unknown raw=\(status.rawValue, privacy: .public); treating as denied"
             )
             return .denied
         }
