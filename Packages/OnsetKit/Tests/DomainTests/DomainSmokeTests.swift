@@ -23,8 +23,8 @@ private final class FakeCaptureSource: CaptureSource, @unchecked Sendable {
     init(kind: SourceKind) { self.kind = kind }
 
     func configure(_ c: SourceConfiguration) throws { configured = true }
-    func start(emittingTo sink: any SampleSink) throws { started = true }
-    func stop() { started = false }
+    func start(emittingTo sink: any SampleSink) async throws { started = true }
+    func stop() async { started = false }
 }
 
 private final class FakeSampleSink: SampleSink, @unchecked Sendable {

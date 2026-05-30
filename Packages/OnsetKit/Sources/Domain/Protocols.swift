@@ -60,16 +60,30 @@ public protocol CaptureSource: AnyObject, Sendable {
     var sourceClock: CMClock { get }
 
     /// Configures the source with the given parameters. Must be called before `start`.
+    ///
+    /// Synchronous: performs only local property setup (no I/O, no SCK/AVFoundation
+    /// async calls). The async work (content fetch, stream start) is deferred to `start`.
     func configure(_ config: SourceConfiguration) throws
 
     /// Starts capturing and delivers samples to `sink`.
-    func start(emittingTo sink: any SampleSink) throws
+    ///
+    /// Async to allow await-ing platform-level I/O (e.g. `SCShareableContent.current`,
+    /// `SCStream.startCapture()`) without blocking a Swift-concurrency cooperative thread.
+    /// Blocking on these calls from a sync context (via `DispatchSemaphore`) can stall the
+    /// cooperative thread pool and cause priority inversion when called from an actor.
+    ///
+    /// - Parameter sink: The downstream sample router that receives captured buffers.
+    /// - Throws: Implementation-specific errors (e.g. `ScreenCaptureError`, permission errors).
+    func start(emittingTo sink: any SampleSink) async throws
 
     /// Stops capturing. Must be idempotent.
     ///
-    /// Non-throwing by design (matches architecture.md). Stop failures surface via the
-    /// session-level `isolateAndContinue` path rather than through an error on this call.
-    func stop()
+    /// Async to allow await-ing the platform-level stream teardown (e.g.
+    /// `SCStream.stopCapture()`) without blocking a Swift-concurrency cooperative thread.
+    ///
+    /// Non-throwing by design (matches architecture.md). Stop failures are logged by the
+    /// implementation and surface via the session-level `isolateAndContinue` path (#36).
+    func stop() async
 }
 
 // MARK: - SampleSink
