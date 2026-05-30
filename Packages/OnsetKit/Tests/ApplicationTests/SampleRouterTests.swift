@@ -199,9 +199,9 @@ struct SampleRouterTests {
         ])
 
         // Initial state.
-        #expect(router.screenRoutedCount == 0)
-        #expect(router.cameraRoutedCount == 0)
-        #expect(router.audioRoutedCount == 0)
+        #expect(router.screenReceivedCount == 0)
+        #expect(router.cameraReceivedCount == 0)
+        #expect(router.audioReceivedCount == 0)
 
         // Route some samples.
         router.receive(try makeSampleBuffer(), kind: .screen)
@@ -211,9 +211,9 @@ struct SampleRouterTests {
         router.receive(try makeSampleBuffer(), kind: .audio)
         router.receive(try makeSampleBuffer(), kind: .audio)
 
-        // Audio counter is 3 (not 6 = 3 calls × 2 writers).
-        #expect(router.screenRoutedCount == 2)
-        #expect(router.cameraRoutedCount == 1)
-        #expect(router.audioRoutedCount == 3)
+        // Audio counter is 3 (not 6 = 3 calls x 2 writers) — ingress tally, not fan-out tally.
+        #expect(router.screenReceivedCount == 2)
+        #expect(router.cameraReceivedCount == 1)
+        #expect(router.audioReceivedCount == 3)
     }
 }

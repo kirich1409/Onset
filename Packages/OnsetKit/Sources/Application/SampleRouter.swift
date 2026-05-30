@@ -60,10 +60,12 @@ public struct WriterBinding: Sendable {
 ///   beyond the existing writer array walk
 ///
 /// ## Per-source counters
-/// `screenRoutedCount`, `cameraRoutedCount`, and `audioRoutedCount` count successful
-/// `receive` calls per source.  They are read on the control plane (coordinator) after
-/// stop; `.relaxed` ordering is correct and cheapest.  Real per-source drop accounting
-/// (bounded queue, drop-oldest) lands in issue #39 (`DroppedFrameStats`).
+/// `screenReceivedCount`, `cameraReceivedCount`, and `audioReceivedCount` count
+/// `receive` calls per source kind — an ingress tally, incremented unconditionally on
+/// every `receive` call regardless of whether the target writer is alive.  Real per-source
+/// **drop** accounting (bounded queue, drop-oldest) is deferred to issue #39
+/// (`DroppedFrameStats`); #35 introduces no drop path.  These counters are read on the
+/// control plane after stop; `.relaxed` ordering is correct and cheapest.
 ///
 /// ## Thread-safety
 /// All stored state is either `let`-immutable (writers array, video-source writers) or
@@ -84,17 +86,19 @@ public final class SampleRouter: SampleSink, @unchecked Sendable {
     /// The writer for `.camera` video, if one was provided.
     private let cameraWriter: (any EncodingWriter)?
 
-    // MARK: - Per-source routed-sample counters
+    // MARK: - Per-source ingress counters
 
-    /// Number of `.screen` video `receive` calls forwarded to the screen writer.
-    private let _screenRoutedCount = Atomic<UInt64>(0)
+    /// Ingress count for `.screen` buffers.  Incremented on every `receive(.screen)`
+    /// call; does NOT reflect whether the writer was alive.
+    private let _screenReceivedCount = Atomic<UInt64>(0)
 
-    /// Number of `.camera` video `receive` calls forwarded to the camera writer.
-    private let _cameraRoutedCount = Atomic<UInt64>(0)
+    /// Ingress count for `.camera` buffers.  Incremented on every `receive(.camera)`
+    /// call; does NOT reflect whether the writer was alive.
+    private let _cameraReceivedCount = Atomic<UInt64>(0)
 
-    /// Number of `.audio` `receive` calls fanned out (one increment per call,
-    /// regardless of how many writers are alive).
-    private let _audioRoutedCount = Atomic<UInt64>(0)
+    /// Ingress count for `.audio` buffers.  One increment per `receive(.audio)` call,
+    /// not per fan-out writer.
+    private let _audioReceivedCount = Atomic<UInt64>(0)
 
     // MARK: - Init
 
@@ -110,23 +114,25 @@ public final class SampleRouter: SampleSink, @unchecked Sendable {
         self.cameraWriter = writers.first(where: { $0.videoSource == .camera })?.writer
     }
 
-    // MARK: - Public counter accessors (control plane)
+    // MARK: - Public ingress counter accessors (control plane)
 
-    /// Number of `.screen` video buffers routed since construction.
+    /// Number of `.screen` `receive` calls since construction (ingress tally).
+    /// Counts every call regardless of writer liveness.
     /// Read on the control plane after stop; `.relaxed` ordering is sufficient.
-    public var screenRoutedCount: UInt64 {
-        _screenRoutedCount.load(ordering: .relaxed)
+    public var screenReceivedCount: UInt64 {
+        _screenReceivedCount.load(ordering: .relaxed)
     }
 
-    /// Number of `.camera` video buffers routed since construction.
-    public var cameraRoutedCount: UInt64 {
-        _cameraRoutedCount.load(ordering: .relaxed)
+    /// Number of `.camera` `receive` calls since construction (ingress tally).
+    /// Counts every call regardless of writer liveness.
+    public var cameraReceivedCount: UInt64 {
+        _cameraReceivedCount.load(ordering: .relaxed)
     }
 
-    /// Number of `.audio` buffers routed since construction (one per `receive` call,
-    /// not per fan-out writer).
-    public var audioRoutedCount: UInt64 {
-        _audioRoutedCount.load(ordering: .relaxed)
+    /// Number of `.audio` `receive` calls since construction (ingress tally,
+    /// one per call — not per fan-out writer).
+    public var audioReceivedCount: UInt64 {
+        _audioReceivedCount.load(ordering: .relaxed)
     }
 
     // MARK: - SampleSink
@@ -141,20 +147,20 @@ public final class SampleRouter: SampleSink, @unchecked Sendable {
             if let writer = screenWriter, writer.isAlive {
                 writer.append(buf, track: .video)
             }
-            _screenRoutedCount.wrappingAdd(1, ordering: .relaxed)
+            _screenReceivedCount.wrappingAdd(1, ordering: .relaxed)
 
         case .camera:
             if let writer = cameraWriter, writer.isAlive {
                 writer.append(buf, track: .video)
             }
-            _cameraRoutedCount.wrappingAdd(1, ordering: .relaxed)
+            _cameraReceivedCount.wrappingAdd(1, ordering: .relaxed)
 
         case .audio:
             // Audio is lossless at this seam — iterate in place, no allocation.
             for writer in writers where writer.isAlive {
                 writer.append(buf, track: .audio)
             }
-            _audioRoutedCount.wrappingAdd(1, ordering: .relaxed)
+            _audioReceivedCount.wrappingAdd(1, ordering: .relaxed)
         }
     }
 }
