@@ -1,6 +1,7 @@
 import CoreMedia
 import Foundation
 import Testing
+
 @testable import Domain
 
 // MARK: - In-test fakes
@@ -81,10 +82,18 @@ struct DomainEnumTests {
         #expect(WriterHealth.alive != .failed)
     }
 
-    @Test("ValidationIssue conforms to Error")
-    func validationIssueIsError() {
-        let issue: any Error = ValidationIssue.noVideoSource
-        #expect(issue is ValidationIssue)
+    @Test("ValidationIssue carries associated values and is Equatable")
+    func validationIssueEquatableAndAssociatedValues() {
+        // ValidationIssue no longer conforms to Error (#31 redesign):
+        // auto-corrections (frameRateClamped, softwareEncoderOnly) are informational,
+        // not errors. Conformance was dropped to avoid type-system misdirection.
+        let noVideo = ValidationIssue.noVideoSource
+        let clamped = ValidationIssue.frameRateClamped(requested: 120, applied: 60)
+        let swOnly = ValidationIssue.softwareEncoderOnly(.hevc)
+        #expect(noVideo == .noVideoSource)
+        #expect(clamped == .frameRateClamped(requested: 120, applied: 60))
+        #expect(swOnly == .softwareEncoderOnly(.hevc))
+        #expect(noVideo != clamped)
     }
 }
 
