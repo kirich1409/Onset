@@ -35,17 +35,9 @@ public final class CameraCaptureSource: NSObject, CaptureSource,
 
     // MARK: - CaptureSource: sourceClock
 
-    /// The clock that timestamps camera `CMSampleBuffer`s.
-    ///
-    /// `AVCaptureSession.synchronizationClock` (macOS 13+) is the clock that AVFoundation
-    /// uses internally to stamp capture buffers; exposing it here lets the recording-session
-    /// coordinator (#34) align camera PTS to the host-time reference clock via
-    /// `CMSyncConvertTime`. The property is `nil` before inputs are added, so we fall back
-    /// to `CMClockGetHostTimeClock()` — which is what AVFoundation itself uses as the
-    /// default hardware clock on Apple Silicon.
-    ///
-    /// This is a computed property (not stored) so the fallback covers the pre-configure
-    /// window and any window where the session has no inputs yet.
+    /// `AVCaptureSession.synchronizationClock` (macOS 13+) — the clock AVFoundation uses to
+    /// stamp buffers. Falls back to `CMClockGetHostTimeClock()` before `configure` and after
+    /// `stop` (session nil). The coordinator (#34) uses this for `CMSyncConvertTime` alignment.
     public var sourceClock: CMClock {
         session?.synchronizationClock ?? CMClockGetHostTimeClock()
     }
@@ -61,9 +53,6 @@ public final class CameraCaptureSource: NSObject, CaptureSource,
 
     /// The live `AVCaptureSession`; non-nil after `configure(_:)` succeeds.
     private var session: AVCaptureSession?
-
-    /// The selected camera device; non-nil after `configure(_:)` succeeds.
-    private var device: AVCaptureDevice?
 
     /// The downstream sample sink.
     ///
@@ -121,6 +110,26 @@ public final class CameraCaptureSource: NSObject, CaptureSource,
                 fps: config.fps
             )
 
+        // ── AVCaptureSession ──────────────────────────────────────────────────
+        let newSession = AVCaptureSession()
+        newSession.beginConfiguration()
+        // defer ensures commitConfiguration() is always called on every exit path —
+        // including throws — keeping the session in a consistent AVFoundation state.
+        defer { newSession.commitConfiguration() }
+
+        // Add video input. NO audio input — adding audio would slave
+        // the session's master clock to the audio hardware, breaking the
+        // cross-source PTS alignment (architecture.md §sync invariant).
+        let deviceInput = try AVCaptureDeviceInput(device: captureDevice)
+        guard newSession.canAddInput(deviceInput) else {
+            throw CameraCaptureError.sessionInputRejected
+        }
+        newSession.addInput(deviceInput)
+
+        // Set activeFormat AFTER addInput so AVFoundation does not re-assert the default
+        // session preset over our chosen format at startRunning. AVCaptureSessionPresetInputPriority
+        // exists on macOS too; setting activeFormat inside beginConfiguration/commit achieves
+        // the same effect without setting the preset explicitly.
         try captureDevice.lockForConfiguration()
         captureDevice.activeFormat = selection.format
         // Pin min and max to the same value to enforce a fixed frame rate.
@@ -131,27 +140,11 @@ public final class CameraCaptureSource: NSObject, CaptureSource,
             "configure: format=\(selection.format.debugDescription, privacy: .public) fps=\(config.fps)"
         )
 
-        // ── AVCaptureSession ──────────────────────────────────────────────────
-        let newSession = AVCaptureSession()
-        newSession.beginConfiguration()
-
-        // Add video input. NO audio input — adding audio would slave
-        // the session's master clock to the audio hardware, breaking the
-        // cross-source PTS alignment (architecture.md §sync invariant).
-        let deviceInput = try AVCaptureDeviceInput(device: captureDevice)
-        guard newSession.canAddInput(deviceInput) else {
-            newSession.commitConfiguration()
-            throw CameraCaptureError.sessionInputRejected
-        }
-        newSession.addInput(deviceInput)
-
         // ── AVCaptureVideoDataOutput ──────────────────────────────────────────
         //
-        // videoSettings forces AVFoundation to hardware-decode MJPEG (as delivered
-        // by 4K MX Brio and other UVC cameras) into a CVPixelBuffer. Without this
-        // key the output stays compressed and cannot be passed directly to VideoToolbox
-        // for re-encoding. kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange is the
-        // native chroma-subsampled format for BT.709 camera output.
+        // videoSettings requests decoded CVPixelBuffer output; for MJPEG cameras
+        // (e.g. MX Brio) this triggers hardware-decode into CVPixelBuffer — verified
+        // at L5. kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange is native BT.709.
         let videoOutput = AVCaptureVideoDataOutput()
         videoOutput.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
@@ -164,14 +157,11 @@ public final class CameraCaptureSource: NSObject, CaptureSource,
         videoOutput.setSampleBufferDelegate(self, queue: captureQueue)
 
         guard newSession.canAddOutput(videoOutput) else {
-            newSession.commitConfiguration()
             throw CameraCaptureError.sessionOutputRejected
         }
         newSession.addOutput(videoOutput)
-        newSession.commitConfiguration()
 
         self.session = newSession
-        self.device = captureDevice
         Log.capture.info(
             "configure: camera session ready device=\(captureDevice.localizedName, privacy: .public)"
         )
@@ -184,16 +174,24 @@ public final class CameraCaptureSource: NSObject, CaptureSource,
     /// - Parameter sink: The downstream sample router.
     ///
     /// - Throws: `CameraCaptureError.notConfigured` if `configure` was not called first.
+    ///           `CameraCaptureError.startFailed` if AVFoundation reports the session
+    ///           did not start (e.g. camera in use by another process).
     ///
     /// `session.startRunning()` is synchronous and can block for hundreds of milliseconds
-    /// while AVFoundation negotiates the hardware format. It is called directly here
-    /// (not dispatched) because `start(emittingTo:)` is already async — calling it on
-    /// the cooperative thread is acceptable; Swift concurrency treats blocking here the
-    /// same as a long-running async step. A `withCheckedContinuation` wrapper would add
-    /// complexity without benefit since `startRunning` has no async variant.
+    /// while AVFoundation negotiates the hardware format. It is dispatched to a global
+    /// queue via `withCheckedContinuation` to avoid occupying a Swift cooperative-pool
+    /// thread for the duration of the blocking call — the same discipline applied to
+    /// `stopRunning()` in `stop()`.
     public func start(emittingTo sink: any SampleSink) async throws {
         guard let liveSession = session else {
             throw CameraCaptureError.notConfigured
+        }
+
+        // Guard against double-start: a second call would overwrite (and leak) the
+        // existing notification observer. Log and return instead.
+        guard runtimeErrorObserver == nil else {
+            Log.capture.warning("CameraCaptureSource: start called while already running — ignored")
+            return
         }
 
         // Set sink before startRunning so it is guaranteed visible to the first callback.
@@ -203,21 +201,41 @@ public final class CameraCaptureSource: NSObject, CaptureSource,
         captureQueue.sync { self.sink = sink }
 
         // Observe runtime errors (e.g. camera physically disconnected mid-capture).
-        // Selector-based registration avoids the Sendable/closure issue with the
-        // block-based addObserver(forName:using:) variant in Swift 6 strict concurrency.
+        // Uses the block-based addObserver(forName:object:queue:using:) variant;
+        // `Log.emitSourceFailure` is a static call so no `self` capture is needed.
         runtimeErrorObserver = NotificationCenter.default.addObserver(
             forName: AVCaptureSession.runtimeErrorNotification,
             object: liveSession,
             queue: nil
-        ) { [weak self] notification in
-            guard self != nil else { return }
+        ) { notification in
             let error =
                 notification.userInfo?[AVCaptureSessionErrorKey] as? Error
                 ?? CameraCaptureError.unknownRuntimeError
             Log.emitSourceFailure(kind: .camera, error: error)
         }
 
-        liveSession.startRunning()
+        // Off-pool: startRunning() blocks for hundreds of ms; don't occupy a
+        // cooperative-pool thread. Capture self (@unchecked Sendable) to avoid
+        // transferring non-Sendable AVCaptureSession across isolation boundaries.
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                self.session?.startRunning()
+                cont.resume()
+            }
+        }
+
+        // Detect immediate start failure: AVFoundation returns from startRunning()
+        // without error but isRunning == false when the camera is unavailable
+        // (e.g. in use by another process, hardware error).
+        guard liveSession.isRunning else {
+            captureQueue.sync { self.sink = nil }
+            if let observer = runtimeErrorObserver {
+                NotificationCenter.default.removeObserver(observer)
+                runtimeErrorObserver = nil
+            }
+            throw CameraCaptureError.startFailed
+        }
+
         Log.capture.info("recording.start source=camera")
     }
 
@@ -226,15 +244,29 @@ public final class CameraCaptureSource: NSObject, CaptureSource,
     /// Stops the capture session and releases the sink reference. Idempotent.
     ///
     /// `stopRunning()` is synchronous and blocks until in-flight callbacks complete.
+    /// It is dispatched off the Swift cooperative thread pool via `withCheckedContinuation`
+    /// for the same reason as `startRunning()` in `start(emittingTo:)`.
     /// After it returns AVFoundation guarantees no more delegate calls will be delivered,
     /// so the subsequent `captureQueue.sync` that nils `sink` establishes a clean
-    /// happens-before — the same pattern used by `ScreenCaptureSource`.
+    /// happens-before. Nilling `session` after stop makes a second `stop()` call a no-op
+    /// and lets `sourceClock` fall back to `CMClockGetHostTimeClock()`.
     public func stop() async {
-        guard let liveSession = session else { return }
+        guard session != nil else { return }
 
-        liveSession.stopRunning()
+        // Off-pool: stopRunning() blocks until callbacks drain; same rationale as
+        // startRunning() above. session is read via self (@unchecked Sendable).
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                self.session?.stopRunning()
+                cont.resume()
+            }
+        }
 
-        // Remove the runtime-error observer before nilling the session so no
+        // Nil session after stopRunning returns so a second stop() call is a no-op
+        // and sourceClock falls back to CMClockGetHostTimeClock().
+        session = nil
+
+        // Remove the runtime-error observer before nilling the sink so no
         // callbacks fire against a partially torn-down object.
         if let observer = runtimeErrorObserver {
             NotificationCenter.default.removeObserver(observer)
@@ -306,11 +338,8 @@ extension CameraCaptureSource {
 
     // MARK: Format projection
 
-    /// A pure-data projection of an `AVCaptureDevice.Format`, for consumption by the
-    /// capability-and-settings pickers (AC-3) and unit tests.
-    ///
-    /// Uses only types that can be constructed in tests without a live device:
-    /// `CMVideoDimensions` (a plain struct) and `Double` fps ranges.
+    /// Pure-data projection of an `AVCaptureDevice.Format` for capability pickers (AC-3)
+    /// and unit tests. Uses only types constructable without a live device.
     public struct FormatOption: Sendable, Equatable {
         /// Native pixel dimensions of the format.
         public let dimensions: CMVideoDimensions
@@ -326,19 +355,14 @@ extension CameraCaptureSource {
         }
     }
 
-    /// Projects a `CMFormatDescription` into the data needed by `FormatOption`.
+    /// Projects a `CMFormatDescription` into a `FormatOption`.
     ///
-    /// Extracted as a standalone `static func` so unit tests can call it with a
-    /// `CMVideoFormatDescription` built via `CMVideoFormatDescriptionCreate` — no live
-    /// device required.
+    /// Extracted as a `static func` for unit testability — `AVFrameRateRange` has no
+    /// public initialiser, so the caller supplies fps ranges directly.
     ///
     /// - Parameters:
     ///   - description: The format description to project.
-    ///   - fpsRanges: The supported fps ranges for this format, expressed as `(min, max)`
-    ///     pairs in frames per second. Supplied by the caller (from
-    ///     `AVFrameRateRange.minFrameRate` / `maxFrameRate`) because `AVFrameRateRange`
-    ///     has no public initialiser and cannot be constructed in unit tests.
-    ///
+    ///   - fpsRanges: Fps ranges as `(min, max)` pairs (from `AVFrameRateRange`).
     /// - Returns: The projected `FormatOption`.
     public static func projectFormatOption(
         description: CMFormatDescription,
@@ -348,16 +372,14 @@ extension CameraCaptureSource {
         return FormatOption(dimensions: dims, fpsRanges: fpsRanges)
     }
 
-    /// Enumerates all `AVCaptureDevice.Format`s and projects them into `FormatOption`s.
+    /// Enumerates `AVCaptureDevice.Format`s into `FormatOption`s.
     ///
-    /// AC-3 invariant: only combinations present in `device.formats` are produced.
-    /// No synthetic combinations are added.
+    /// AC-3: only combinations present in `device.formats` are produced — no synthesis.
+    /// Non-testable in unit tests (`AVCaptureDevice.Format` has no public initialiser);
+    /// the testable core is `projectFormatOption(description:fpsRanges:)`.
     ///
-    /// This function is non-testable in unit tests because `AVCaptureDevice.Format` has
-    /// no public initialiser. The testable core is `projectFormatOption(description:fpsRanges:)`.
-    ///
-    /// - Parameter formats: The `device.formats` array from an `AVCaptureDevice`.
-    /// - Returns: One `FormatOption` per format, in the same order as `formats`.
+    /// - Parameter formats: `device.formats` from an `AVCaptureDevice`.
+    /// - Returns: One `FormatOption` per format, preserving order.
     public static func enumerateFormats(
         _ formats: [AVCaptureDevice.Format]
     ) -> [FormatOption] {
@@ -383,28 +405,11 @@ extension CameraCaptureSource {
         public let frameDuration: CMTime
     }
 
-    /// Selects the best `AVCaptureDevice.Format` and the corresponding frame duration
-    /// for the requested parameters.
+    /// Selects the best `AVCaptureDevice.Format` for the requested parameters.
     ///
-    /// Selection strategy:
-    /// 1. Find formats whose dimensions match `width × height`.
-    /// 2. Among those, find one whose `videoSupportedFrameRateRanges` cover `fps`.
-    /// 3. If no exact dimension match, fall back to the first format that supports `fps`.
-    /// 4. If no format supports `fps`, fall back to the first available format at its
-    ///    max supported fps.
-    ///
-    /// Extracted as a `static func` for unit-testability — the fps→CMTime mapping is
-    /// fully pure and can be driven without a live device.
-    ///
-    /// - Parameters:
-    ///   - formats: `device.formats` from the target `AVCaptureDevice`.
-    ///   - width: Requested frame width (from `SourceConfiguration`).
-    ///   - height: Requested frame height (from `SourceConfiguration`).
-    ///   - fps: Requested frame rate (from `SourceConfiguration`).
-    ///
-    /// - Returns: A `FormatSelection` with the chosen format and pinned frame duration.
-    ///
-    /// - Throws: `CameraCaptureError.noCompatibleFormat` when `formats` is empty.
+    /// Strategy: (1) dimension + fps match; (2) fps match only; (3) first format at
+    /// its max fps (NFR-ERR warning emitted). Throws `.noCompatibleFormat` when empty.
+    /// `static func` for testability — fps→CMTime is pure, no live device required.
     public static func selectFormat(
         from formats: [AVCaptureDevice.Format],
         width: Int,
@@ -444,8 +449,13 @@ extension CameraCaptureSource {
         }
 
         // Last resort: first available format at its max fps.
+        // NFR-ERR: warn so a mismatch between requested and actual parameters is visible.
         let fmt = formats[0]
         let maxFPS = fmt.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? targetFPS
+        let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
+        Log.capture.warning(
+            "selectFormat: no match \(width)×\(height)@\(fps)fps; using \(dims.width)×\(dims.height)@\(Int(maxFPS))fps"
+        )
         return FormatSelection(
             format: fmt,
             frameDuration: fpsToFrameDuration(maxFPS, requested: maxFPS)
@@ -454,19 +464,11 @@ extension CameraCaptureSource {
 
     // MARK: fps → CMTime
 
-    /// Converts a frames-per-second value to a `CMTime` frame duration.
+    /// Converts fps to `CMTime(value:1, timescale:clampedFPS)`.
     ///
-    /// `activeVideoMinFrameDuration` and `activeVideoMaxFrameDuration` are set to the
-    /// same value (fixed fps) to pin the capture rate rather than letting it float.
-    ///
-    /// The `requested` fps is clamped to `available` and floored at 1 to produce a
-    /// valid `CMTime`. A zero or negative timescale would be `kCMTimeInvalid`.
-    ///
-    /// - Parameters:
-    ///   - available: The maximum fps the selected format/range supports.
-    ///   - requested: The fps value from `SourceConfiguration`.
-    ///
-    /// - Returns: `CMTime(value: 1, timescale: clampedFPS)` as the frame duration.
+    /// `requested` is clamped to `available` and floored at 1 (zero timescale is invalid).
+    /// Both `activeVideoMinFrameDuration` and `activeVideoMaxFrameDuration` are set to
+    /// the same value to pin capture to a fixed rate.
     public static func fpsToFrameDuration(_ available: Double, requested: Double) -> CMTime {
         let clamped = max(1.0, min(requested, available))
         let timescale = CMTimeScale(clamped.rounded())
@@ -488,6 +490,9 @@ public enum CameraCaptureError: Error {
     case sessionInputRejected
     /// The `AVCaptureSession` rejected the video data output.
     case sessionOutputRejected
+    /// `startRunning()` returned but `isRunning` is false — camera unavailable
+    /// (e.g. in use by another process, or a hardware error).
+    case startFailed
     /// A runtime error notification was received but carried no `Error` in userInfo.
     case unknownRuntimeError
 }

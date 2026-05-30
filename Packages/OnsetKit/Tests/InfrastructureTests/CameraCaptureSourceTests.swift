@@ -216,10 +216,21 @@ struct FpsToFrameDurationTests {
 
 /// Tests for the pure logic in `CameraCaptureSource.selectFormat`.
 ///
-/// `AVCaptureDevice.Format` has no public initialiser, so this suite tests the
-/// fps→CMTime mapping exposed by `fpsToFrameDuration` (the core of `selectFormat`'s
-/// fps-matching logic) plus the error path that fires when the formats array is empty.
-/// The full `selectFormat` is covered at L5 with a live device.
+/// `AVCaptureDevice.Format` has no public initialiser — `selectFormat`'s selection
+/// branches cannot be driven in unit tests. Coverage map:
+///
+/// - **L2 (automated, this suite):**
+///   - Empty-formats error path (no `AVCaptureDevice.Format` needed).
+///   - fps→CMTime clamping (tested in full in `FpsToFrameDurationTests`; see below).
+///
+/// - **L5 (manual, live device required):** all four selection branches need a real
+///   `[AVCaptureDevice.Format]` array, which has no public initialiser:
+///   1. Dimension + fps match (tier-1 — exact width×height AND fps in range).
+///   2. Dimension match only (tier-2 — width×height match, fps not covered).
+///   3. fps match only (tier-3 — no dimension match, but fps in range).
+///   4. Last-resort (tier-4 — first format at its max fps; triggers the NFR-ERR warning).
+///   Verified against a Logitech MX Brio on MacBook Pro 14" M3 Max
+///   (see `docs/spec/testing.md` Appendix A).
 @Suite("CameraCaptureSource — selectFormat pure logic")
 struct SelectFormatPureLogicTests {
 
@@ -233,14 +244,5 @@ struct SelectFormatPureLogicTests {
                 fps: 30
             )
         }
-    }
-
-    @Test("fpsToFrameDuration: requested above available is clamped (pure logic)")
-    func fpsClampedToAvailableViaDuration() {
-        // Validates that the fps-clamping in fpsToFrameDuration is the same
-        // logic selectFormat delegates to for the frame-duration calculation.
-        let duration = CameraCaptureSource.fpsToFrameDuration(30.0, requested: 60.0)
-        // 60 > 30 → clamped to 30 → CMTime(1, 30)
-        #expect(duration == CMTime(value: 1, timescale: 30))
     }
 }
