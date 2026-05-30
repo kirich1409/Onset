@@ -37,6 +37,38 @@ public enum PermissionStatus: Sendable, Equatable {
     case restricted
 }
 
+// MARK: - NotificationPermissionProviding
+
+/// Domain seam for user notification authorization.
+///
+/// Separated from `PermissionsProviding` for two reasons:
+/// 1. **Async-only status**: `UNUserNotificationCenter.notificationSettings()` is an async
+///    call with no synchronous accessor, making it incompatible with `PermissionsProviding`'s
+///    synchronous `status(for:)` contract.
+/// 2. **Optional enhancement**: Notifications are a non-capture-critical feature — when denied,
+///    error surfacing continues via the NSStatusItem indicator (#42). This seam must never be a
+///    required dependency for recording to function.
+///
+/// Concrete implementations live in Infrastructure. Application and Presentation layers depend
+/// only on this protocol — no `UserNotifications` framework import leaks beyond Infrastructure.
+///
+/// - Note: No sandbox entitlement is required for `UNUserNotificationCenter` on macOS;
+///   the framework is available to sandboxed apps without an additional entitlement key.
+public protocol NotificationPermissionProviding: Sendable {
+    /// Returns the current notification authorization status without presenting a dialog.
+    func authorizationStatus() async -> PermissionStatus
+
+    /// Requests notification authorization if not yet determined, then returns the resulting status.
+    ///
+    /// The alert and sound options are hardcoded in the Infrastructure implementation —
+    /// `UNAuthorizationOptions` does not cross the Domain boundary.
+    ///
+    /// On a thrown error (e.g. system refusal), the error is logged as a warning and `.denied`
+    /// is returned immediately — re-reading the status after a thrown request could return
+    /// `.notDetermined` on a fresh install, which would violate the conservative-fallback contract.
+    func requestAuthorization() async -> PermissionStatus
+}
+
 // MARK: - PermissionsProviding
 
 /// Domain seam for TCC permission checks and requests.

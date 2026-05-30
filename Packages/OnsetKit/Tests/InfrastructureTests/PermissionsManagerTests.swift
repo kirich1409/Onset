@@ -2,6 +2,7 @@ import AVFoundation
 import Domain
 import Foundation
 import Testing
+import UserNotifications
 
 @testable import Infrastructure
 
@@ -140,6 +141,107 @@ struct PermissionsProvidingFakeTests {
         // used in PermissionsManagerScreenRecordingFlagTests above.
         let manager: any PermissionsProviding = PermissionsManager()
         // Calling status() here would query the live OS; we only verify construction and type.
+        _ = manager
+    }
+}
+
+// MARK: - UNAuthorizationStatus → PermissionStatus mapping tests
+
+/// Tests for the pure `UNAuthorizationStatus → PermissionStatus` mapping.
+///
+/// The live `UNUserNotificationCenter` calls (`authorizationStatus()`, `requestAuthorization()`)
+/// cannot be unit-tested without real system state and a signed app bundle — those are L5
+/// runtime-verification items. The mapping logic is extracted as a `static func` and is fully
+/// testable without touching the OS.
+///
+/// Two `UNAuthorizationStatus` cases are untestable on macOS:
+/// - `@unknown default`: structurally untestable — no way to construct an unknown enum value in Swift.
+/// - `.ephemeral`: `@available(macOS, unavailable)` — App-Clip-only, the compiler rejects it
+///   on macOS. It is handled via `@unknown default` in `mapNotificationStatus` defensively.
+@Suite("PermissionsManager UNAuthorizationStatus mapping")
+struct PermissionsManagerNotificationMappingTests {
+
+    @Test("notDetermined maps to .notDetermined")
+    func notDetermined() {
+        #expect(PermissionsManager.mapNotificationStatus(.notDetermined) == .notDetermined)
+    }
+
+    @Test("denied maps to .denied")
+    func denied() {
+        #expect(PermissionsManager.mapNotificationStatus(.denied) == .denied)
+    }
+
+    @Test("authorized maps to .authorized")
+    func authorized() {
+        #expect(PermissionsManager.mapNotificationStatus(.authorized) == .authorized)
+    }
+
+    @Test("provisional maps to .authorized (quiet delivery still delivers)")
+    func provisional() {
+        // Provisional delivery is quiet (no interruption banners) but still delivers
+        // notifications. The NSStatusItem indicator (#42) covers the interrupting fallback,
+        // so provisional counts as authorized for this seam.
+        #expect(PermissionsManager.mapNotificationStatus(.provisional) == .authorized)
+    }
+}
+
+// MARK: - NotificationPermissionProviding seam substitutability
+
+/// Proves that `NotificationPermissionProviding` is substitutable with a test fake —
+/// the Domain seam is not tied to any concrete type.
+@Suite("NotificationPermissionProviding seam substitutability")
+struct NotificationPermissionProvidingFakeTests {
+
+    // MARK: - Fake implementation
+
+    /// A fully in-process fake that does not touch `UNUserNotificationCenter` or the OS.
+    final class FakeNotificationPermissionProvider: NotificationPermissionProviding,
+        @unchecked Sendable
+    {
+        private let fixedStatus: PermissionStatus
+
+        init(fixedStatus: PermissionStatus) {
+            self.fixedStatus = fixedStatus
+        }
+
+        func authorizationStatus() async -> PermissionStatus {
+            fixedStatus
+        }
+
+        func requestAuthorization() async -> PermissionStatus {
+            fixedStatus
+        }
+    }
+
+    // MARK: - Tests
+
+    @Test("Fake authorized provider returns .authorized")
+    func fakeReturnsAuthorized() async {
+        let provider: any NotificationPermissionProviding = FakeNotificationPermissionProvider(
+            fixedStatus: .authorized)
+        #expect(await provider.authorizationStatus() == .authorized)
+        #expect(await provider.requestAuthorization() == .authorized)
+    }
+
+    @Test("Fake denied provider returns .denied")
+    func fakeReturnsDenied() async {
+        let provider: any NotificationPermissionProviding = FakeNotificationPermissionProvider(
+            fixedStatus: .denied)
+        #expect(await provider.authorizationStatus() == .denied)
+    }
+
+    @Test("Fake notDetermined provider returns .notDetermined")
+    func fakeReturnsNotDetermined() async {
+        let provider: any NotificationPermissionProviding = FakeNotificationPermissionProvider(
+            fixedStatus: .notDetermined)
+        #expect(await provider.authorizationStatus() == .notDetermined)
+    }
+
+    @Test("PermissionsManager conforms to NotificationPermissionProviding (type check)")
+    func permissionsManagerConforms() {
+        // Verifies the conformance compiles and the type is usable as the protocol.
+        // Live UNUserNotificationCenter calls are not made here — L5 runtime-verification only.
+        let manager: any NotificationPermissionProviding = PermissionsManager()
         _ = manager
     }
 }

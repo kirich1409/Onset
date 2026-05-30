@@ -10,7 +10,7 @@ import Domain
 /// and injected via initializers (AC: no hidden-singleton access).
 ///
 /// Holds strong references to the coordinator, monitor, settings store, and permissions
-/// provider for the lifetime of the application.
+/// providers for the lifetime of the application.
 ///
 /// - Note: `ClockProviding` (#34) is not yet available. The coordinator receives
 ///   `clock: nil` until a concrete implementation lands. The composition root will
@@ -26,6 +26,13 @@ import Domain
 ///   never imports Infrastructure — it only speaks `PermissionsProviding`.
 ///   Future settings UI (#32) and the coordinator state machine (#36) will consume
 ///   this seam via their own injected parameters; the wiring point stays here.
+///
+/// - Note: `notificationPermissions` is the Domain-seam `NotificationPermissionProviding`
+///   (issue #22). In production, the same `PermissionsManager` instance satisfies both
+///   `permissions` and `notificationPermissions` — the app target passes it for both.
+///   This injection point is the future entry for `NotificationManager` (#42/#44).
+///   Error-surfacing never depends on this seam: when denied, failures surface via
+///   the NSStatusItem indicator (#42) regardless of notification authorization state.
 @MainActor
 public final class RootComposition {
 
@@ -43,17 +50,33 @@ public final class RootComposition {
     /// a test fake in unit tests — neither is imported here.
     public let permissions: any PermissionsProviding
 
+    /// The notification authorization provider.
+    ///
+    /// Kept as a separate injection point from `permissions` because notification
+    /// status is async-only and notifications are an optional enhancement (not required
+    /// for capture to function). The future `NotificationManager` (#42/#44) will receive
+    /// this seam via its own initializer. Neither `UserNotifications` nor `Infrastructure`
+    /// is imported here — Presentation only speaks the Domain protocol.
+    public let notificationPermissions: any NotificationPermissionProviding
+
     // MARK: - Initializer
 
     /// Assembles the full application-layer DI graph.
     ///
-    /// - Parameter permissions: The `PermissionsProviding` implementation to use.
-    ///   In production this is `PermissionsManager()` from Infrastructure, constructed
-    ///   in the app target. In tests, pass a fake `PermissionsProviding`.
+    /// - Parameters:
+    ///   - permissions: The `PermissionsProviding` implementation to use.
+    ///     In production this is `PermissionsManager()` from Infrastructure, constructed
+    ///     in the app target. In tests, pass a fake `PermissionsProviding`.
+    ///   - notificationPermissions: The `NotificationPermissionProviding` implementation.
+    ///     In production the same `PermissionsManager` instance is passed here and for
+    ///     `permissions`. In tests, pass a fake `NotificationPermissionProviding`.
     ///
     /// All objects are constructed here and passed to their dependents via init —
     /// no object fetches its own dependencies from a global.
-    public init(permissions: any PermissionsProviding) {
+    public init(
+        permissions: any PermissionsProviding,
+        notificationPermissions: any NotificationPermissionProviding
+    ) {
         let store = SettingsStore()
         let monitor = RuntimeHealthMonitor()
         let sessionCoordinator = RecordingSessionCoordinator(
@@ -68,5 +91,6 @@ public final class RootComposition {
         self.healthMonitor = monitor
         self.coordinator = sessionCoordinator
         self.permissions = permissions
+        self.notificationPermissions = notificationPermissions
     }
 }
