@@ -1,26 +1,158 @@
+import CoreMedia
 import Foundation
 
 // MARK: - ValidationIssue
 
-/// Describes why a recording configuration is not realizable.
+/// Describes a validation finding produced by the Validator (#31).
 ///
-/// Returned by the Validator (#31) when the requested configuration cannot be fulfilled
-/// by the current hardware or system state.
-public enum ValidationIssue: Error, Sendable, Equatable {
-    /// No video source (screen or camera) was included in the requested configuration.
+/// This is a plain descriptive enum — it does NOT conform to `Error`. Auto-corrections
+/// (`.frameRateClamped`, `.softwareEncoderOnly`) are informational and not errors;
+/// conflating them with `Error` would be type-system misdirection. Rendering issue
+/// cases as user-facing strings is the responsibility of the Presentation layer (#32).
+///
+/// `CMVideoDimensions` is not `Equatable` in the SDK, so `==` is implemented manually
+/// on this enum via field-wise comparison (same pattern as `EncoderCapability`).
+public enum ValidationIssue: Sendable {
+    /// No video source (screen or camera) was included in the selection.
     case noVideoSource
 
-    /// The requested pixel resolution is not supported by the capture source.
-    case unsupportedResolution
+    /// The requested frame rate exceeded the source's maximum; it was clamped automatically.
+    ///
+    /// - Parameters:
+    ///   - requested: The fps value from `Selections.targetFPS`.
+    ///   - applied: The clamped fps actually used in the configuration.
+    ///   - source: Which capture source (`.screen` or `.camera`) triggered the clamp.
+    case frameRateClamped(requested: Int, applied: Int, source: SourceKind)
 
-    /// The requested frame rate is outside the range the capture source can deliver.
-    case unsupportedFrameRate
+    /// The chosen resolution exceeds the codec encoder's reported `maxDimensions`.
+    ///
+    /// - Parameters:
+    ///   - requested: The pixel dimensions of the active capture format.
+    ///   - maxSupported: The encoder's declared maximum, or `nil` when not reported.
+    ///   - codec: The codec for which the encoder was queried.
+    case resolutionUnsupported(
+        requested: CMVideoDimensions,
+        maxSupported: CMVideoDimensions?,
+        codec: CodecKind
+    )
 
-    /// The requested codec is not available on this hardware (e.g. no VideoToolbox encoder).
-    case codecUnavailable
+    /// No encoder (hardware or software) is available for the selected codec.
+    case codecUnavailable(CodecKind)
 
-    /// The output path is not writable (missing permissions or non-existent directory).
-    case outputPathNotWritable
+    /// Only a software encoder exists for the chosen codec.
+    ///
+    /// This is a warning: recording is still permitted, but HW acceleration is absent.
+    /// The Validator never silently falls back to software; this correction surfaces
+    /// the state explicitly so the caller can decide.
+    case softwareEncoderOnly(CodecKind)
+
+    /// A device referenced in `Selections` is no longer present in the snapshot (TOCTOU).
+    ///
+    /// Re-validating against a fresh `CapabilitySnapshot` is the correct recovery.
+    case deviceUnavailable(id: String, kind: SourceKind)
+
+    /// The number of simultaneous video encode sessions exceeds the chip's hardware budget.
+    ///
+    /// - Parameters:
+    ///   - requested: Number of simultaneous encode sessions in the selection.
+    ///   - budget: Maximum supported by `CapabilityMatrix` for the detected chip tier.
+    case streamBudgetExceeded(requested: Int, budget: Int)
+
+    /// A `cameraFormatOverride` was set but the requested format is not in the camera's
+    /// reported format list. The Validator fell back to the best available format.
+    ///
+    /// This is a correction (not a rejection): recording can proceed with the best format,
+    /// but the override was silently swapped — surfacing it satisfies NFR-ERR (no silent
+    /// auto-correction).
+    case cameraFormatUnavailable(requested: CameraFormatOption)
+}
+
+extension ValidationIssue: Equatable {
+    public static func == (lhs: ValidationIssue, rhs: ValidationIssue) -> Bool {
+        switch (lhs, rhs) {
+        case (.noVideoSource, .noVideoSource):
+            return true
+        case (.frameRateClamped(let lReq, let lApp, let lSrc), .frameRateClamped(let rReq, let rApp, let rSrc)):
+            return lReq == rReq && lApp == rApp && lSrc == rSrc
+        case (
+            .resolutionUnsupported(let lReq, let lMax, let lCodec),
+            .resolutionUnsupported(let rReq, let rMax, let rCodec)
+        ):
+            return dimensionsEqual(lReq, rReq) && optionalDimsEqual(lMax, rMax) && lCodec == rCodec
+        case (.codecUnavailable(let lhs), .codecUnavailable(let rhs)):
+            return lhs == rhs
+        case (.softwareEncoderOnly(let lhs), .softwareEncoderOnly(let rhs)):
+            return lhs == rhs
+        case (.deviceUnavailable(let lID, let lKind), .deviceUnavailable(let rID, let rKind)):
+            return lID == rID && lKind == rKind
+        case (.streamBudgetExceeded(let lReq, let lBud), .streamBudgetExceeded(let rReq, let rBud)):
+            return lReq == rReq && lBud == rBud
+        case (.cameraFormatUnavailable(let lFmt), .cameraFormatUnavailable(let rFmt)):
+            return lFmt == rFmt
+        default:
+            return false
+        }
+    }
+
+    // CMVideoDimensions is not Equatable — compare fields directly.
+    private static func dimensionsEqual(_ lhs: CMVideoDimensions, _ rhs: CMVideoDimensions) -> Bool {
+        lhs.width == rhs.width && lhs.height == rhs.height
+    }
+
+    private static func optionalDimsEqual(
+        _ lhs: CMVideoDimensions?, _ rhs: CMVideoDimensions?
+    ) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil): return true
+        case (let lv?, let rv?): return dimensionsEqual(lv, rv)
+        default: return false
+        }
+    }
+}
+
+// MARK: - ValidationOutcome
+
+/// The result of running the Validator over a `Selections` + `CapabilitySnapshot` pair.
+///
+/// ## Design note — deviation from issue spec
+/// The issue spec proposed `Result<RecordingConfiguration, [ValidationIssue]>` as the
+/// return type, but that representation is internally inconsistent: `Result.success` has
+/// no channel for warnings (e.g. `.softwareEncoderOnly`, `.frameRateClamped`), yet the
+/// same spec requires those auto-corrections be visible to the caller. Using a dedicated
+/// three-case enum resolves the inconsistency without losing type safety.
+public enum ValidationOutcome: Sendable, Equatable {
+    /// All checks passed; no auto-corrections were applied.
+    case valid(RecordingConfiguration)
+
+    /// Configuration is usable but one or more values were auto-corrected or warnings exist.
+    ///
+    /// - Note: `.softwareEncoderOnly` is technically a warning rather than a value correction,
+    ///   but lives here because `autoCorrected` is the only outcome channel that carries both
+    ///   a usable configuration and diagnostic issues simultaneously.
+    case autoCorrected(RecordingConfiguration, corrections: [ValidationIssue])
+
+    /// Configuration cannot be realized; recording must not start.
+    ///
+    /// - Parameters:
+    ///   - primary: The first (and usually only) reason the configuration was rejected.
+    ///     Having at least one reason is enforced by the type — `.rejected(reasons: [])` is
+    ///     impossible, so every rejection has a diagnosable cause (NFR-ERR).
+    ///   - additional: Any further reasons beyond the primary. Empty in the common
+    ///     single-failure case (the Validator returns on first failure today).
+    case rejected(primary: ValidationIssue, additional: [ValidationIssue] = [])
+}
+
+extension ValidationOutcome {
+    /// All rejection reasons as a flat array `[primary] + additional`.
+    ///
+    /// Returns `[]` for `.valid` and `.autoCorrected` — use the `corrections` label on
+    /// `.autoCorrected` to access warnings. `reasons` is meaningful only on `.rejected`.
+    public var reasons: [ValidationIssue] {
+        if case .rejected(let primary, let additional) = self {
+            return [primary] + additional
+        }
+        return []
+    }
 }
 
 // MARK: - RecordingConfiguration

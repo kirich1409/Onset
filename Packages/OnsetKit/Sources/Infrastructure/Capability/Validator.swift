@@ -1,0 +1,353 @@
+import CoreMedia
+import Domain
+import Foundation
+
+// MARK: - Validator
+
+/// Validates user `Selections` against a `CapabilitySnapshot` and produces a
+/// `ValidationOutcome` — the sole constructor of `RecordingConfiguration`.
+///
+/// ## Parse-don't-validate contract
+/// `RecordingConfiguration` has a `package init` that only this Validator is
+/// architecturally permitted to call. Any `RecordingConfiguration` in circulation
+/// is therefore guaranteed-realizable by construction.
+///
+/// ## Purity
+/// The Validator is a pure function: no I/O, no system calls, no logging. All
+/// inputs are in `selections` and `snapshot`. The caller is responsible for logging
+/// the outcome.
+///
+/// ## Audio fan-out contract
+/// When a microphone is selected, `.audio` tracks are added to **every** video output
+/// file (screen and camera). Mic audio is fanned-out before writer branching, so both
+/// files receive bit-identical audio. This is the contract that `SampleRouter` (#35)
+/// and the encoding writers (#37) depend on. Do not change the fan-out without
+/// coordinating those issues.
+///
+/// ## Output naming
+/// Output files are named `screen.<ext>` and `camera.<ext>` (ext = mov/mp4 from
+/// container). Timestamped names and collision avoidance are deferred to the
+/// recording-session layer (#37).
+///
+/// ## Validation check order (correctness constraint)
+/// 1. Device availability (TOCTOU) — must run first; later steps read device properties.
+/// 2. No-video-source — nil selection, not absent device.
+/// 3. Codec availability (HW preference, SW-only warning).
+/// 4. Camera format resolution (pick format, clamp fps).
+/// 5. Screen fps clamp.
+/// 6. Resolution × codec maxDimensions check (all active video sources).
+/// 7. Stream-budget check.
+/// 8. Compose RecordingConfiguration and emit outcome.
+///
+/// Output-path writability is NOT checked here (would require filesystem I/O, violating
+/// the purity contract). It is the responsibility of the recording-session coordinator
+/// (#37) when it opens the `AVAssetWriter`.
+public struct Validator {
+    public init() {}
+
+    /// Validates `selections` against `snapshot` and returns a `ValidationOutcome`.
+    ///
+    /// - Parameters:
+    ///   - selections: The user's draft recording choices.
+    ///   - snapshot: A fresh `CapabilitySnapshot` from `CapabilityService`.
+    /// - Returns: `.valid`, `.autoCorrected`, or `.rejected` — never throws.
+    public func validate(
+        _ selections: Selections,
+        against snapshot: CapabilitySnapshot
+    ) -> ValidationOutcome {
+        // Step 1: Device availability (TOCTOU)
+        if let rejection = checkDeviceAvailability(selections, snapshot: snapshot) {
+            return rejection
+        }
+        // Step 2: At least one video source
+        guard selections.screenDisplayID != nil || selections.cameraUniqueID != nil else {
+            return .rejected(primary: .noVideoSource)
+        }
+        // Step 3: Codec availability
+        let codecIssues = checkCodec(selections.codec, encoders: snapshot.encoders)
+        if let unavailable = codecIssues.first(where: {
+            if case .codecUnavailable = $0 { return true }
+            return false
+        }) {
+            return .rejected(primary: unavailable)
+        }
+        var corrections = codecIssues  // warnings only (e.g. softwareEncoderOnly)
+
+        let preferredEncoder = preferredEncoder(for: selections.codec, in: snapshot.encoders)
+
+        // Steps 4–5: Format selection and fps clamping
+        let screenResolved = resolveScreen(selections, snapshot: snapshot, corrections: &corrections)
+        let cameraResolveResult = resolveCamera(selections, snapshot: snapshot, corrections: &corrections)
+        // Fix 1: a camera with no usable formats yields .rejected — reject immediately.
+        let cameraResolved: ResolvedSource
+        switch cameraResolveResult {
+        case .rejected(let issue):
+            return .rejected(primary: issue)
+        case .resolved(let resolved):
+            cameraResolved = resolved
+        case nil:
+            cameraResolved = ResolvedSource(width: 0, height: 0, fps: selections.targetFPS)
+        }
+
+        // Step 6: Resolution vs encoder maxDimensions
+        if let rejection = checkResolution(
+            screen: screenResolved,
+            camera: cameraResolved,
+            encoder: preferredEncoder,
+            codec: selections.codec
+        ) {
+            return rejection
+        }
+
+        // Step 7: Stream budget
+        if let rejection = checkStreamBudget(
+            screenActive: selections.screenDisplayID != nil,
+            cameraActive: selections.cameraUniqueID != nil,
+            system: snapshot.system
+        ) {
+            return rejection
+        }
+
+        // Step 8: Compose
+        let config = compose(
+            selections: selections,
+            screenResolved: screenResolved,
+            cameraResolved: cameraResolved
+        )
+        return corrections.isEmpty ? .valid(config) : .autoCorrected(config, corrections: corrections)
+    }
+}
+
+// MARK: - Private validation steps
+
+extension Validator {
+    private func checkDeviceAvailability(
+        _ selections: Selections, snapshot: CapabilitySnapshot
+    ) -> ValidationOutcome? {
+        if let displayID = selections.screenDisplayID,
+            !snapshot.displays.contains(where: { $0.id == displayID })
+        {
+            return .rejected(primary: .deviceUnavailable(id: String(displayID), kind: .screen))
+        }
+        if let cameraID = selections.cameraUniqueID,
+            !snapshot.cameras.contains(where: { $0.uniqueID == cameraID })
+        {
+            return .rejected(primary: .deviceUnavailable(id: cameraID, kind: .camera))
+        }
+        if let micID = selections.microphoneUniqueID,
+            !snapshot.microphones.contains(where: { $0.uniqueID == micID })
+        {
+            return .rejected(primary: .deviceUnavailable(id: micID, kind: .audio))
+        }
+        return nil
+    }
+
+    /// Returns codec-related issues: `.codecUnavailable` (rejection) or `.softwareEncoderOnly`
+    /// (warning), or empty when a hardware encoder is present. No `RecordingConfiguration`
+    /// is constructed here — the caller accumulates warnings into the real config path.
+    private func checkCodec(
+        _ codec: CodecKind,
+        encoders: [EncoderCapability]
+    ) -> [ValidationIssue] {
+        let matching = encoders.filter { $0.codec == codec }
+        guard !matching.isEmpty else {
+            return [.codecUnavailable(codec)]
+        }
+        let hasHW = matching.contains { $0.isHardwareAccelerated }
+        if !hasHW {
+            // SW-only: still allowed, but surface the warning.
+            return [.softwareEncoderOnly(codec)]
+        }
+        return []
+    }
+
+    private func preferredEncoder(
+        for codec: CodecKind, in encoders: [EncoderCapability]
+    ) -> EncoderCapability? {
+        let matching = encoders.filter { $0.codec == codec }
+        return matching.first { $0.isHardwareAccelerated } ?? matching.first
+    }
+
+    /// Clamps `requested` fps to `max`, appending a `.frameRateClamped` correction when needed.
+    private func clampFPS(
+        _ requested: Int,
+        max: Int,
+        source: SourceKind,
+        into corrections: inout [ValidationIssue]
+    ) -> Int {
+        let clamped = min(requested, max)
+        if clamped != requested {
+            corrections.append(.frameRateClamped(requested: requested, applied: clamped, source: source))
+        }
+        return clamped
+    }
+
+    /// Resolves camera format + fps.
+    ///
+    /// - Returns: `.resolved(ResolvedSource)` when the camera has usable formats;
+    ///   `.rejected(ValidationIssue)` when the camera is present but has no formats
+    ///   (treated as effectively unavailable — NFR-ERR, parse-don't-validate);
+    ///   `nil` when no camera is selected (caller uses a zero-dimension placeholder).
+    private func resolveCamera(
+        _ selections: Selections,
+        snapshot: CapabilitySnapshot,
+        corrections: inout [ValidationIssue]
+    ) -> CameraResolveResult? {
+        guard let cameraID = selections.cameraUniqueID,
+            let camera = snapshot.cameras.first(where: { $0.uniqueID == cameraID })
+        else { return nil }  // no camera selected — caller uses zero source
+
+        // Fix 1: a camera present in the snapshot with no usable formats is rejected.
+        // A camera that cannot deliver any format is effectively unavailable.
+        guard !camera.formats.isEmpty else {
+            return .rejected(.deviceUnavailable(id: cameraID, kind: .camera))
+        }
+
+        // Fix 2: surface an unavailable format override as a correction, never silently drop.
+        // `bestFormat` is safe to unwrap: formats non-empty is guaranteed by the guard above.
+        let bestFormat =
+            camera.formats.max(by: {
+                Int($0.dimensions.width) * Int($0.dimensions.height)
+                    < Int($1.dimensions.width) * Int($1.dimensions.height)
+            }) ?? camera.formats[0]  // fallback is unreachable; formats is non-empty
+
+        let chosenFormat: CameraFormatOption
+        if let override = selections.cameraFormatOverride {
+            if camera.formats.contains(override) {
+                chosenFormat = override
+            } else {
+                // The requested override is absent — fall back to best format and record correction.
+                chosenFormat = bestFormat
+                corrections.append(.cameraFormatUnavailable(requested: override))
+            }
+        } else {
+            chosenFormat = bestFormat
+        }
+
+        let maxFPS = chosenFormat.fpsRanges.map(\.maxFPS).max().map(Int.init) ?? selections.targetFPS
+        let clampedFPS = clampFPS(selections.targetFPS, max: maxFPS, source: .camera, into: &corrections)
+        return .resolved(
+            ResolvedSource(
+                width: Int(chosenFormat.dimensions.width),
+                height: Int(chosenFormat.dimensions.height),
+                fps: clampedFPS
+            ))
+    }
+
+    /// Resolves screen display resolution + fps. Returns zeroes if no display selected.
+    private func resolveScreen(
+        _ selections: Selections,
+        snapshot: CapabilitySnapshot,
+        corrections: inout [ValidationIssue]
+    ) -> ResolvedSource {
+        guard let displayID = selections.screenDisplayID,
+            let display = snapshot.displays.first(where: { $0.id == displayID })
+        else { return ResolvedSource(width: 0, height: 0, fps: selections.targetFPS) }
+
+        let clampedFPS = clampFPS(
+            selections.targetFPS, max: Int(display.maxRefreshFPS), source: .screen, into: &corrections)
+        return ResolvedSource(width: display.pixelWidth, height: display.pixelHeight, fps: clampedFPS)
+    }
+
+    private func checkResolution(
+        screen: ResolvedSource,
+        camera: ResolvedSource,
+        encoder: EncoderCapability?,
+        codec: CodecKind
+    ) -> ValidationOutcome? {
+        guard let maxDims = encoder?.maxDimensions else { return nil }
+        // Screen checked before camera — first-failure semantics, order is a correctness constraint.
+        for source in [screen, camera] {
+            if source.width > Int(maxDims.width) || source.height > Int(maxDims.height) {
+                let req = CMVideoDimensions(width: Int32(source.width), height: Int32(source.height))
+                return .rejected(primary: .resolutionUnsupported(requested: req, maxSupported: maxDims, codec: codec))
+            }
+        }
+        return nil
+    }
+
+    private func checkStreamBudget(
+        screenActive: Bool,
+        cameraActive: Bool,
+        system: SystemCapability
+    ) -> ValidationOutcome? {
+        // CapabilityMatrix is the sole source for multi-stream budgets (architecture.md §Capability-модель).
+        // For .unknown tier, the matrix already returns the conservative budget of 1.
+        // Using performanceCoreCount to raise the budget above the matrix value is
+        // explicitly avoided — it would loosen the spec'd constraint.
+        let requested = (screenActive ? 1 : 0) + (cameraActive ? 1 : 0)
+        let budget = CapabilityMatrix.budget(for: system.chipTier).maxHardwareEncodeSessions
+        guard requested <= budget else {
+            return .rejected(primary: .streamBudgetExceeded(requested: requested, budget: budget))
+        }
+        return nil
+    }
+
+    private func compose(
+        selections: Selections,
+        screenResolved: ResolvedSource,
+        cameraResolved: ResolvedSource
+    ) -> RecordingConfiguration {
+        var sources: [SourceConfiguration] = []
+        var outputs: [OutputDescriptor] = []
+        let ext = fileExtension(for: selections.container)
+        let hasMic = selections.microphoneUniqueID != nil
+        let tracks: Set<TrackKind> = hasMic ? [.video, .audio] : [.video]
+
+        // Appends one SourceConfiguration + one OutputDescriptor for a video source.
+        func appendVideoOutput(kind: SourceKind, resolved: ResolvedSource, name: String) {
+            sources.append(
+                SourceConfiguration(kind: kind, width: resolved.width, height: resolved.height, fps: resolved.fps))
+            outputs.append(
+                OutputDescriptor(
+                    destination: selections.outputDirectory.appendingPathComponent("\(name).\(ext)"),
+                    codec: selections.codec,
+                    container: selections.container,
+                    tracks: tracks
+                ))
+        }
+
+        if selections.screenDisplayID != nil {
+            appendVideoOutput(kind: .screen, resolved: screenResolved, name: "screen")
+        }
+
+        if selections.cameraUniqueID != nil {
+            appendVideoOutput(kind: .camera, resolved: cameraResolved, name: "camera")
+        }
+
+        if hasMic {
+            sources.append(SourceConfiguration(kind: .audio, width: 0, height: 0, fps: 0))
+        }
+
+        return RecordingConfiguration(sources: sources, outputs: outputs)
+    }
+
+    private func fileExtension(for container: ContainerKind) -> String {
+        switch container {
+        case .mov: return "mov"
+        case .mp4: return "mp4"
+        }
+    }
+}
+
+// MARK: - ResolvedSource
+
+/// Internal helper capturing the resolved (post-clamp) parameters for a single capture source.
+private struct ResolvedSource {
+    let width: Int
+    let height: Int
+    let fps: Int
+}
+
+// MARK: - CameraResolveResult
+
+/// Outcome of `resolveCamera`: either a usable resolved source, or a rejection reason.
+///
+/// A dedicated enum is used instead of `Result<ResolvedSource, ValidationIssue>` because
+/// `ValidationIssue` intentionally does not conform to `Error` (see `RecordingConfiguration.swift`
+/// — auto-corrections are informational, not errors, and conformance would be type-system
+/// misdirection).
+private enum CameraResolveResult {
+    case resolved(ResolvedSource)
+    case rejected(ValidationIssue)
+}
