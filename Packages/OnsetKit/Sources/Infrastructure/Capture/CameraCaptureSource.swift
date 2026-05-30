@@ -338,24 +338,13 @@ extension CameraCaptureSource {
 
     // MARK: Format projection
 
-    /// Pure-data projection of an `AVCaptureDevice.Format` for capability pickers (AC-3)
-    /// and unit tests. Uses only types constructable without a live device.
-    public struct FormatOption: Sendable, Equatable {
-        /// Native pixel dimensions of the format.
-        public let dimensions: CMVideoDimensions
-        /// Supported fps ranges as `(min, max)` pairs (both in frames per second).
-        public let fpsRanges: [(minFPS: Double, maxFPS: Double)]
+    /// `CameraCaptureSource.FormatOption` is the canonical Domain type `CameraFormatOption`.
+    ///
+    /// The capture source and the capability layer share one definition; downstream code
+    /// that references `CameraCaptureSource.FormatOption` keeps compiling via this alias.
+    public typealias FormatOption = CameraFormatOption
 
-        public static func == (lhs: FormatOption, rhs: FormatOption) -> Bool {
-            lhs.dimensions.width == rhs.dimensions.width
-                && lhs.dimensions.height == rhs.dimensions.height
-                && lhs.fpsRanges.elementsEqual(rhs.fpsRanges) {
-                    $0.minFPS == $1.minFPS && $0.maxFPS == $1.maxFPS
-                }
-        }
-    }
-
-    /// Projects a `CMFormatDescription` into a `FormatOption`.
+    /// Projects a `CMFormatDescription` into a `CameraFormatOption`.
     ///
     /// Extracted as a `static func` for unit testability — `AVFrameRateRange` has no
     /// public initialiser, so the caller supplies fps ranges directly.
@@ -363,26 +352,26 @@ extension CameraCaptureSource {
     /// - Parameters:
     ///   - description: The format description to project.
     ///   - fpsRanges: Fps ranges as `(min, max)` pairs (from `AVFrameRateRange`).
-    /// - Returns: The projected `FormatOption`.
+    /// - Returns: The projected `CameraFormatOption`.
     public static func projectFormatOption(
         description: CMFormatDescription,
         fpsRanges: [(minFPS: Double, maxFPS: Double)]
-    ) -> FormatOption {
+    ) -> CameraFormatOption {
         let dims = CMVideoFormatDescriptionGetDimensions(description)
-        return FormatOption(dimensions: dims, fpsRanges: fpsRanges)
+        return CameraFormatOption(dimensions: dims, fpsRanges: fpsRanges)
     }
 
-    /// Enumerates `AVCaptureDevice.Format`s into `FormatOption`s.
+    /// Enumerates `AVCaptureDevice.Format`s into `CameraFormatOption`s.
     ///
     /// AC-3: only combinations present in `device.formats` are produced — no synthesis.
     /// Non-testable in unit tests (`AVCaptureDevice.Format` has no public initialiser);
     /// the testable core is `projectFormatOption(description:fpsRanges:)`.
     ///
     /// - Parameter formats: `device.formats` from an `AVCaptureDevice`.
-    /// - Returns: One `FormatOption` per format, preserving order.
+    /// - Returns: One `CameraFormatOption` per format, preserving order.
     public static func enumerateFormats(
         _ formats: [AVCaptureDevice.Format]
-    ) -> [FormatOption] {
+    ) -> [CameraFormatOption] {
         formats.map { fmt in
             let fpsRanges = fmt.videoSupportedFrameRateRanges.map { range in
                 (minFPS: range.minFrameRate, maxFPS: range.maxFrameRate)
