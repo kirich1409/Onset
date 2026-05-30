@@ -21,7 +21,8 @@ public enum ValidationIssue: Sendable {
     /// - Parameters:
     ///   - requested: The fps value from `Selections.targetFPS`.
     ///   - applied: The clamped fps actually used in the configuration.
-    case frameRateClamped(requested: Int, applied: Int)
+    ///   - source: Which capture source (`.screen` or `.camera`) triggered the clamp.
+    case frameRateClamped(requested: Int, applied: Int, source: SourceKind)
 
     /// The chosen resolution exceeds the codec encoder's reported `maxDimensions`.
     ///
@@ -45,9 +46,6 @@ public enum ValidationIssue: Sendable {
     /// the state explicitly so the caller can decide.
     case softwareEncoderOnly(CodecKind)
 
-    /// The output directory URL is not writable.
-    case outputPathNotWritable(URL)
-
     /// A device referenced in `Selections` is no longer present in the snapshot (TOCTOU).
     ///
     /// Re-validating against a fresh `CapabilitySnapshot` is the correct recovery.
@@ -66,8 +64,8 @@ extension ValidationIssue: Equatable {
         switch (lhs, rhs) {
         case (.noVideoSource, .noVideoSource):
             return true
-        case (.frameRateClamped(let lReq, let lApp), .frameRateClamped(let rReq, let rApp)):
-            return lReq == rReq && lApp == rApp
+        case (.frameRateClamped(let lReq, let lApp, let lSrc), .frameRateClamped(let rReq, let rApp, let rSrc)):
+            return lReq == rReq && lApp == rApp && lSrc == rSrc
         case (
             .resolutionUnsupported(let lReq, let lMax, let lCodec),
             .resolutionUnsupported(let rReq, let rMax, let rCodec)
@@ -76,8 +74,6 @@ extension ValidationIssue: Equatable {
         case (.codecUnavailable(let lhs), .codecUnavailable(let rhs)):
             return lhs == rhs
         case (.softwareEncoderOnly(let lhs), .softwareEncoderOnly(let rhs)):
-            return lhs == rhs
-        case (.outputPathNotWritable(let lhs), .outputPathNotWritable(let rhs)):
             return lhs == rhs
         case (.deviceUnavailable(let lID, let lKind), .deviceUnavailable(let rID, let rKind)):
             return lID == rID && lKind == rKind

@@ -33,12 +33,15 @@ import Foundation
 /// 1. Device availability (TOCTOU) — must run first; later steps read device properties.
 /// 2. No-video-source — nil selection, not absent device.
 /// 3. Codec availability (HW preference, SW-only warning).
-/// 4. Output path writability.
-/// 5. Camera format resolution (pick format, clamp fps).
-/// 6. Screen fps clamp.
-/// 7. Resolution × codec maxDimensions check (all active video sources).
-/// 8. Stream-budget check.
-/// 9. Compose RecordingConfiguration and emit outcome.
+/// 4. Camera format resolution (pick format, clamp fps).
+/// 5. Screen fps clamp.
+/// 6. Resolution × codec maxDimensions check (all active video sources).
+/// 7. Stream-budget check.
+/// 8. Compose RecordingConfiguration and emit outcome.
+///
+/// Output-path writability is NOT checked here (would require filesystem I/O, violating
+/// the purity contract). It is the responsibility of the recording-session coordinator
+/// (#37) when it opens the `AVAssetWriter`.
 public struct Validator {
     public init() {}
 
@@ -61,27 +64,22 @@ public struct Validator {
             return .rejected(reasons: [.noVideoSource])
         }
         // Step 3: Codec availability
-        let codecResult = checkCodec(selections.codec, encoders: snapshot.encoders)
-        switch codecResult {
-        case .rejected:
-            return codecResult
-        default:
-            break
+        let codecIssues = checkCodec(selections.codec, encoders: snapshot.encoders)
+        if let unavailable = codecIssues.first(where: {
+            if case .codecUnavailable = $0 { return true }
+            return false
+        }) {
+            return .rejected(reasons: [unavailable])
         }
-        var corrections = extractCorrections(from: codecResult)
-
-        // Step 4: Output path writability
-        if let rejection = checkOutputPath(selections.outputDirectory) {
-            return rejection
-        }
+        var corrections = codecIssues  // warnings only (e.g. softwareEncoderOnly)
 
         let preferredEncoder = preferredEncoder(for: selections.codec, in: snapshot.encoders)
 
-        // Steps 5–6: Format selection and fps clamping
+        // Steps 4–5: Format selection and fps clamping
         let screenResolved = resolveScreen(selections, snapshot: snapshot, corrections: &corrections)
         let cameraResolved = resolveCamera(selections, snapshot: snapshot, corrections: &corrections)
 
-        // Step 7: Resolution vs encoder maxDimensions
+        // Step 6: Resolution vs encoder maxDimensions
         if let rejection = checkResolution(
             screen: screenResolved,
             camera: cameraResolved,
@@ -91,7 +89,7 @@ public struct Validator {
             return rejection
         }
 
-        // Step 8: Stream budget
+        // Step 7: Stream budget
         if let rejection = checkStreamBudget(
             screenActive: selections.screenDisplayID != nil,
             cameraActive: selections.cameraUniqueID != nil,
@@ -100,7 +98,7 @@ public struct Validator {
             return rejection
         }
 
-        // Step 9: Compose
+        // Step 8: Compose
         let config = compose(
             selections: selections,
             screenResolved: screenResolved,
@@ -134,28 +132,22 @@ extension Validator {
         return nil
     }
 
+    /// Returns codec-related issues: `.codecUnavailable` (rejection) or `.softwareEncoderOnly`
+    /// (warning), or empty when a hardware encoder is present. No `RecordingConfiguration`
+    /// is constructed here — the caller accumulates warnings into the real config path.
     private func checkCodec(
         _ codec: CodecKind,
         encoders: [EncoderCapability]
-    ) -> ValidationOutcome {
+    ) -> [ValidationIssue] {
         let matching = encoders.filter { $0.codec == codec }
         guard !matching.isEmpty else {
-            return .rejected(reasons: [.codecUnavailable(codec)])
+            return [.codecUnavailable(codec)]
         }
         let hasHW = matching.contains { $0.isHardwareAccelerated }
         if !hasHW {
             // SW-only: still allowed, but surface the warning.
-            // Returned as autoCorrected with no config yet; caller extracts corrections.
-            return .autoCorrected(
-                RecordingConfiguration(sources: [], outputs: []),
-                corrections: [.softwareEncoderOnly(codec)]
-            )
+            return [.softwareEncoderOnly(codec)]
         }
-        return .valid(RecordingConfiguration(sources: [], outputs: []))
-    }
-
-    private func extractCorrections(from outcome: ValidationOutcome) -> [ValidationIssue] {
-        if case .autoCorrected(_, let corrections) = outcome { return corrections }
         return []
     }
 
@@ -164,16 +156,6 @@ extension Validator {
     ) -> EncoderCapability? {
         let matching = encoders.filter { $0.codec == codec }
         return matching.first { $0.isHardwareAccelerated } ?? matching.first
-    }
-
-    private func checkOutputPath(_ directory: URL) -> ValidationOutcome? {
-        let fm = FileManager.default
-        var isDir: ObjCBool = false
-        let exists = fm.fileExists(atPath: directory.path, isDirectory: &isDir)
-        guard exists && isDir.boolValue && fm.isWritableFile(atPath: directory.path) else {
-            return .rejected(reasons: [.outputPathNotWritable(directory)])
-        }
-        return nil
     }
 
     /// Resolves camera format + fps. Returns (width, height, fps) tuple or zeroes if no camera.
@@ -202,7 +184,7 @@ extension Validator {
         let maxFPS = fmt.fpsRanges.map(\.maxFPS).max().map(Int.init) ?? selections.targetFPS
         let clampedFPS = min(selections.targetFPS, maxFPS)
         if clampedFPS != selections.targetFPS {
-            corrections.append(.frameRateClamped(requested: selections.targetFPS, applied: clampedFPS))
+            corrections.append(.frameRateClamped(requested: selections.targetFPS, applied: clampedFPS, source: .camera))
         }
         return ResolvedSource(
             width: Int(fmt.dimensions.width),
@@ -224,13 +206,7 @@ extension Validator {
         let maxFPS = Int(display.maxRefreshFPS)
         let clampedFPS = min(selections.targetFPS, maxFPS)
         if clampedFPS != selections.targetFPS {
-            let alreadyRecorded = corrections.contains(where: {
-                if case .frameRateClamped(let req, _) = $0 { return req == selections.targetFPS }
-                return false
-            })
-            if !alreadyRecorded {
-                corrections.append(.frameRateClamped(requested: selections.targetFPS, applied: clampedFPS))
-            }
+            corrections.append(.frameRateClamped(requested: selections.targetFPS, applied: clampedFPS, source: .screen))
         }
         return ResolvedSource(width: display.pixelWidth, height: display.pixelHeight, fps: clampedFPS)
     }

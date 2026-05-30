@@ -235,7 +235,7 @@ struct TC5FpsClampTests {
         }
         let screenSource = cfg.sources.first(where: { $0.kind == .screen })
         #expect(screenSource?.fps == 60)
-        #expect(corrections.contains(.frameRateClamped(requested: 120, applied: 60)))
+        #expect(corrections.contains(.frameRateClamped(requested: 120, applied: 60, source: .screen)))
     }
 
     @Test("Camera maxFPS=30, targetFPS=60 → autoCorrected with frameRateClamped")
@@ -253,7 +253,7 @@ struct TC5FpsClampTests {
         }
         let camSource = cfg.sources.first(where: { $0.kind == .camera })
         #expect(camSource?.fps == 30)
-        #expect(corrections.contains(.frameRateClamped(requested: 60, applied: 30)))
+        #expect(corrections.contains(.frameRateClamped(requested: 60, applied: 30, source: .camera)))
     }
 
     @Test("targetFPS=30 within display maxRefresh=60 → valid (no clamp)")
@@ -269,6 +269,30 @@ struct TC5FpsClampTests {
             Issue.record("Expected .valid, got \(outcome)")
             return
         }
+    }
+
+    @Test("Screen+camera active, targetFPS=120 above both maxima → two distinct frameRateClamped corrections")
+    func screenAndCameraFpsBothClamped() {
+        // proSnapshot: display maxRefreshFPS=60, camera maxFPS=30, chip Pro (budget=2)
+        let snap = Fixtures.proSnapshot()
+        let sel = Selections(
+            screenDisplayID: 1,
+            cameraUniqueID: "cam-1",
+            targetFPS: 120,
+            outputDirectory: Fixtures.outputDir
+        )
+        let outcome = validator.validate(sel, against: snap)
+        guard case .autoCorrected(_, let corrections) = outcome else {
+            Issue.record("Expected .autoCorrected, got \(outcome)")
+            return
+        }
+        #expect(
+            corrections.contains(.frameRateClamped(requested: 120, applied: 60, source: .screen)),
+            "Screen clamp correction must be present")
+        #expect(
+            corrections.contains(.frameRateClamped(requested: 120, applied: 30, source: .camera)),
+            "Camera clamp correction must be present")
+        #expect(corrections.count >= 2, "Both screen and camera corrections must appear")
     }
 }
 
@@ -568,25 +592,6 @@ struct ValidatorRejectionTests {
         #expect(reasons.contains(.noVideoSource))
     }
 
-    @Test("Non-writable output path → rejected outputPathNotWritable")
-    func nonWritablePathRejected() {
-        let snap = Fixtures.proSnapshot()
-        let sel = Selections(
-            screenDisplayID: 1,
-            targetFPS: 30,
-            outputDirectory: URL(fileURLWithPath: "/nonexistent/path/onset-test")
-        )
-        let outcome = validator.validate(sel, against: snap)
-        guard case .rejected(let reasons) = outcome else {
-            Issue.record("Expected .rejected, got \(outcome)")
-            return
-        }
-        #expect(
-            reasons.contains(where: {
-                if case .outputPathNotWritable = $0 { return true }
-                return false
-            }))
-    }
 }
 
 // MARK: - ValidationIssue equality tests
@@ -598,13 +603,15 @@ struct ValidationIssueEqualityTests {
         #expect(ValidationIssue.noVideoSource == .noVideoSource)
     }
 
-    @Test("frameRateClamped equality on matching values")
+    @Test("frameRateClamped equality on matching values and source")
     func frameRateClampedEquality() {
-        let a = ValidationIssue.frameRateClamped(requested: 120, applied: 60)
-        let b = ValidationIssue.frameRateClamped(requested: 120, applied: 60)
-        let c = ValidationIssue.frameRateClamped(requested: 90, applied: 60)
+        let a = ValidationIssue.frameRateClamped(requested: 120, applied: 60, source: .screen)
+        let b = ValidationIssue.frameRateClamped(requested: 120, applied: 60, source: .screen)
+        let c = ValidationIssue.frameRateClamped(requested: 90, applied: 60, source: .screen)
+        let d = ValidationIssue.frameRateClamped(requested: 120, applied: 60, source: .camera)
         #expect(a == b)
         #expect(a != c)
+        #expect(a != d, "Same fps values but different source must not be equal")
     }
 
     @Test("codecUnavailable equality")

@@ -88,10 +88,10 @@ struct DomainEnumTests {
         // auto-corrections (frameRateClamped, softwareEncoderOnly) are informational,
         // not errors. Conformance was dropped to avoid type-system misdirection.
         let noVideo = ValidationIssue.noVideoSource
-        let clamped = ValidationIssue.frameRateClamped(requested: 120, applied: 60)
+        let clamped = ValidationIssue.frameRateClamped(requested: 120, applied: 60, source: .screen)
         let swOnly = ValidationIssue.softwareEncoderOnly(.hevc)
         #expect(noVideo == .noVideoSource)
-        #expect(clamped == .frameRateClamped(requested: 120, applied: 60))
+        #expect(clamped == .frameRateClamped(requested: 120, applied: 60, source: .screen))
         #expect(swOnly == .softwareEncoderOnly(.hevc))
         #expect(noVideo != clamped)
     }
