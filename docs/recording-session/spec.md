@@ -31,7 +31,7 @@ provides_to: [recording-control-ui, performance-and-degradation]
 | `Domain/CaptureSource.swift` | New | протоколы `CaptureSource`/`SampleSink`/`EncodingWriter`/`ClockProviding`, `SourceKind`, `RecordingState` |
 | `Application/RecordingSessionCoordinator.swift` | New | actor: машина состояний, атомарный старт/стоп, isolate отказов |
 | `Infrastructure/Sync/HostClockService.swift` | New | `ClockProviding`: host clock + `CMSyncConvertTime` |
-| `Infrastructure/Sync/SampleRouter.swift` | New | `SampleSink`: fan-out микрофона; читает atomic `isAlive` writer'ов |
+| `Application/SampleRouter.swift` | New | `SampleSink`: fan-out микрофона; читает atomic `isAlive` writer'ов |
 | `Infrastructure/Writer/AVAssetWriterPipeline.swift` | New | `AVAssetWriter` (video+audio+timecode), HEVC/H.264 outputSettings, timecode-трек (MOV) |
 | `Application/OutputLayout.swift` | New | session-папка, имена файлов, reveal в Finder (AC-11) |
 
