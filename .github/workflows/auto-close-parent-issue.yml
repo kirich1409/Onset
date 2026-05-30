@@ -1,0 +1,211 @@
+# Автоматически закрывает родительский issue, когда все его sub-issues закрыты.
+# Поднимается вверх по иерархии предков в одном run, потому что действия под
+# GITHUB_TOKEN не запускают новый workflow run — каскад иначе не сработает.
+#
+# permissions: issues: write достаточно для:
+#   - чтения графа sub-issues через GraphQL (часть Issues API)
+#   - closeIssue mutation
+# contents: read — стандартный минимум для checkout-free workflow.
+
+name: Auto-close parent issue
+
+on:
+  issues:
+    types: [closed]
+  # workflow_dispatch для проверки с feature-ветки ДО merge в main:
+  # issues-события стреляют только из default-ветки, поэтому нужен ручной триггер.
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Номер закрытого issue (как если бы оно только что закрылось)"
+        required: true
+        type: string
+
+# Сериализуем прогоны по репозиторию, чтобы снизить гонку при одновременном
+# закрытии нескольких sub-issues. cancel-in-progress: false — не отменяем
+# выполняющийся прогон; параллельное закрытие parent безвредно (идемпотентно).
+concurrency:
+  group: auto-close-parent-issue
+  cancel-in-progress: false
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  auto-close-parent:
+    name: Закрыть родительский issue если все дети закрыты
+    runs-on: ubuntu-latest
+    steps:
+      - name: Подняться по иерархии предков и закрыть при выполнении условия
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b  # v7
+        with:
+          # github-token по умолчанию — GITHUB_TOKEN; явно не указываем.
+          script: |
+            // Определяем номер стартового issue:
+            // - при issues-событии берём из payload
+            // - при workflow_dispatch — из inputs.issue_number
+            const startNumber =
+              context.payload.issue?.number ??
+              parseInt(context.payload.inputs?.issue_number, 10);
+
+            if (!startNumber || isNaN(startNumber)) {
+              core.setFailed("Не удалось определить номер issue");
+              return;
+            }
+
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+
+            core.info(`Триггер: issue #${startNumber} закрыт в ${owner}/${repo}`);
+
+            // Множество номеров, закрытых в этом run — используется при
+            // обходе дедов, чтобы не пропустить каскад из-за eventual consistency
+            // (parent, закрытый секунду назад, может временно читаться как OPEN).
+            const closedThisRun = new Set([startNumber]);
+
+            // GraphQL: получить parent текущего issue
+            const GET_PARENT = `
+              query GetParent($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  issue(number: $number) {
+                    parent {
+                      id
+                      number
+                      title
+                      state
+                    }
+                  }
+                }
+              }
+            `;
+
+            // GraphQL: получить страницу sub-issues родителя с пагинацией
+            const GET_SUB_ISSUES_PAGE = `
+              query GetSubIssuesPage(
+                $owner: String!, $repo: String!, $number: Int!,
+                $cursor: String
+              ) {
+                repository(owner: $owner, name: $repo) {
+                  issue(number: $number) {
+                    subIssues(first: 100, after: $cursor) {
+                      totalCount
+                      pageInfo {
+                        hasNextPage
+                        endCursor
+                      }
+                      nodes {
+                        number
+                        state
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+
+            // GraphQL: закрыть issue по node id
+            // Примечание: НЕ используем subIssuesSummary.completed для проверки
+            // "все закрыты" — completed, вероятно, исключает закрытые с причиной
+            // NOT_PLANNED. Нам нужны ВСЕ закрытые, поэтому перебираем state каждого.
+            const CLOSE_ISSUE = `
+              mutation CloseIssue($issueId: ID!) {
+                closeIssue(input: { issueId: $issueId, stateReason: COMPLETED }) {
+                  issue {
+                    number
+                    state
+                  }
+                }
+              }
+            `;
+
+            // Полная пагинация sub-issues, возвращает массив {number, state}
+            async function fetchAllSubIssues(parentNumber) {
+              const allNodes = [];
+              let cursor = null;
+              let page = 0;
+
+              while (true) {
+                page++;
+                const res = await github.graphql(GET_SUB_ISSUES_PAGE, {
+                  owner, repo, number: parentNumber, cursor
+                });
+
+                const subIssues = res.repository.issue.subIssues;
+                allNodes.push(...subIssues.nodes);
+
+                if (page === 1) {
+                  core.info(
+                    `  Sub-issues родителя #${parentNumber}: всего ${subIssues.totalCount}`
+                  );
+                }
+
+                if (!subIssues.pageInfo.hasNextPage) break;
+
+                cursor = subIssues.pageInfo.endCursor;
+                core.info(`  Загружаем следующую страницу sub-issues (cursor: ${cursor})…`);
+              }
+
+              return allNodes;
+            }
+
+            // Основной цикл: идём вверх по цепочке предков
+            let currentNumber = startNumber;
+
+            while (true) {
+              // Получаем parent текущего issue
+              const parentRes = await github.graphql(GET_PARENT, {
+                owner, repo, number: currentNumber
+              });
+
+              const parent = parentRes.repository.issue.parent;
+
+              if (!parent) {
+                core.info(`Issue #${currentNumber} не имеет родителя — выход`);
+                break;
+              }
+
+              core.info(
+                `Найден родитель: #${parent.number} "${parent.title}" [${parent.state}]`
+              );
+
+              // Родитель уже закрыт — идемпотентно завершаем
+              if (parent.state === "CLOSED") {
+                core.info(`Родитель #${parent.number} уже закрыт — выход`);
+                break;
+              }
+
+              // Получаем ВСЕ sub-issues родителя (с пагинацией)
+              const subIssues = await fetchAllSubIssues(parent.number);
+
+              if (subIssues.length === 0) {
+                core.info(`У родителя #${parent.number} нет sub-issues — пропускаем`);
+                break;
+              }
+
+              // Считаем открытые, учитывая закрытые в этом run (eventual consistency)
+              const openCount = subIssues.filter(
+                s => s.state === "OPEN" && !closedThisRun.has(s.number)
+              ).length;
+
+              core.info(
+                `  Открытых sub-issues: ${openCount} из ${subIssues.length}`
+              );
+
+              if (openCount > 0) {
+                core.info(
+                  `Не все sub-issues закрыты (открытых: ${openCount}) — выход`
+                );
+                break;
+              }
+
+              // Все закрыты → закрываем родителя
+              core.info(`Закрываем родителя #${parent.number}…`);
+              await github.graphql(CLOSE_ISSUE, { issueId: parent.id });
+              core.info(`Родитель #${parent.number} закрыт`);
+
+              closedThisRun.add(parent.number);
+
+              // Поднимаемся выше — проверяем деда
+              currentNumber = parent.number;
+            }
