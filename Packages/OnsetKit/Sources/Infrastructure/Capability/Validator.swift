@@ -158,6 +158,20 @@ extension Validator {
         return matching.first { $0.isHardwareAccelerated } ?? matching.first
     }
 
+    /// Clamps `requested` fps to `max`, appending a `.frameRateClamped` correction when needed.
+    private func clampFPS(
+        _ requested: Int,
+        max: Int,
+        source: SourceKind,
+        into corrections: inout [ValidationIssue]
+    ) -> Int {
+        let clamped = min(requested, max)
+        if clamped != requested {
+            corrections.append(.frameRateClamped(requested: requested, applied: clamped, source: source))
+        }
+        return clamped
+    }
+
     /// Resolves camera format + fps. Returns (width, height, fps) tuple or zeroes if no camera.
     private func resolveCamera(
         _ selections: Selections,
@@ -182,10 +196,7 @@ extension Validator {
         }
 
         let maxFPS = fmt.fpsRanges.map(\.maxFPS).max().map(Int.init) ?? selections.targetFPS
-        let clampedFPS = min(selections.targetFPS, maxFPS)
-        if clampedFPS != selections.targetFPS {
-            corrections.append(.frameRateClamped(requested: selections.targetFPS, applied: clampedFPS, source: .camera))
-        }
+        let clampedFPS = clampFPS(selections.targetFPS, max: maxFPS, source: .camera, into: &corrections)
         return ResolvedSource(
             width: Int(fmt.dimensions.width),
             height: Int(fmt.dimensions.height),
@@ -203,11 +214,8 @@ extension Validator {
             let display = snapshot.displays.first(where: { $0.id == displayID })
         else { return ResolvedSource(width: 0, height: 0, fps: selections.targetFPS) }
 
-        let maxFPS = Int(display.maxRefreshFPS)
-        let clampedFPS = min(selections.targetFPS, maxFPS)
-        if clampedFPS != selections.targetFPS {
-            corrections.append(.frameRateClamped(requested: selections.targetFPS, applied: clampedFPS, source: .screen))
-        }
+        let clampedFPS = clampFPS(
+            selections.targetFPS, max: Int(display.maxRefreshFPS), source: .screen, into: &corrections)
         return ResolvedSource(width: display.pixelWidth, height: display.pixelHeight, fps: clampedFPS)
     }
 
@@ -218,13 +226,12 @@ extension Validator {
         codec: CodecKind
     ) -> ValidationOutcome? {
         guard let maxDims = encoder?.maxDimensions else { return nil }
-        if screen.width > Int(maxDims.width) || screen.height > Int(maxDims.height) {
-            let req = CMVideoDimensions(width: Int32(screen.width), height: Int32(screen.height))
-            return .rejected(reasons: [.resolutionUnsupported(requested: req, maxSupported: maxDims, codec: codec)])
-        }
-        if camera.width > Int(maxDims.width) || camera.height > Int(maxDims.height) {
-            let req = CMVideoDimensions(width: Int32(camera.width), height: Int32(camera.height))
-            return .rejected(reasons: [.resolutionUnsupported(requested: req, maxSupported: maxDims, codec: codec)])
+        // Screen checked before camera — first-failure semantics, order is a correctness constraint.
+        for source in [screen, camera] {
+            if source.width > Int(maxDims.width) || source.height > Int(maxDims.height) {
+                let req = CMVideoDimensions(width: Int32(source.width), height: Int32(source.height))
+                return .rejected(reasons: [.resolutionUnsupported(requested: req, maxSupported: maxDims, codec: codec)])
+            }
         }
         return nil
     }
@@ -257,38 +264,25 @@ extension Validator {
         let hasMic = selections.microphoneUniqueID != nil
         let tracks: Set<TrackKind> = hasMic ? [.video, .audio] : [.video]
 
-        if selections.screenDisplayID != nil {
+        // Appends one SourceConfiguration + one OutputDescriptor for a video source.
+        func appendVideoOutput(kind: SourceKind, resolved: ResolvedSource, name: String) {
             sources.append(
-                SourceConfiguration(
-                    kind: .screen,
-                    width: screenResolved.width,
-                    height: screenResolved.height,
-                    fps: screenResolved.fps
-                ))
+                SourceConfiguration(kind: kind, width: resolved.width, height: resolved.height, fps: resolved.fps))
             outputs.append(
                 OutputDescriptor(
-                    destination: selections.outputDirectory.appendingPathComponent("screen.\(ext)"),
+                    destination: selections.outputDirectory.appendingPathComponent("\(name).\(ext)"),
                     codec: selections.codec,
                     container: selections.container,
                     tracks: tracks
                 ))
         }
 
+        if selections.screenDisplayID != nil {
+            appendVideoOutput(kind: .screen, resolved: screenResolved, name: "screen")
+        }
+
         if selections.cameraUniqueID != nil {
-            sources.append(
-                SourceConfiguration(
-                    kind: .camera,
-                    width: cameraResolved.width,
-                    height: cameraResolved.height,
-                    fps: cameraResolved.fps
-                ))
-            outputs.append(
-                OutputDescriptor(
-                    destination: selections.outputDirectory.appendingPathComponent("camera.\(ext)"),
-                    codec: selections.codec,
-                    container: selections.container,
-                    tracks: tracks
-                ))
+            appendVideoOutput(kind: .camera, resolved: cameraResolved, name: "camera")
         }
 
         if hasMic {

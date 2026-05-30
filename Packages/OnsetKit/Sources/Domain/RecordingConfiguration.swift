@@ -124,18 +124,6 @@ public enum ValidationOutcome: Sendable, Equatable {
     /// Configuration cannot be realized; recording must not start.
     case rejected(reasons: [ValidationIssue])
 
-    public static func == (lhs: ValidationOutcome, rhs: ValidationOutcome) -> Bool {
-        switch (lhs, rhs) {
-        case (.valid(let lCfg), .valid(let rCfg)):
-            return lCfg == rCfg
-        case (.autoCorrected(let lCfg, let lCorr), .autoCorrected(let rCfg, let rCorr)):
-            return lCfg == rCfg && lCorr == rCorr
-        case (.rejected(let lReasons), .rejected(let rReasons)):
-            return lReasons == rReasons
-        default:
-            return false
-        }
-    }
 }
 
 // MARK: - RecordingConfiguration

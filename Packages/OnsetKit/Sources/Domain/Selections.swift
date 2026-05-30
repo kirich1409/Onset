@@ -36,8 +36,10 @@ public struct Selections: Sendable, Equatable {
 
     /// Directory in which output files will be created.
     ///
-    /// The Validator checks that this URL is writable. Timestamped filenames and
-    /// collision avoidance are deferred to the recording-session layer (#37).
+    /// Writability is NOT checked by the Validator (which is pure, no I/O). The
+    /// recording-session coordinator (#37) verifies the path is writable when it
+    /// opens the `AVAssetWriter`. Timestamped filenames and collision avoidance are
+    /// deferred to that same layer.
     public var outputDirectory: URL
 
     /// Explicit camera format selection, or `nil` to let the Validator pick the format

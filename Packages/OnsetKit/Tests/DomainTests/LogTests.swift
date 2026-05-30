@@ -1,4 +1,5 @@
 import Testing
+
 @testable import Domain
 
 // Tests for the unified logger API (issue #20).
