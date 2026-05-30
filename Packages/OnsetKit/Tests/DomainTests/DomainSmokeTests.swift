@@ -1,6 +1,7 @@
 import CoreMedia
 import Foundation
 import Testing
+
 @testable import Domain
 
 // MARK: - In-test fakes
