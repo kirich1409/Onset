@@ -1,6 +1,26 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "camera.preview.accessibilityLabel" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Camera preview"
+          }
+        }
+      }
+    },
+    "camera.preview.placeholder" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No camera"
+          }
+        }
+      }
+    },
     "root.greeting" : {
       "localizations" : {
         "en" : {
