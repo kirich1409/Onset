@@ -116,7 +116,7 @@ public protocol SampleSink: AnyObject, Sendable {
 ///
 /// - Note on `isAlive`/`health` relationship: `isAlive == true` implies `health == .alive`.
 ///   `isAlive` is the **hot-path atomic subset** — polled wait-free from the sample thread
-///   using acquire/release semantics (e.g. `OSAllocatedUnfairLock` or `Atomic<Bool>`).
+///   using acquire/release semantics (e.g. `Atomic<Bool>`).
 ///   `health` is the richer **control-plane signal** that may lag `isAlive` slightly; it
 ///   carries additional states (`.partial`, `.failed`) readable by the session coordinator.
 ///   Never use `health` on the sample path — poll `isAlive` there instead.
