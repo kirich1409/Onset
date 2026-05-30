@@ -61,7 +61,7 @@ public struct Validator {
         }
         // Step 2: At least one video source
         guard selections.screenDisplayID != nil || selections.cameraUniqueID != nil else {
-            return .rejected(reasons: [.noVideoSource])
+            return .rejected(primary: .noVideoSource)
         }
         // Step 3: Codec availability
         let codecIssues = checkCodec(selections.codec, encoders: snapshot.encoders)
@@ -69,7 +69,7 @@ public struct Validator {
             if case .codecUnavailable = $0 { return true }
             return false
         }) {
-            return .rejected(reasons: [unavailable])
+            return .rejected(primary: unavailable)
         }
         var corrections = codecIssues  // warnings only (e.g. softwareEncoderOnly)
 
@@ -77,7 +77,17 @@ public struct Validator {
 
         // Steps 4–5: Format selection and fps clamping
         let screenResolved = resolveScreen(selections, snapshot: snapshot, corrections: &corrections)
-        let cameraResolved = resolveCamera(selections, snapshot: snapshot, corrections: &corrections)
+        let cameraResolveResult = resolveCamera(selections, snapshot: snapshot, corrections: &corrections)
+        // Fix 1: a camera with no usable formats yields .rejected — reject immediately.
+        let cameraResolved: ResolvedSource
+        switch cameraResolveResult {
+        case .rejected(let issue):
+            return .rejected(primary: issue)
+        case .resolved(let resolved):
+            cameraResolved = resolved
+        case nil:
+            cameraResolved = ResolvedSource(width: 0, height: 0, fps: selections.targetFPS)
+        }
 
         // Step 6: Resolution vs encoder maxDimensions
         if let rejection = checkResolution(
@@ -117,17 +127,17 @@ extension Validator {
         if let displayID = selections.screenDisplayID,
             !snapshot.displays.contains(where: { $0.id == displayID })
         {
-            return .rejected(reasons: [.deviceUnavailable(id: String(displayID), kind: .screen)])
+            return .rejected(primary: .deviceUnavailable(id: String(displayID), kind: .screen))
         }
         if let cameraID = selections.cameraUniqueID,
             !snapshot.cameras.contains(where: { $0.uniqueID == cameraID })
         {
-            return .rejected(reasons: [.deviceUnavailable(id: cameraID, kind: .camera)])
+            return .rejected(primary: .deviceUnavailable(id: cameraID, kind: .camera))
         }
         if let micID = selections.microphoneUniqueID,
             !snapshot.microphones.contains(where: { $0.uniqueID == micID })
         {
-            return .rejected(reasons: [.deviceUnavailable(id: micID, kind: .audio)])
+            return .rejected(primary: .deviceUnavailable(id: micID, kind: .audio))
         }
         return nil
     }
@@ -172,36 +182,56 @@ extension Validator {
         return clamped
     }
 
-    /// Resolves camera format + fps. Returns (width, height, fps) tuple or zeroes if no camera.
+    /// Resolves camera format + fps.
+    ///
+    /// - Returns: `.resolved(ResolvedSource)` when the camera has usable formats;
+    ///   `.rejected(ValidationIssue)` when the camera is present but has no formats
+    ///   (treated as effectively unavailable — NFR-ERR, parse-don't-validate);
+    ///   `nil` when no camera is selected (caller uses a zero-dimension placeholder).
     private func resolveCamera(
         _ selections: Selections,
         snapshot: CapabilitySnapshot,
         corrections: inout [ValidationIssue]
-    ) -> ResolvedSource {
+    ) -> CameraResolveResult? {
         guard let cameraID = selections.cameraUniqueID,
             let camera = snapshot.cameras.first(where: { $0.uniqueID == cameraID })
-        else { return ResolvedSource(width: 0, height: 0, fps: selections.targetFPS) }
+        else { return nil }  // no camera selected — caller uses zero source
 
-        let chosenFormat: CameraFormatOption?
-        if let override = selections.cameraFormatOverride, camera.formats.contains(override) {
-            chosenFormat = override
-        } else {
-            chosenFormat = camera.formats.max(by: {
+        // Fix 1: a camera present in the snapshot with no usable formats is rejected.
+        // A camera that cannot deliver any format is effectively unavailable.
+        guard !camera.formats.isEmpty else {
+            return .rejected(.deviceUnavailable(id: cameraID, kind: .camera))
+        }
+
+        // Fix 2: surface an unavailable format override as a correction, never silently drop.
+        // `bestFormat` is safe to unwrap: formats non-empty is guaranteed by the guard above.
+        let bestFormat =
+            camera.formats.max(by: {
                 Int($0.dimensions.width) * Int($0.dimensions.height)
                     < Int($1.dimensions.width) * Int($1.dimensions.height)
-            })
-        }
-        guard let fmt = chosenFormat else {
-            return ResolvedSource(width: 0, height: 0, fps: selections.targetFPS)
+            }) ?? camera.formats[0]  // fallback is unreachable; formats is non-empty
+
+        let chosenFormat: CameraFormatOption
+        if let override = selections.cameraFormatOverride {
+            if camera.formats.contains(override) {
+                chosenFormat = override
+            } else {
+                // The requested override is absent — fall back to best format and record correction.
+                chosenFormat = bestFormat
+                corrections.append(.cameraFormatUnavailable(requested: override))
+            }
+        } else {
+            chosenFormat = bestFormat
         }
 
-        let maxFPS = fmt.fpsRanges.map(\.maxFPS).max().map(Int.init) ?? selections.targetFPS
+        let maxFPS = chosenFormat.fpsRanges.map(\.maxFPS).max().map(Int.init) ?? selections.targetFPS
         let clampedFPS = clampFPS(selections.targetFPS, max: maxFPS, source: .camera, into: &corrections)
-        return ResolvedSource(
-            width: Int(fmt.dimensions.width),
-            height: Int(fmt.dimensions.height),
-            fps: clampedFPS
-        )
+        return .resolved(
+            ResolvedSource(
+                width: Int(chosenFormat.dimensions.width),
+                height: Int(chosenFormat.dimensions.height),
+                fps: clampedFPS
+            ))
     }
 
     /// Resolves screen display resolution + fps. Returns zeroes if no display selected.
@@ -230,7 +260,7 @@ extension Validator {
         for source in [screen, camera] {
             if source.width > Int(maxDims.width) || source.height > Int(maxDims.height) {
                 let req = CMVideoDimensions(width: Int32(source.width), height: Int32(source.height))
-                return .rejected(reasons: [.resolutionUnsupported(requested: req, maxSupported: maxDims, codec: codec)])
+                return .rejected(primary: .resolutionUnsupported(requested: req, maxSupported: maxDims, codec: codec))
             }
         }
         return nil
@@ -248,7 +278,7 @@ extension Validator {
         let requested = (screenActive ? 1 : 0) + (cameraActive ? 1 : 0)
         let budget = CapabilityMatrix.budget(for: system.chipTier).maxHardwareEncodeSessions
         guard requested <= budget else {
-            return .rejected(reasons: [.streamBudgetExceeded(requested: requested, budget: budget)])
+            return .rejected(primary: .streamBudgetExceeded(requested: requested, budget: budget))
         }
         return nil
     }
@@ -307,4 +337,17 @@ private struct ResolvedSource {
     let width: Int
     let height: Int
     let fps: Int
+}
+
+// MARK: - CameraResolveResult
+
+/// Outcome of `resolveCamera`: either a usable resolved source, or a rejection reason.
+///
+/// A dedicated enum is used instead of `Result<ResolvedSource, ValidationIssue>` because
+/// `ValidationIssue` intentionally does not conform to `Error` (see `RecordingConfiguration.swift`
+/// — auto-corrections are informational, not errors, and conformance would be type-system
+/// misdirection).
+private enum CameraResolveResult {
+    case resolved(ResolvedSource)
+    case rejected(ValidationIssue)
 }

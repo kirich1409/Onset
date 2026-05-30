@@ -116,6 +116,24 @@ private enum Fixtures {
             system: SystemCapability(chipTier: .pro, performanceCoreCount: 8)
         )
     }
+
+    /// Snapshot where the camera is present in the snapshot but has no formats.
+    /// Fix 1: this must reject, not produce a 0×0 config.
+    static func emptyCameraFormatsSnapshot() -> CapabilitySnapshot {
+        CapabilitySnapshot(
+            generation: 1,
+            displays: [],
+            cameras: [
+                CameraCapability(
+                    uniqueID: "cam-empty",
+                    localizedName: "Broken Cam",
+                    formats: [])  // no formats
+            ],
+            microphones: [],
+            encoders: [EncoderCapability(codec: .hevc, isHardwareAccelerated: true)],
+            system: SystemCapability(chipTier: .pro, performanceCoreCount: 8)
+        )
+    }
 }
 
 // MARK: - TC-4: Valid configuration
@@ -294,6 +312,25 @@ struct TC5FpsClampTests {
             "Camera clamp correction must be present")
         #expect(corrections.count >= 2, "Both screen and camera corrections must appear")
     }
+
+    /// Fix 6: fps exactly equal to source max must not trigger a clamp correction.
+    /// Boundary: `min(requested, max)` where requested==max must equal max with no correction appended.
+    @Test("targetFPS equal to display maxRefreshFPS → no frameRateClamped correction")
+    func fpsAtExactMaxNoClamped() {
+        // proSnapshot display maxRefreshFPS = 60; selecting targetFPS = 60 must produce .valid
+        let snap = Fixtures.proSnapshot()
+        let sel = Selections(
+            screenDisplayID: 1,
+            targetFPS: 60,
+            outputDirectory: Fixtures.outputDir
+        )
+        let outcome = validator.validate(sel, against: snap)
+        guard case .valid = outcome else {
+            Issue.record("Expected .valid (no clamp at boundary), got \(outcome)")
+            return
+        }
+        // No corrections → .valid; absence of frameRateClamped is proven by the .valid guard above.
+    }
 }
 
 // MARK: - TC-6: Resolution unsupported
@@ -312,15 +349,15 @@ struct TC6ResolutionUnsupportedTests {
             outputDirectory: Fixtures.outputDir
         )
         let outcome = validator.validate(sel, against: snap)
-        guard case .rejected(let reasons) = outcome else {
+        guard case .rejected(let primary, _) = outcome else {
             Issue.record("Expected .rejected, got \(outcome)")
             return
         }
-        #expect(
-            reasons.contains(where: {
-                if case .resolutionUnsupported(_, _, let codec) = $0 { return codec == .h264 }
-                return false
-            }))
+        if case .resolutionUnsupported(_, _, let codec) = primary {
+            #expect(codec == .h264)
+        } else {
+            Issue.record("Expected .resolutionUnsupported as primary reason, got \(primary)")
+        }
     }
 
     @Test("5K camera with H.264 encoder limited to 4K → rejected resolutionUnsupported")
@@ -333,17 +370,18 @@ struct TC6ResolutionUnsupportedTests {
             outputDirectory: Fixtures.outputDir
         )
         let outcome = validator.validate(sel, against: snap)
-        guard case .rejected(let reasons) = outcome else {
+        guard case .rejected = outcome else {
             Issue.record("Expected .rejected, got \(outcome)")
             return
         }
         #expect(
-            reasons.contains(where: {
+            outcome.reasons.contains(where: {
                 if case .resolutionUnsupported = $0 { return true }
                 return false
             }))
     }
 
+    /// Fix 3: assert `.valid` first so the test fails if the outcome flips.
     @Test("Encoder with no maxDimensions reported: no resolution rejection")
     func noMaxDimensionsAllowed() {
         // proSnapshot HW HEVC encoder has no maxDimensions → resolution check skipped.
@@ -354,14 +392,36 @@ struct TC6ResolutionUnsupportedTests {
             outputDirectory: Fixtures.outputDir
         )
         let outcome = validator.validate(sel, against: snap)
-        // Should not be rejected for resolution
-        if case .rejected(let reasons) = outcome {
-            #expect(
-                !reasons.contains(where: {
-                    if case .resolutionUnsupported = $0 { return true }
-                    return false
-                }))
+        guard case .valid = outcome else {
+            Issue.record("Expected .valid (no resolution limit on unlimited encoder), got \(outcome)")
+            return
         }
+    }
+
+    /// Fix 6: both screen AND camera exceed encoder maxDimensions → .rejected with
+    /// resolutionUnsupported for .screen (screen is checked first — documents order invariant).
+    @Test("Both screen and camera exceed encoder maxDimensions → rejected with screen as primary")
+    func bothSourcesExceedMaxDimensions() {
+        // fiveKDisplaySnapshot: display=5K, cam=5K, encoder max=4K for H.264
+        let snap = Fixtures.fiveKDisplaySnapshot()
+        let sel = Selections(
+            screenDisplayID: 1,
+            cameraUniqueID: "cam-1",
+            targetFPS: 30,
+            codec: .h264,
+            outputDirectory: Fixtures.outputDir
+        )
+        let outcome = validator.validate(sel, against: snap)
+        guard case .rejected(let primary, _) = outcome else {
+            Issue.record("Expected .rejected, got \(outcome)")
+            return
+        }
+        // Screen is checked before camera (correctness constraint in Validator check order).
+        guard case .resolutionUnsupported(_, _, let codec) = primary else {
+            Issue.record("Expected .resolutionUnsupported as primary reason, got \(primary)")
+            return
+        }
+        #expect(codec == .h264)
     }
 }
 
@@ -381,12 +441,12 @@ struct TC7StreamBudgetTests {
             outputDirectory: Fixtures.outputDir
         )
         let outcome = validator.validate(sel, against: snap)
-        guard case .rejected(let reasons) = outcome else {
+        guard case .rejected = outcome else {
             Issue.record("Expected .rejected, got \(outcome)")
             return
         }
         #expect(
-            reasons.contains(where: {
+            outcome.reasons.contains(where: {
                 if case .streamBudgetExceeded(let req, let bud) = $0 {
                     return req == 2 && bud == 1
                 }
@@ -394,6 +454,7 @@ struct TC7StreamBudgetTests {
             }))
     }
 
+    /// Fix 3: assert `.valid` first so the test fails if the outcome flips.
     @Test("Unknown tier (budget=1): screen only → valid (single stream within budget)")
     func unknownTierSingleStreamValid() {
         let snap = Fixtures.unknownTierSnapshot()
@@ -403,16 +464,13 @@ struct TC7StreamBudgetTests {
             outputDirectory: Fixtures.outputDir
         )
         let outcome = validator.validate(sel, against: snap)
-        // Should not be rejected for stream budget
-        if case .rejected(let reasons) = outcome {
-            #expect(
-                !reasons.contains(where: {
-                    if case .streamBudgetExceeded = $0 { return true }
-                    return false
-                }))
+        guard case .valid = outcome else {
+            Issue.record("Expected .valid (single stream within budget=1), got \(outcome)")
+            return
         }
     }
 
+    /// Fix 3: assert `.valid` first so the test fails if the outcome flips.
     @Test("Pro tier (budget=2): screen+camera → valid (within budget)")
     func proTierTwoStreamsValid() {
         let snap = Fixtures.proSnapshot()
@@ -423,13 +481,9 @@ struct TC7StreamBudgetTests {
             outputDirectory: Fixtures.outputDir
         )
         let outcome = validator.validate(sel, against: snap)
-        // Must not be rejected for stream budget
-        if case .rejected(let reasons) = outcome {
-            #expect(
-                !reasons.contains(where: {
-                    if case .streamBudgetExceeded = $0 { return true }
-                    return false
-                }))
+        guard case .valid = outcome else {
+            Issue.record("Expected .valid (two streams within Pro budget=2), got \(outcome)")
+            return
         }
     }
 }
@@ -483,11 +537,11 @@ struct TC8CodecHWTests {
             outputDirectory: Fixtures.outputDir
         )
         let outcome = validator.validate(sel, against: snap)
-        guard case .rejected(let reasons) = outcome else {
+        guard case .rejected = outcome else {
             Issue.record("Expected .rejected, got \(outcome)")
             return
         }
-        #expect(reasons.contains(.codecUnavailable(.h264)))
+        #expect(outcome.reasons.contains(.codecUnavailable(.h264)))
     }
 }
 
@@ -522,12 +576,12 @@ struct TC27TOCTOUTests {
 
         // Snapshot B: camera removed → rejected
         let outcomeB = validator.validate(sel, against: snapB)
-        guard case .rejected(let reasons) = outcomeB else {
+        guard case .rejected = outcomeB else {
             Issue.record("Expected .rejected on snapshot B, got \(outcomeB)")
             return
         }
         #expect(
-            reasons.contains(where: {
+            outcomeB.reasons.contains(where: {
                 if case .deviceUnavailable(let id, let kind) = $0 {
                     return id == "cam-1" && kind == .camera
                 }
@@ -558,12 +612,12 @@ struct TC27TOCTOUTests {
         }
 
         let outcomeB = validator.validate(sel, against: snapB)
-        guard case .rejected(let reasons) = outcomeB else {
+        guard case .rejected = outcomeB else {
             Issue.record("Expected .rejected on snapshot B, got \(outcomeB)")
             return
         }
         #expect(
-            reasons.contains(where: {
+            outcomeB.reasons.contains(where: {
                 if case .deviceUnavailable(_, let kind) = $0 { return kind == .screen }
                 return false
             }))
@@ -585,19 +639,126 @@ struct ValidatorRejectionTests {
             outputDirectory: Fixtures.outputDir
         )
         let outcome = validator.validate(sel, against: snap)
-        guard case .rejected(let reasons) = outcome else {
+        guard case .rejected = outcome else {
             Issue.record("Expected .rejected, got \(outcome)")
             return
         }
-        #expect(reasons.contains(.noVideoSource))
+        #expect(outcome.reasons.contains(.noVideoSource))
     }
 
+    /// Fix 1: camera present in snapshot with no formats → .rejected (not a 0×0 config).
+    @Test("Camera present but formats empty → rejected deviceUnavailable (Fix 1)")
+    func cameraWithEmptyFormatsRejected() {
+        let snap = Fixtures.emptyCameraFormatsSnapshot()
+        let sel = Selections(
+            cameraUniqueID: "cam-empty",
+            targetFPS: 30,
+            outputDirectory: Fixtures.outputDir
+        )
+        let outcome = validator.validate(sel, against: snap)
+        guard case .rejected = outcome else {
+            Issue.record("Expected .rejected for camera with no formats, got \(outcome)")
+            return
+        }
+        #expect(
+            outcome.reasons.contains(where: {
+                if case .deviceUnavailable(let id, let kind) = $0 {
+                    return id == "cam-empty" && kind == .camera
+                }
+                return false
+            }),
+            "Rejection reason must be .deviceUnavailable for the empty-formats camera")
+    }
+
+    /// Fix 2(a): cameraFormatOverride present in formats → exact override dimensions used, no correction.
+    @Test("cameraFormatOverride present in formats → exact format used, no correction (Fix 2a)")
+    func cameraFormatOverridePresentUsed() {
+        let fmt = CameraFormatOption(
+            dimensions: CMVideoDimensions(width: 1920, height: 1080),
+            fpsRanges: [(minFPS: 1, maxFPS: 30)])
+        let snap = CapabilitySnapshot(
+            generation: 1,
+            displays: [],
+            cameras: [
+                CameraCapability(
+                    uniqueID: "cam-1",
+                    localizedName: "Test Cam",
+                    formats: [
+                        fmt,
+                        CameraFormatOption(
+                            dimensions: CMVideoDimensions(width: 3840, height: 2160),
+                            fpsRanges: [(minFPS: 1, maxFPS: 30)]),
+                    ])
+            ],
+            microphones: [],
+            encoders: [EncoderCapability(codec: .hevc, isHardwareAccelerated: true)],
+            system: SystemCapability(chipTier: .pro, performanceCoreCount: 8)
+        )
+        let sel = Selections(
+            cameraUniqueID: "cam-1",
+            targetFPS: 30,
+            outputDirectory: Fixtures.outputDir,
+            cameraFormatOverride: fmt
+        )
+        let outcome = validator.validate(sel, against: snap)
+        guard case .valid(let cfg) = outcome else {
+            Issue.record("Expected .valid when override is in formats, got \(outcome)")
+            return
+        }
+        let camSource = cfg.sources.first(where: { $0.kind == SourceKind.camera })
+        #expect(camSource?.width == 1920, "Override dimensions must be used (not best format)")
+        #expect(camSource?.height == 1080)
+    }
+
+    /// Fix 2(b): cameraFormatOverride set but not in formats → best format used + .autoCorrected.
+    @Test("cameraFormatOverride absent from formats → best format used + cameraFormatUnavailable correction (Fix 2b)")
+    func cameraFormatOverrideAbsentSurfacedAsCorrection() {
+        let absentFmt = CameraFormatOption(
+            dimensions: CMVideoDimensions(width: 640, height: 480),
+            fpsRanges: [(minFPS: 1, maxFPS: 60)])  // not in the camera's format list
+        let snap = CapabilitySnapshot(
+            generation: 1,
+            displays: [],
+            cameras: [
+                CameraCapability(
+                    uniqueID: "cam-1",
+                    localizedName: "Test Cam",
+                    formats: [
+                        CameraFormatOption(
+                            dimensions: CMVideoDimensions(width: 1920, height: 1080),
+                            fpsRanges: [(minFPS: 1, maxFPS: 30)])
+                    ])
+            ],
+            microphones: [],
+            encoders: [EncoderCapability(codec: .hevc, isHardwareAccelerated: true)],
+            system: SystemCapability(chipTier: .pro, performanceCoreCount: 8)
+        )
+        let sel = Selections(
+            cameraUniqueID: "cam-1",
+            targetFPS: 30,
+            outputDirectory: Fixtures.outputDir,
+            cameraFormatOverride: absentFmt
+        )
+        let outcome = validator.validate(sel, against: snap)
+        guard case .autoCorrected(let cfg, let corrections) = outcome else {
+            Issue.record("Expected .autoCorrected when override absent from formats, got \(outcome)")
+            return
+        }
+        // Best format (1920×1080) used
+        let camSource = cfg.sources.first(where: { $0.kind == SourceKind.camera })
+        #expect(camSource?.width == 1920, "Best available format dimensions must be used")
+        #expect(camSource?.height == 1080)
+        // Correction must name the requested format
+        #expect(
+            corrections.contains(ValidationIssue.cameraFormatUnavailable(requested: absentFmt)),
+            "cameraFormatUnavailable correction must be present")
+    }
 }
 
 // MARK: - ValidationIssue equality tests
 
 @Suite("ValidationIssue — Equatable")
-struct ValidationIssueEqualityTests {
+struct ValidationIssueEquatableTests {
     @Test("noVideoSource equals itself")
     func noVideoSourceEquality() {
         #expect(ValidationIssue.noVideoSource == .noVideoSource)
@@ -641,5 +802,43 @@ struct ValidationIssueEqualityTests {
             requested: req, maxSupported: nil, codec: .h264)
         #expect(a == b)
         #expect(a != c)
+    }
+
+    /// Fix 4: softwareEncoderOnly — different codecs must compare unequal.
+    @Test("softwareEncoderOnly equality and inequality")
+    func softwareEncoderOnlyEquality() {
+        #expect(ValidationIssue.softwareEncoderOnly(.hevc) == .softwareEncoderOnly(.hevc))
+        #expect(ValidationIssue.softwareEncoderOnly(.hevc) != .softwareEncoderOnly(.h264))
+    }
+
+    /// Fix 4: deviceUnavailable — id and kind both participate in equality.
+    @Test("deviceUnavailable equality: kind mismatch and id mismatch both differ")
+    func deviceUnavailableEquality() {
+        let cameraA = ValidationIssue.deviceUnavailable(id: "c1", kind: .camera)
+        let cameraADup = ValidationIssue.deviceUnavailable(id: "c1", kind: .camera)
+        let screenA = ValidationIssue.deviceUnavailable(id: "c1", kind: .screen)
+        let cameraB = ValidationIssue.deviceUnavailable(id: "c2", kind: .camera)
+        #expect(cameraA == cameraADup)
+        #expect(cameraA != screenA, "Same id but different kind must not be equal")
+        #expect(cameraA != cameraB, "Different id same kind must not be equal")
+    }
+
+    /// Fix 4: cameraFormatUnavailable — different requested formats must compare unequal.
+    @Test("cameraFormatUnavailable equality and inequality")
+    func cameraFormatUnavailableEquality() {
+        let fmt1 = CameraFormatOption(
+            dimensions: CMVideoDimensions(width: 1920, height: 1080),
+            fpsRanges: [(minFPS: 1, maxFPS: 30)])
+        let fmt1Dup = CameraFormatOption(
+            dimensions: CMVideoDimensions(width: 1920, height: 1080),
+            fpsRanges: [(minFPS: 1, maxFPS: 30)])
+        let fmt2 = CameraFormatOption(
+            dimensions: CMVideoDimensions(width: 3840, height: 2160),
+            fpsRanges: [(minFPS: 1, maxFPS: 30)])
+        let a = ValidationIssue.cameraFormatUnavailable(requested: fmt1)
+        let b = ValidationIssue.cameraFormatUnavailable(requested: fmt1Dup)
+        let c = ValidationIssue.cameraFormatUnavailable(requested: fmt2)
+        #expect(a == b)
+        #expect(a != c, "Different requested formats must not be equal")
     }
 }

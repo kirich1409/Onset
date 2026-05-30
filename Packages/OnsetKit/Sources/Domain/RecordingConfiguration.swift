@@ -57,6 +57,14 @@ public enum ValidationIssue: Sendable {
     ///   - requested: Number of simultaneous encode sessions in the selection.
     ///   - budget: Maximum supported by `CapabilityMatrix` for the detected chip tier.
     case streamBudgetExceeded(requested: Int, budget: Int)
+
+    /// A `cameraFormatOverride` was set but the requested format is not in the camera's
+    /// reported format list. The Validator fell back to the best available format.
+    ///
+    /// This is a correction (not a rejection): recording can proceed with the best format,
+    /// but the override was silently swapped — surfacing it satisfies NFR-ERR (no silent
+    /// auto-correction).
+    case cameraFormatUnavailable(requested: CameraFormatOption)
 }
 
 extension ValidationIssue: Equatable {
@@ -79,6 +87,8 @@ extension ValidationIssue: Equatable {
             return lID == rID && lKind == rKind
         case (.streamBudgetExceeded(let lReq, let lBud), .streamBudgetExceeded(let rReq, let rBud)):
             return lReq == rReq && lBud == rBud
+        case (.cameraFormatUnavailable(let lFmt), .cameraFormatUnavailable(let rFmt)):
+            return lFmt == rFmt
         default:
             return false
         }
@@ -122,8 +132,27 @@ public enum ValidationOutcome: Sendable, Equatable {
     case autoCorrected(RecordingConfiguration, corrections: [ValidationIssue])
 
     /// Configuration cannot be realized; recording must not start.
-    case rejected(reasons: [ValidationIssue])
+    ///
+    /// - Parameters:
+    ///   - primary: The first (and usually only) reason the configuration was rejected.
+    ///     Having at least one reason is enforced by the type — `.rejected(reasons: [])` is
+    ///     impossible, so every rejection has a diagnosable cause (NFR-ERR).
+    ///   - additional: Any further reasons beyond the primary. Empty in the common
+    ///     single-failure case (the Validator returns on first failure today).
+    case rejected(primary: ValidationIssue, additional: [ValidationIssue] = [])
+}
 
+extension ValidationOutcome {
+    /// All rejection reasons as a flat array `[primary] + additional`.
+    ///
+    /// Returns `[]` for `.valid` and `.autoCorrected` — use the `corrections` label on
+    /// `.autoCorrected` to access warnings. `reasons` is meaningful only on `.rejected`.
+    public var reasons: [ValidationIssue] {
+        if case .rejected(let primary, let additional) = self {
+            return [primary] + additional
+        }
+        return []
+    }
 }
 
 // MARK: - RecordingConfiguration
