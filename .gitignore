@@ -19,3 +19,6 @@ build/
 
 # Process working files (orchestration state/reports — not part of the product)
 swarm-report/
+
+# Local agent infrastructure (Claude Code agent-memory, local settings)
+.claude/

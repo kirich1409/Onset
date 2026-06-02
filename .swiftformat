@@ -1,0 +1,63 @@
+# SwiftFormat configuration — Onset (Swift 6, macOS 26.5)
+# Run: swiftformat . --config .swiftformat
+# CI: swiftformat . --lint --config .swiftformat
+
+--swiftversion 6.0
+--minversion 0.54.0
+
+# ── Indentation ──────────────────────────────────────────────────────────────
+--indent 4
+--tabwidth 4
+--indentcase false
+--xcodeindentation enabled
+--indentstrings false
+
+# ── Wrapping ─────────────────────────────────────────────────────────────────
+--maxwidth 120
+--wraparguments before-first
+--wrapparameters before-first
+--wrapcollections before-first
+--wrapreturntype if-multiline
+--wrapternary before-operators
+--wrapconditions after-first
+--wrapeffects preserve
+
+# ── Braces / spacing ─────────────────────────────────────────────────────────
+--allman false
+--elseposition same-line
+--guardelse auto
+--emptybraces no-space
+--spacearoundoperators include
+--spaceinsidebrackets false
+--spaceinsidecomments false
+--spaces around
+--trimwhitespace always
+
+# ── Imports ───────────────────────────────────────────────────────────────────
+--importgrouping testable-bottom
+
+# ── Declarations ──────────────────────────────────────────────────────────────
+--modifierorder typeMethods,beforeTrailingClosure,nonisolated,override,required,convenience,indirect,lazy,weak,unowned,static,class,final,private,fileprivate,internal,package,public,open
+--funcattributes prev-line
+--typeattributes prev-line
+--varattributes prev-line
+--closurevoid remove
+--self insert
+--stripunusedargs closure-only
+--redundanttype inferred
+--nospaceoperators ...,  ....<
+
+# ── String / comment ─────────────────────────────────────────────────────────
+--commas always
+--semicolons never
+--trailingcommas always
+--trimwhitespace always
+--linebreakaftercolon true
+--header strip
+
+# ── Swift 6 specific ─────────────────────────────────────────────────────────
+--asynccapturing false
+--extensionacl on-declarations
+
+# ── Excluded paths ────────────────────────────────────────────────────────────
+--exclude Onset.xcodeproj,DerivedData,.build,swarm-report

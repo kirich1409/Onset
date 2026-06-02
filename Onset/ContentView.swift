@@ -5,8 +5,14 @@
 //  Created by Kirill Rozov on 02.06.2026.
 //
 
-import SwiftUI
 import SwiftData
+import SwiftUI
+
+// Sidebar column width constants — template placeholder, will be replaced by feature implementation.
+private enum SidebarLayout {
+    static let minWidth: CGFloat = 180
+    static let idealWidth: CGFloat = 200
+}
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
@@ -24,7 +30,7 @@ struct ContentView: View {
                 }
                 .onDelete(perform: deleteItems)
             }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
+            .navigationSplitViewColumnWidth(min: SidebarLayout.minWidth, ideal: SidebarLayout.idealWidth)
             .toolbar {
                 ToolbarItem {
                     Button(action: addItem) {
