@@ -38,14 +38,15 @@ extension Route: Equatable {
 ///
 /// | hasPostScreenGrantArg | screenPreflightGranted | allGranted | → Route     |
 /// |-----------------------|------------------------|------------|-------------|
-/// | true                  | true                   | any        | .allSet     |
+/// | true                  | true                   | true       | .allSet     |
+/// | true                  | true                   | false      | .onboarding |
 /// | true                  | false                  | any        | status-based (no relaunch — anti-loop) |
 /// | false                 | any                    | true       | .main       |
 /// | false                 | any                    | false      | .onboarding |
 ///
-/// Note: `allSet` fires when `hasPostScreenGrantArg && screenPreflightGranted`, regardless
-/// of camera/microphone status — the spec only requires the relaunch path to confirm screen
-/// access. AC-8's "3 из 3" is what the `allSet` screen *shows*, not a precondition for the route.
+/// `.allSet` requires `hasPostScreenGrantArg && screenPreflightGranted && allGranted` — all
+/// three conditions must be true. The relaunch path only navigates to the "all granted" screen
+/// when all permissions are actually granted, preventing false "3 из 3" claims.
 enum AppRouter {
     /// Computes the start route.
     ///
@@ -60,11 +61,13 @@ enum AppRouter {
     )
     -> Route {
         if hasPostScreenGrantArg {
-            // Relaunch path: anti-loop protection requires preflight to actually be true
-            // before showing allSet. If it's still false the grant wasn't picked up yet —
-            // fall through to status-based routing without triggering another relaunch.
+            // Relaunch path: anti-loop protection requires preflight to actually be true.
+            // If it's still false the grant wasn't picked up yet — fall through to
+            // status-based routing without triggering another relaunch.
             if screenPreflightGranted {
-                return .allSet
+                // Show allSet ONLY when all three permissions are actually granted;
+                // otherwise route by actual status (camera/mic still pending).
+                return allGranted ? .allSet : .onboarding
             }
             // hasArg but preflight false → status routing, no loop
         }
@@ -78,19 +81,20 @@ enum AppRouter {
 extension AppRouter {
     /// Returns `true` when the running process should trigger a self-relaunch.
     ///
-    /// Relaunch is warranted when screen recording was just detected as granted by the
-    /// in-process polling loop (i.e. `CGPreflight` flipped to `true` during this run),
-    /// and we have not already started a relaunch (anti-loop guard via `pendingFlag`).
+    /// Relaunch is warranted when screen recording was just detected as granted (i.e.
+    /// `CGPreflight` flipped from non-`.authorized` to `.authorized` during this run).
+    /// This front-edge predicate is used by both the polling loop and `checkScreenStatusNow`
+    /// to ensure the same detection logic runs in all code paths. The anti-loop guard
+    /// (`isPendingRelaunch`) is checked inside `AppRelauncher.relaunchIfNeeded()`.
     ///
     /// - Parameters:
-    ///   - screenJustDetectedGranted: Polling observed `CGPreflightScreenCaptureAccess() == true`.
-    ///   - pendingScreenGrantRelaunch: `UserDefaults` flag set before the previous relaunch; signals
-    ///     that a relaunch is already in flight — must not trigger again.
+    ///   - previous: The screen status before this check.
+    ///   - current: The screen status after this check.
     nonisolated static func shouldTriggerRelaunch(
-        screenJustDetectedGranted: Bool,
-        pendingScreenGrantRelaunch: Bool
+        previous: PermissionStatus,
+        current: PermissionStatus
     )
     -> Bool {
-        screenJustDetectedGranted && !pendingScreenGrantRelaunch
+        previous != .authorized && current == .authorized
     }
 }

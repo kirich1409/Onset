@@ -73,6 +73,23 @@ final class OnboardingViewModel {
         self.permissions.effectivePermissions
     }
 
+    // MARK: - Device display names (for authorized card subtitles — never log these)
+
+    /// Localized name of the default camera, or `nil`.  Used in the authorized camera card.
+    var defaultCameraName: String? {
+        self.permissions.defaultCameraName
+    }
+
+    /// Localized name of the default microphone, or `nil`. Used in the authorized mic card.
+    var defaultMicrophoneName: String? {
+        self.permissions.defaultMicrophoneName
+    }
+
+    /// Human-readable resolution of the main display. Used in the authorized screen card.
+    var primaryDisplayDescription: String? {
+        self.permissions.primaryDisplayDescription
+    }
+
     var progress: Int {
         self.permissions.progress
     }
@@ -86,23 +103,16 @@ final class OnboardingViewModel {
             return "все разрешения активны"
         }
         // "Ожидание…" hint applies while screen is notDetermined and we're actively polling.
-        // When status resolves to denied/authorized, the awaiting latch is ignored.
-        let screenNotDetermined = self.permissions.screenStatus == .notDetermined
+        // Screen has no real denied state (CGPreflight is Bool-only), so .denied/.restricted
+        // are treated the same as .notDetermined for hint purposes.
+        let screenNotDetermined = self.permissions.screenStatus != .authorized
         if screenNotDetermined, effective.cameraAvailable, effective.microphoneAvailable {
             return "ждём запись экрана"
-        }
-        if self.permissions.screenStatus == .denied || self.permissions.screenStatus == .restricted {
-            return "запись экрана заблокирована"
         }
         if !effective.microphoneAvailable, effective.cameraAvailable, effective.screenAvailable {
             return "остался микрофон"
         }
         return "нужно выдать три разрешения"
-    }
-
-    /// Whether the denied-screen red banner should be visible.
-    var showDeniedScreenBanner: Bool {
-        self.permissions.screenStatus == .denied || self.permissions.screenStatus == .restricted
     }
 
     /// Whether a graceful "Продолжить без экрана" option is available.
@@ -125,15 +135,25 @@ final class OnboardingViewModel {
 
     // MARK: - Screen recording actions
 
-    /// Opens System Settings → Screen Recording and marks the card as awaiting.
+    /// Calls `CGRequestScreenCaptureAccess()` once (registers Onset in the TCC list),
+    /// then opens System Settings → Screen Recording and marks the card as awaiting.
+    ///
+    /// `CGRequestScreenCaptureAccess()` must be called at least once before the app appears
+    /// in System Settings → Screen Recording; without it the user opens Settings and Onset
+    /// is not in the list to toggle. The call is idempotent after the first invocation.
     func openScreenRecordingSettings() {
+        // One-shot registration: ensures Onset appears in the Screen Recording list.
+        self.permissions.requestScreenRecording()
         self.permissions.openScreenRecordingSettings()
-        onboardingLogger.info("Opened screen recording settings; entering awaiting state")
+        onboardingLogger.info("Registered Onset in TCC list; opened Screen Recording settings; entering awaiting state")
         self.isAwaitingScreen = true
     }
 
     /// Calls `CGRequestScreenCaptureAccess()` once (one-shot — never in a loop).
     /// Transitions card to awaiting state so the screen-recording card shows "Ожидание…".
+    ///
+    /// This method remains available for callers that need only the TCC registration step
+    /// without opening Settings (e.g. composition root probes).
     func requestScreenRecording() {
         self.permissions.requestScreenRecording()
         onboardingLogger.info("Requested screen recording access (one-shot)")
@@ -178,14 +198,16 @@ final class OnboardingViewModel {
         return self.permissions.startScreenPolling()
     }
 
-    // MARK: - Settings deep-link pass-through
+    // MARK: - Settings deep-links
 
-    /// Exposes the service's settings openers to view-layer button actions.
-    ///
-    /// Read-only pass-through: avoids leaking the concrete service type while keeping
-    /// settings navigation actions within the VM's jurisdiction.
-    var permissionsService: any PermissionsProviding {
-        self.permissions
+    func openCameraSettings() {
+        self.permissions.openCameraSettings()
+        onboardingLogger.info("Opened camera settings")
+    }
+
+    func openMicrophoneSettings() {
+        self.permissions.openMicrophoneSettings()
+        onboardingLogger.info("Opened microphone settings")
     }
 
     // MARK: - Refresh (called on scene active to catch revoke-in-Settings)

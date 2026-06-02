@@ -81,6 +81,12 @@ final class FakePermissionsService: PermissionsProviding {
             self.microphoneStatus == .authorized
     }
 
+    // MARK: - Device display names (configurable stubs)
+
+    var defaultCameraName: String? = "Fake Camera"
+    var defaultMicrophoneName: String? = "Fake Microphone"
+    var primaryDisplayDescription: String? = "1920×1080"
+
     func refresh() {
         self.refreshCallCount += 1
     }

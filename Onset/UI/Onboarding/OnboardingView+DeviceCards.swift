@@ -31,6 +31,7 @@ extension OnboardingView {
             status: self.cameraCardStatus,
             actionButton: self.cameraCardButton,
             instructions: nil,
+            instructionsHeader: nil,
             showInstructions: .constant(false)
         )
     }
@@ -55,7 +56,8 @@ extension OnboardingView {
             "Чтобы записывать вас в кадре."
 
         case .authorized:
-            "Камера готова."
+            // Show the real device name when available (matching mockup "Logitech MX Brio").
+            viewModel.defaultCameraName.map { "\($0)." } ?? "Камера готова."
 
         case .denied, .restricted:
             "Доступ запрещён. Откройте настройки."
@@ -74,7 +76,7 @@ extension OnboardingView {
         case .denied, .restricted:
             .init(
                 label: "Открыть настройки",
-                action: { viewModel.permissionsService.openCameraSettings() },
+                action: { viewModel.openCameraSettings() },
                 style: .secondary
             )
 
@@ -98,6 +100,7 @@ extension OnboardingView {
             status: self.microphoneCardStatus,
             actionButton: self.microphoneCardButton,
             instructions: nil,
+            instructionsHeader: nil,
             showInstructions: .constant(false)
         )
     }
@@ -122,7 +125,8 @@ extension OnboardingView {
             "Без него запись будет без вашего голоса."
 
         case .authorized:
-            "Микрофон готов."
+            // Show the real device name when available (matching mockup "MacBook Pro — микрофон").
+            viewModel.defaultMicrophoneName.map { "\($0)." } ?? "Микрофон готов."
 
         case .denied, .restricted:
             "Доступ запрещён. Откройте настройки."
@@ -141,7 +145,7 @@ extension OnboardingView {
         case .denied, .restricted:
             .init(
                 label: "Открыть настройки",
-                action: { viewModel.permissionsService.openMicrophoneSettings() },
+                action: { viewModel.openMicrophoneSettings() },
                 style: .secondary
             )
 

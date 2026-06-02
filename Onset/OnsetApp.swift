@@ -34,7 +34,10 @@ struct OnsetApp: App {
 
     var body: some Scene {
         Window("Onset", id: "onboarding") {
-            RootView(permissionsService: self.permissionsService)
+            RootView(
+                permissionsService: self.permissionsService,
+                hasPostScreenGrantArg: CommandLine.arguments.contains(AppRelauncher.postScreenGrantArg)
+            )
         }
         // Fixed-size window that wraps the content — prevents user resizing.
         .windowResizability(.contentSize)
@@ -80,17 +83,9 @@ struct RootView: View {
 
     // MARK: - Init
 
-    init(permissionsService: PermissionsService) {
+    init(permissionsService: PermissionsService, hasPostScreenGrantArg: Bool) {
         self.permissionsService = permissionsService
-
-        let hasArg = CommandLine.arguments.contains(AppRelauncher.postScreenGrantArg)
-        if hasArg {
-            // Clear the anti-loop flag so a subsequent revoke-detect doesn't re-relaunch.
-            AppRelauncher.clearPendingRelaunch()
-            appLogger.info("Started with --post-screen-grant; cleared pendingScreenGrantRelaunch flag")
-        }
-
-        _hasPostScreenGrantArg = State(initialValue: hasArg)
+        _hasPostScreenGrantArg = State(initialValue: hasPostScreenGrantArg)
         _onboardingViewModel = State(initialValue: OnboardingViewModel(permissions: permissionsService))
     }
 
@@ -120,6 +115,9 @@ struct RootView: View {
             case .allSet:
                 AllSetView(permissions: self.permissionsService) {
                     // Clear transient arg so subsequent re-renders use status-based routing.
+                    // AppRouter.route(allGranted: true, hasPostScreenGrantArg: false, …) → .main,
+                    // so clearing the arg is sufficient — bypassToMain is not needed here and
+                    // would cause a regression if the user later revokes a permission.
                     self.hasPostScreenGrantArg = false
                     appLogger.info("AllSet acknowledged — cleared post-screen-grant arg")
                 }
@@ -133,6 +131,15 @@ struct RootView: View {
                     appLogger.info("Returned from main to onboarding — cleared bypassToMain")
                 }
             }
+        }
+        // One-shot: clear the anti-loop flag on the first render after a post-screen-grant
+        // relaunch. Pinned to `hasPostScreenGrantArg` so the task fires once at startup
+        // (true), not again after the arg is cleared (false). Moved out of View.init so
+        // initializers have no observable side effects.
+        .task(id: self.hasPostScreenGrantArg) {
+            guard self.hasPostScreenGrantArg else { return }
+            AppRelauncher.clearPendingRelaunch()
+            appLogger.info("Started with --post-screen-grant; cleared pendingScreenGrantRelaunch flag")
         }
         // Refresh statuses when the app comes to foreground.
         // This is the primary mechanism for detecting revoke-in-Settings (AC-9 / spec).

@@ -63,6 +63,8 @@ struct PermissionCardView: View {
     let status: PermissionCardStatus
     let actionButton: PermissionCardActionButton?
     let instructions: [String]?
+    /// Optional uppercase caption shown above the instruction steps.
+    let instructionsHeader: String?
 
     @Binding var showInstructions: Bool
 
@@ -71,10 +73,18 @@ struct PermissionCardView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .center, spacing: Metrics.cardPadding) {
-                self.iconTile
-                self.titleAndSubtitle
-                Spacer(minLength: 0)
-                self.statusChip
+                // Card info combined into a single accessibility element so VoiceOver
+                // reads icon + title + subtitle + chip as one unit.
+                HStack(alignment: .center, spacing: Metrics.cardPadding) {
+                    self.iconTile
+                    self.titleAndSubtitle
+                    Spacer(minLength: 0)
+                    self.statusChip
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(self.accessibilityCardLabel)
+
+                // Action button stays as a sibling — independently focusable in VoiceOver.
                 if let button = actionButton {
                     self.actionButtonView(button)
                 }
@@ -82,18 +92,30 @@ struct PermissionCardView: View {
             .padding(Metrics.cardPadding)
             .contentShape(Rectangle())
 
-            if let steps = instructions, showInstructions {
-                Divider()
-                    .padding(.top, Metrics.dividerTopPadding)
-                self.instructionsList(steps)
-                    .padding(.horizontal, Metrics.cardPadding)
-                    .padding(.bottom, Metrics.cardPadding)
-            }
+            self.instructionsSection
         }
         .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: Metrics.cardCornerRadius))
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(self.accessibilityCardLabel)
+    }
+
+    @ViewBuilder
+    private var instructionsSection: some View {
+        if let steps = instructions, showInstructions {
+            Divider()
+                .padding(.top, Metrics.dividerTopPadding)
+            if let header = instructionsHeader {
+                Text(header)
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+                    .padding(.horizontal, Metrics.cardPadding)
+                    .padding(.top, Metrics.instructionSpacing)
+            }
+            self.instructionsList(steps)
+                .padding(.horizontal, Metrics.cardPadding)
+                .padding(.bottom, Metrics.cardPadding)
+        }
     }
 
     // MARK: - Sub-views
@@ -276,12 +298,13 @@ extension View {
         status: .required,
         actionButton: .init(label: "Открыть настройки", action: {}, style: .secondary),
         instructions: nil,
+        instructionsHeader: nil,
         showInstructions: .constant(false)
     )
     .padding()
 }
 
-#Preview("Awaiting + instructions", traits: .fixedLayout(width: 440, height: 200)) {
+#Preview("Awaiting + instructions", traits: .fixedLayout(width: 440, height: 220)) {
     PermissionCardView(
         iconSymbol: "display",
         iconColor: .purple,
@@ -290,24 +313,26 @@ extension View {
         status: .awaiting,
         actionButton: nil,
         instructions: [
-            "Откройте раздел **Конфиденциальность → Запись экрана**.",
+            "Открыт раздел **Конфиденциальность → Запись экрана**.",
             "Включите переключатель напротив **Onset** в списке приложений.",
             "Можно не возвращаться вручную — статус обновится сам.",
         ],
+        instructionsHeader: "ЖДЁМ РАЗРЕШЕНИЕ",
         showInstructions: .constant(true)
     )
     .padding()
 }
 
-#Preview("Denied", traits: .fixedLayout(width: 440, height: 80)) {
+#Preview("Denied — camera (camera/mic keep real denied state)", traits: .fixedLayout(width: 440, height: 80)) {
     PermissionCardView(
-        iconSymbol: "display",
+        iconSymbol: "camera.fill",
         iconColor: Color(nsColor: .systemGray),
-        title: "Запись экрана",
-        subtitle: "Отклонено. Включите вручную в настройках.",
+        title: "Камера",
+        subtitle: "Доступ запрещён. Откройте настройки.",
         status: .denied,
         actionButton: .init(label: "Открыть настройки", action: {}, style: .secondary),
         instructions: nil,
+        instructionsHeader: nil,
         showInstructions: .constant(false)
     )
     .padding()
@@ -324,6 +349,7 @@ extension View {
         status: .authorized,
         actionButton: nil,
         instructions: nil,
+        instructionsHeader: nil,
         showInstructions: .constant(false)
     )
     .padding()

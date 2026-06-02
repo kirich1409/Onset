@@ -26,6 +26,20 @@ protocol PermissionsProviding: AnyObject {
     /// `true` when all three permissions are `.authorized`.
     var allGranted: Bool { get }
 
+    // MARK: - Device display names (for UI display only — never log these)
+
+    /// Localized name of the default video capture device, or `nil` when no camera is available.
+    /// Example: "MX Brio", "FaceTime HD Camera".
+    var defaultCameraName: String? { get }
+
+    /// Localized name of the default audio capture device, or `nil` when no microphone is available.
+    /// Example: "MX Brio", "MacBook Pro Microphone".
+    var defaultMicrophoneName: String? { get }
+
+    /// Human-readable resolution of the main display, formatted as "<W>×<H>".
+    /// Example: "3840×2160". Returns `nil` when the display mode cannot be read.
+    var primaryDisplayDescription: String? { get }
+
     // MARK: - Mutation
 
     /// Refreshes all three statuses from their system sources.

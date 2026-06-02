@@ -100,10 +100,12 @@ struct AllSetView: View {
             iconSymbol: "display",
             iconColor: .purple,
             title: "Запись экрана",
-            subtitle: "Захват вашего дисплея.",
+            subtitle: self.permissions.primaryDisplayDescription.map { "Дисплей \($0)." }
+                ?? "Захват вашего дисплея.",
             status: .authorized,
             actionButton: nil,
             instructions: nil,
+            instructionsHeader: nil,
             showInstructions: .constant(false)
         )
     }
@@ -117,10 +119,11 @@ struct AllSetView: View {
                 blue: Metrics.cameraColorGreen
             ),
             title: "Камера",
-            subtitle: "Камера готова.",
+            subtitle: self.permissions.defaultCameraName.map { "\($0)." } ?? "Камера готова.",
             status: .authorized,
             actionButton: nil,
             instructions: nil,
+            instructionsHeader: nil,
             showInstructions: .constant(false)
         )
     }
@@ -134,10 +137,11 @@ struct AllSetView: View {
                 blue: Metrics.micColorBlue
             ),
             title: "Микрофон",
-            subtitle: "Микрофон готов.",
+            subtitle: self.permissions.defaultMicrophoneName.map { "\($0)." } ?? "Микрофон готов.",
             status: .authorized,
             actionButton: nil,
             instructions: nil,
+            instructionsHeader: nil,
             showInstructions: .constant(false)
         )
     }
@@ -183,7 +187,7 @@ struct AllSetView: View {
 
 #if DEBUG
     @MainActor
-    final private class PreviewPermissionsServiceAllSet: PermissionsProviding { // swiftlint:disable:this modifier_order
+    private final class PreviewPermissionsServiceAllSet: PermissionsProviding {
         var screenStatus: PermissionStatus {
             .authorized
         }
@@ -206,6 +210,18 @@ struct AllSetView: View {
 
         var allGranted: Bool {
             true
+        }
+
+        var defaultCameraName: String? {
+            "Preview Camera"
+        }
+
+        var defaultMicrophoneName: String? {
+            "Preview Microphone"
+        }
+
+        var primaryDisplayDescription: String? {
+            "1920×1080"
         }
 
         func refresh() {}

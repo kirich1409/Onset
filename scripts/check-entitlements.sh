@@ -67,20 +67,13 @@ done
 # Update this list as new entitlements are intentionally added.
 
 ALLOWED_LIST=(
-  "com.apple.security.cs.allow-unsigned-executable-memory"
-  "com.apple.security.cs.disable-library-validation"
-  # Camera access (required for webcam recording)
-  "com.apple.security.device.camera"
-  # Screen capture entitlement — screen recording goes through TCC, not this entitlement;
-  # listed here so it doesn't trigger an UNKNOWN warning if added intentionally later.
+  # Screen capture permission (required for screen recording feature)
   "com.apple.security.screen-capture"
   # Camera access (required for webcam overlay recording)
   "com.apple.security.device.camera"
   # Microphone / audio-input access (required for voice recording into video track)
   # Hardened Runtime key is com.apple.security.device.audio-input (not .microphone)
   "com.apple.security.device.audio-input"
-  # JIT-compilation exception — opt-in; only needed by apps that generate executable code at runtime
-  "com.apple.security.cs.allow-jit"
   # Debug-only: injected by Xcode to allow debugger attachment; absent in Release/Distribution builds
   "com.apple.security.get-task-allow"
 )
@@ -91,6 +84,18 @@ PRESENT_KEYS=$(echo "$ENTITLEMENTS" | grep -o '<key>[^<]*</key>' | sed 's/<key>/
 
 while IFS= read -r KEY; do
   [ -z "$KEY" ] && continue
+
+  # Hardened Runtime relaxations (com.apple.security.cs.*) are never allowed in Onset.
+  # Any cs.* entitlement is a hard violation — it weakens the security boundary and
+  # would surface immediately rather than as a silent unknown.
+  case "$KEY" in
+    com.apple.security.cs.*)
+      echo "CS VIOLATION: $KEY weakens Hardened Runtime — must not be present in Onset"
+      VIOLATIONS=$((VIOLATIONS + 1))
+      continue
+      ;;
+  esac
+
   FOUND=0
   for ALLOWED in "${ALLOWED_LIST[@]}"; do
     if [ "$KEY" = "$ALLOWED" ]; then

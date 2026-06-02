@@ -73,18 +73,20 @@ extension OnboardingView {
 
     @ViewBuilder
     var footerButtons: some View {
-        if viewModel.showDeniedScreenBanner {
-            self.deniedFooterButtons
-        } else if viewModel.isAwaitingScreen {
-            self.checkAgainButton
+        if viewModel.isAwaitingScreen {
+            self.awaitingFooterButtons
         } else {
             self.normalFooterButtons
         }
     }
 
-    var deniedFooterButtons: some View {
+    /// Footer for the "Ожидание…" state — shows «Проверить снова» plus
+    /// «Продолжить без экрана» when camera is already available (AC-7).
+    var awaitingFooterButtons: some View {
         HStack(spacing: Metrics.footerHSpacing) {
             if viewModel.canContinueWithoutScreen {
+                // Available whenever screen is not granted AND camera is available —
+                // not gated on any denied state (AC-6/AC-7 amendment).
                 Button("Продолжить без экрана") {
                     onProceedToMain()
                 }

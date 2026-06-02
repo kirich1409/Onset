@@ -29,6 +29,18 @@ import SwiftUI
                 self.microphoneStatus == .authorized
         }
 
+        var defaultCameraName: String? {
+            "Preview Camera"
+        }
+
+        var defaultMicrophoneName: String? {
+            "Preview Microphone"
+        }
+
+        var primaryDisplayDescription: String? {
+            "1920×1080"
+        }
+
         func refresh() {}
         func requestCamera() async {}
         func requestMicrophone() async {}
@@ -60,32 +72,18 @@ import SwiftUI
     ) {}
 }
 
-#Preview("Waiting 2/3 — screen not determined") {
-    // Shows the 2/3 state (camera + mic granted, screen notDetermined).
-    // The "Ожидание…" card chip activates at runtime when openScreenRecordingSettings()
-    // is called; this preview shows the pre-awaiting notDetermined state for the same
-    // permission count.
-    OnboardingView(
-        viewModel: OnboardingViewModel(
-            permissions: PreviewPermissionsService(
-                screen: .notDetermined,
-                camera: .authorized,
-                microphone: .authorized
-            )
+#Preview("Waiting 2/3 — screen awaiting") {
+    // Shows the 2/3 state with "Ожидание…" chip active (isAwaitingScreen = true).
+    let viewModel = OnboardingViewModel(
+        permissions: PreviewPermissionsService(
+            screen: .notDetermined,
+            camera: .authorized,
+            microphone: .authorized
         )
-    ) {}
-}
-
-#Preview("Screen denied 2/3") {
-    OnboardingView(
-        viewModel: OnboardingViewModel(
-            permissions: PreviewPermissionsService(
-                screen: .denied,
-                camera: .authorized,
-                microphone: .authorized
-            )
-        )
-    ) {}
+    )
+    // Simulate the awaiting state that activates after tapping "Открыть настройки".
+    viewModel.requestScreenRecording()
+    return OnboardingView(viewModel: viewModel) {}
 }
 
 #Preview("Mic remaining 2/3") {

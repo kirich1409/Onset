@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import CoreGraphics
 import os
 
 /// Logger is Sendable; nonisolated private let avoids MainActor hop for logger calls
@@ -71,6 +72,31 @@ final class PermissionsService: PermissionsProviding {
         self.screenStatus == .authorized &&
             self.cameraStatus == .authorized &&
             self.microphoneStatus == .authorized
+    }
+
+    // MARK: - Device display names
+
+    /// Localized name of the default video capture device.
+    /// `AVCaptureDevice.default(for:)` is safe to call on any thread (documented thread-safe).
+    /// Never logged — display only, per PII policy.
+    nonisolated var defaultCameraName: String? {
+        AVCaptureDevice.default(for: .video)?.localizedName
+    }
+
+    /// Localized name of the default audio capture device.
+    /// `AVCaptureDevice.default(for:)` is safe to call on any thread (documented thread-safe).
+    /// Never logged — display only, per PII policy.
+    nonisolated var defaultMicrophoneName: String? {
+        AVCaptureDevice.default(for: .audio)?.localizedName
+    }
+
+    /// Human-readable resolution of the main display ("W×H" in native pixels).
+    /// Uses `CGDisplayCopyDisplayMode` + `CGDisplayMode.pixelWidth/pixelHeight` (macOS 10.8+,
+    /// current Swift API as verified on macOS 26). Returns `nil` when no mode is available.
+    /// Never logged — display only, per PII policy.
+    nonisolated var primaryDisplayDescription: String? {
+        guard let mode = CGDisplayCopyDisplayMode(CGMainDisplayID()) else { return nil }
+        return "\(mode.pixelWidth)×\(mode.pixelHeight)"
     }
 
     // MARK: - Init
@@ -166,12 +192,14 @@ final class PermissionsService: PermissionsProviding {
     }
 
     func checkScreenStatusNow() {
+        let previous = self.screenStatus
         let newStatus = self.screenPermission.currentStatus()
         serviceLogger.debug("Manual check — screen: \(newStatus)")
         self.screenStatus = newStatus
 
-        // If access was just detected → trigger relaunch (same logic as the polling loop).
-        if newStatus == .authorized {
+        // Use the shared front-edge predicate so detection is identical to the polling loop.
+        if AppRouter.shouldTriggerRelaunch(previous: previous, current: newStatus) {
+            serviceLogger.info("Screen recording access detected (manual check) — triggering relaunch")
             self.relauncher.relaunchIfNeeded()
         }
     }
@@ -191,13 +219,16 @@ final class PermissionsService: PermissionsProviding {
             // Cooperative cancellation check before doing any work.
             guard !Task.isCancelled else { break }
 
-            let newStatus = self.screenPermission.currentStatus()
             let previous = self.screenStatus
+            let newStatus = self.screenPermission.currentStatus()
             self.screenStatus = newStatus
 
-            if previous != .authorized, newStatus == .authorized {
+            // Use the shared front-edge predicate (same as checkScreenStatusNow).
+            if AppRouter.shouldTriggerRelaunch(previous: previous, current: newStatus) {
                 serviceLogger.info("Screen recording access detected via polling — triggering relaunch")
                 self.relauncher.relaunchIfNeeded()
+                // Screen is the only polled permission; nothing left to poll once granted.
+                break
             }
         }
         serviceLogger.info("Screen polling stopped")

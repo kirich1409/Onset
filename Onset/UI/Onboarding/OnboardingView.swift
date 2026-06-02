@@ -32,13 +32,6 @@ struct OnboardingView: View {
         static let progressBarCornerRadius: CGFloat = 2
         static let footerHSpacing: CGFloat = 12
         static let footerTextSpacing: CGFloat = 4
-        static let bannerCornerRadius: CGFloat = 10
-        static let bannerHPadding: CGFloat = 12
-        static let bannerVPadding: CGFloat = 10
-        static let bannerIconSpacing: CGFloat = 8
-        static let bannerBorderOpacity: CGFloat = 0.30
-        static let bannerFillOpacity: CGFloat = 0.10
-        static let bannerBorderWidth: CGFloat = 1
         static let progressTotalCount: CGFloat = 3
     }
 
@@ -65,9 +58,6 @@ struct OnboardingView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: Metrics.sectionSpacing) {
                     self.headerSection
-                    if self.viewModel.showDeniedScreenBanner {
-                        self.deniedBanner
-                    }
                     self.cardsSection
                 }
                 .padding(Metrics.contentPadding)
@@ -117,44 +107,15 @@ struct OnboardingView: View {
     }
 
     private var headerSubtitle: String {
-        if self.viewModel.showDeniedScreenBanner {
-            return "Запись экрана отклонена. Её нужно включить вручную — системный запрос больше не появится."
-        }
         if self.viewModel.isAwaitingScreen, self.viewModel.screenStatus == .notDetermined {
             return "Onset открыл Системные настройки. Включите доступ к записи экрана — мы поймём это сами."
         }
-        return "Onset один раз попросит доступ к экрану, камере и микрофону. Данные никуда не отправляются."
-    }
-
-    // MARK: - Denied banner
-
-    private var deniedBanner: some View {
-        HStack(alignment: .top, spacing: Metrics.bannerIconSpacing) {
-            Image(systemName: "exclamationmark.shield.fill")
-                .foregroundStyle(.red)
-                .accessibilityHidden(true)
-            Text(
-                "Доступ к записи экрана запрещён. macOS заблокировал захват экрана для Onset. " +
-                    "Пока доступ не включён в настройках, можно записывать только камеру и звук."
-            )
-            .font(.footnote)
-            .foregroundStyle(.primary)
-            .fixedSize(horizontal: false, vertical: true)
+        // Mic-remaining: screen + camera granted, only mic left (matching mockup "_ _(1).png").
+        let effective = self.viewModel.effectivePermissions
+        if effective.screenAvailable, effective.cameraAvailable, !effective.microphoneAvailable {
+            return "Почти всё готово. Осталось выдать последнее разрешение, чтобы записывать со звуком."
         }
-        .padding(.horizontal, Metrics.bannerHPadding)
-        .padding(.vertical, Metrics.bannerVPadding)
-        .background(
-            RoundedRectangle(cornerRadius: Metrics.bannerCornerRadius)
-                .fill(Color.red.opacity(Metrics.bannerFillOpacity))
-                .overlay(
-                    RoundedRectangle(cornerRadius: Metrics.bannerCornerRadius)
-                        .strokeBorder(
-                            Color.red.opacity(Metrics.bannerBorderOpacity),
-                            lineWidth: Metrics.bannerBorderWidth
-                        )
-                )
-        )
-        .accessibilityLabel("Доступ к записи экрана запрещён. Можно записывать только камеру и звук.")
+        return "Onset один раз попросит доступ к экрану, камере и микрофону. Данные никуда не отправляются."
     }
 
     // MARK: - Cards
@@ -183,14 +144,17 @@ struct OnboardingView: View {
             status: cardStatus,
             actionButton: showButton ? self.screenCardButton : nil,
             instructions: self.screenCardInstructions,
+            instructionsHeader: self.screenCardInstructionsHeader,
             showInstructions: self.$showScreenInstructions
         )
     }
 
     private var screenCardStatus: PermissionCardStatus {
         // isAwaitingScreen is a transient UI flag set when the user opens Settings.
-        // Actual status wins when it resolves to a definitive state — prevents the
-        // denied banner and "Ожидание…" chip from appearing simultaneously.
+        // Actual status wins when it resolves to a definitive state — prevents
+        // "Ожидание…" chip from sticking after the status changes.
+        // Screen recording has no real denied state (CGPreflight is Bool-only),
+        // so .denied/.restricted fall back to .required ("Требуется" + Open Settings).
         switch self.viewModel.screenStatus {
         case .notDetermined:
             self.viewModel.isAwaitingScreen ? .awaiting : .required
@@ -199,23 +163,23 @@ struct OnboardingView: View {
             .authorized
 
         case .denied, .restricted:
-            .denied
+            // Treat as .required — screen can always be retried via Open Settings.
+            self.viewModel.isAwaitingScreen ? .awaiting : .required
         }
     }
 
     private var screenCardSubtitle: String {
-        if self.viewModel.isAwaitingScreen, self.viewModel.screenStatus == .notDetermined {
+        if self.viewModel.isAwaitingScreen, self.viewModel.screenStatus != .authorized {
             return "Ожидаем включения в Системных настройках."
         }
         switch self.viewModel.screenStatus {
-        case .notDetermined:
+        case .notDetermined, .denied, .restricted:
+            // Screen has no real denied state — treat all non-authorized statuses as "required".
             return "Чтобы захватывать ваш дисплей."
 
         case .authorized:
-            return "Захват вашего дисплея."
-
-        case .denied, .restricted:
-            return "Отклонено. Включите вручную в настройках."
+            // Show the real display description when available (matching mockup).
+            return self.viewModel.primaryDisplayDescription.map { "Дисплей \($0)." } ?? "Захват вашего дисплея."
         }
     }
 
@@ -230,21 +194,41 @@ struct OnboardingView: View {
     }
 
     private var screenCardInstructions: [String]? {
-        let status = self.screenCardStatus
-        guard status == .required || status == .awaiting || status == .denied else { return nil }
-        if status == .denied {
-            return [
-                "Откройте **Конфиденциальность → Запись экрана**.",
-                "Найдите **Onset** в списке и включите переключатель.",
-                "macOS попросит **перезапустить Onset** — приложение перезапустится само.",
+        switch self.screenCardStatus {
+        case .required:
+            [
+                "Нажмите «Открыть настройки» — Onset откроет нужный раздел.",
+                "В разделе **Конфиденциальность → Запись экрана** включите переключатель напротив Onset.",
+                "Вернитесь в Onset — проверка пройдёт **автоматически**.",
             ]
+
+        case .awaiting:
+            // Distinct copy for the waiting state (matching mockup "_ _ _ _.png").
+            [
+                "Открыт раздел **Конфиденциальность → Запись экрана**.",
+                "Включите переключатель напротив **Onset** в списке приложений.",
+                "Можно не возвращаться вручную — статус обновится сам.",
+            ]
+
+        case .authorized, .denied:
+            nil
         }
-        // required / awaiting
-        return [
-            "Нажмите «Открыть настройки» — Onset откроет нужный раздел.",
-            "В разделе **Конфиденциальность → Запись экрана** включите переключатель напротив Onset.",
-            "Вернитесь в Onset — проверка пройдёт **автоматически**.",
-        ]
+    }
+
+    /// Section header shown above the screen recording instructions.
+    ///
+    /// State-dependent: required → «КАК ВЫДАТЬ ЗАПИСЬ ЭКРАНА»; awaiting → «ЖДЁМ РАЗРЕШЕНИЕ».
+    private var screenCardInstructionsHeader: String? {
+        switch self.screenCardStatus {
+        case .required:
+            "КАК ВЫДАТЬ ЗАПИСЬ ЭКРАНА"
+
+        case .awaiting:
+            "ЖДЁМ РАЗРЕШЕНИЕ"
+
+        case .authorized, .denied:
+            nil
+        }
     }
 
     // MARK: - «Проверить снова» button

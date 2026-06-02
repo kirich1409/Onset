@@ -51,48 +51,20 @@ struct OnboardingViewModelTests {
         #expect(fake.requestMicrophoneCallCount == 1)
     }
 
-    // MARK: - AC-6: Screen denied → denied state + banner visible
+    // MARK: - AC-7: Screen not granted + camera authorized → canContinueWithoutScreen available
 
-    @Test("Screen denied → showDeniedScreenBanner true (AC-6)")
-    func screenDenied_bannerVisible() {
-        let fake = FakePermissionsService(screen: .denied)
-        let sut = OnboardingViewModel(permissions: fake)
-
-        #expect(sut.screenStatus == .denied)
-        #expect(sut.showDeniedScreenBanner)
-    }
-
-    @Test("Screen restricted → showDeniedScreenBanner true (AC-6, restricted treated as denied)")
-    func screenRestricted_bannerVisible() {
-        let fake = FakePermissionsService(screen: .restricted)
-        let sut = OnboardingViewModel(permissions: fake)
-
-        #expect(sut.screenStatus == .restricted)
-        #expect(sut.showDeniedScreenBanner)
-    }
-
-    @Test("Screen notDetermined → showDeniedScreenBanner false")
-    func screenNotDetermined_bannerHidden() {
-        let fake = FakePermissionsService(screen: .notDetermined)
-        let sut = OnboardingViewModel(permissions: fake)
-
-        #expect(!sut.showDeniedScreenBanner)
-    }
-
-    // MARK: - AC-7: Screen denied + camera authorized → canContinueWithoutScreen available
-
-    @Test("Screen denied + camera authorized → canContinueWithoutScreen true (AC-7)")
-    func screenDenied_cameraAuthorized_canContinueWithoutScreen() {
-        let fake = FakePermissionsService(screen: .denied, camera: .authorized)
+    @Test("Screen notDetermined + camera authorized → canContinueWithoutScreen true (AC-7)")
+    func screenNotDetermined_cameraAuthorized_canContinueWithoutScreen() {
+        let fake = FakePermissionsService(screen: .notDetermined, camera: .authorized)
         let sut = OnboardingViewModel(permissions: fake)
 
         #expect(sut.canContinueWithoutScreen)
         #expect(sut.canContinue) // camera is a valid video source
     }
 
-    @Test("Screen denied, camera denied → canContinueWithoutScreen false (no video source)")
-    func screenDenied_cameraDenied_cannotContinueWithoutScreen() {
-        let fake = FakePermissionsService(screen: .denied, camera: .denied)
+    @Test("Screen notDetermined, camera notDetermined → canContinueWithoutScreen false (no video source)")
+    func screenNotDetermined_cameraNotDetermined_cannotContinueWithoutScreen() {
+        let fake = FakePermissionsService(screen: .notDetermined, camera: .notDetermined)
         let sut = OnboardingViewModel(permissions: fake)
 
         #expect(!sut.canContinueWithoutScreen)
@@ -142,7 +114,7 @@ struct OnboardingViewModelTests {
         #expect(fake.requestScreenRecordingCallCount == 1)
     }
 
-    @Test("openScreenRecordingSettings → isAwaitingScreen true (AC-4 deep-link path)")
+    @Test("openScreenRecordingSettings → requestScreenRecording + openSettings called, isAwaitingScreen true (AC-4)")
     func openScreenRecordingSettings_setsAwaitingState() {
         let fake = FakePermissionsService(screen: .notDetermined)
         let sut = OnboardingViewModel(permissions: fake)
@@ -150,6 +122,9 @@ struct OnboardingViewModelTests {
         sut.openScreenRecordingSettings()
 
         #expect(sut.isAwaitingScreen)
+        // requestScreenRecording is called first to register Onset in the TCC list,
+        // then openScreenRecordingSettings opens System Settings (Fix 4).
+        #expect(fake.requestScreenRecordingCallCount == 1)
         #expect(fake.openScreenRecordingSettingsCallCount == 1)
     }
 
@@ -184,7 +159,6 @@ struct OnboardingViewModelTests {
         #expect(sut.progressHintText == "все разрешения активны")
         #expect(sut.canContinue)
         #expect(sut.effectivePermissions.fullModeAvailable)
-        #expect(!sut.showDeniedScreenBanner)
         #expect(!sut.canContinueWithoutScreen)
         #expect(!sut.canRecordWithoutAudio)
     }
@@ -231,12 +205,14 @@ struct OnboardingViewModelTests {
         #expect(sut.effectivePermissions.canRecord) // can record without mic (screen available)
     }
 
-    @Test("Screen denied, camera/mic authorized → progressHintText blocked (AC-6)")
-    func screenDenied_progressHintText_blocked() {
+    @Test("Screen denied (treated as notDetermined), camera/mic authorized → progressHintText waiting (AC-6 amended)")
+    func screenDenied_progressHintText_waiting() {
+        // Screen has no real denied state (CGPreflight is Bool-only); .denied is treated
+        // the same as .notDetermined — the hint shows "waiting" rather than "blocked".
         let fake = FakePermissionsService(screen: .denied, camera: .authorized, microphone: .authorized)
         let sut = OnboardingViewModel(permissions: fake)
 
-        #expect(sut.progressHintText == "запись экрана заблокирована")
+        #expect(sut.progressHintText == "ждём запись экрана")
     }
 
     @Test("Screen notDetermined, camera/mic authorized → progressHintText waiting (AC-4)")
@@ -286,5 +262,27 @@ struct OnboardingViewModelTests {
         sut.refresh()
 
         #expect(fake.refreshCallCount == 1)
+    }
+
+    // MARK: - Settings deep-link wrappers (fix 5: VM owns the call-through, not the view)
+
+    @Test("openCameraSettings() delegates to service (fix 5)")
+    func openCameraSettings_delegatesToService() {
+        let fake = FakePermissionsService()
+        let sut = OnboardingViewModel(permissions: fake)
+
+        sut.openCameraSettings()
+
+        #expect(fake.openCameraSettingsCallCount == 1)
+    }
+
+    @Test("openMicrophoneSettings() delegates to service (fix 5)")
+    func openMicrophoneSettings_delegatesToService() {
+        let fake = FakePermissionsService()
+        let sut = OnboardingViewModel(permissions: fake)
+
+        sut.openMicrophoneSettings()
+
+        #expect(fake.openMicrophoneSettingsCallCount == 1)
     }
 }

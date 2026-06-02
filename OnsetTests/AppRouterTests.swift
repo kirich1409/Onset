@@ -61,16 +61,17 @@ struct AppRouterRouteTests {
         #expect(route == .allSet)
     }
 
-    @Test("hasArg, preflight true, not allGranted → .allSet (screen was just the reason for relaunch)")
-    func hasArg_preflightTrue_notAllGranted_allSet() {
-        // allSet fires on arg+preflight regardless of camera/mic — the "3 из 3" is what
-        // the allSet screen shows, not a precondition for the route (see AppRouter doc comment).
+    @Test("hasArg, preflight true, not allGranted → .onboarding (camera/mic still pending)")
+    func hasArg_preflightTrue_notAllGranted_onboarding() {
+        // .allSet requires allGranted == true. If screen is granted but camera/mic are still
+        // pending, routing falls back to .onboarding so the user can complete those steps.
         let route = AppRouter.route(
             allGranted: false,
             hasPostScreenGrantArg: true,
             screenPreflightGranted: true
         )
-        #expect(route == .allSet)
+        #expect(route == .onboarding)
+        #expect(route != .allSet)
     }
 
     // MARK: - AC-5 anti-loop: hasArg, preflight false → status-based routing (no .allSet)
@@ -104,35 +105,43 @@ struct AppRouterRouteTests {
 
 @Suite("AppRouter.shouldTriggerRelaunch")
 struct AppRouterRelaunchTests {
-    @Test("Screen just detected, no pending flag → should relaunch")
-    func detected_noPending_shouldRelaunch() {
+    @Test("notDetermined → authorized: front edge → should relaunch")
+    func notDetermined_toAuthorized_shouldRelaunch() {
         #expect(AppRouter.shouldTriggerRelaunch(
-            screenJustDetectedGranted: true,
-            pendingScreenGrantRelaunch: false
+            previous: .notDetermined,
+            current: .authorized
         ))
     }
 
-    @Test("Screen just detected, pending flag set → no relaunch (anti-loop)")
-    func detected_pendingSet_noRelaunch() {
+    @Test("authorized → authorized: no edge → no relaunch (already granted, no transition)")
+    func authorized_toAuthorized_noRelaunch() {
         #expect(!AppRouter.shouldTriggerRelaunch(
-            screenJustDetectedGranted: true,
-            pendingScreenGrantRelaunch: true
+            previous: .authorized,
+            current: .authorized
         ))
     }
 
-    @Test("Screen not detected → no relaunch")
-    func notDetected_noRelaunch() {
+    @Test("notDetermined → notDetermined: no edge → no relaunch")
+    func notDetermined_toNotDetermined_noRelaunch() {
         #expect(!AppRouter.shouldTriggerRelaunch(
-            screenJustDetectedGranted: false,
-            pendingScreenGrantRelaunch: false
+            previous: .notDetermined,
+            current: .notDetermined
         ))
     }
 
-    @Test("Screen not detected, pending set → no relaunch")
-    func notDetected_pendingSet_noRelaunch() {
+    @Test("denied → authorized: front edge → should relaunch (revoke then re-grant)")
+    func denied_toAuthorized_shouldRelaunch() {
+        #expect(AppRouter.shouldTriggerRelaunch(
+            previous: .denied,
+            current: .authorized
+        ))
+    }
+
+    @Test("authorized → notDetermined: no edge → no relaunch (revoke detected, not grant)")
+    func authorized_toNotDetermined_noRelaunch() {
         #expect(!AppRouter.shouldTriggerRelaunch(
-            screenJustDetectedGranted: false,
-            pendingScreenGrantRelaunch: true
+            previous: .authorized,
+            current: .notDetermined
         ))
     }
 }
