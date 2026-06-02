@@ -1,14 +1,6 @@
-//
-//  OnsetUITestsLaunchTests.swift
-//  OnsetUITests
-//
-//  Created by Kirill Rozov on 02.06.2026.
-//
-
 import XCTest
 
 final class OnsetUITestsLaunchTests: XCTestCase {
-
     override class var runsForEachTargetApplicationUIConfiguration: Bool {
         true
     }
@@ -18,7 +10,7 @@ final class OnsetUITestsLaunchTests: XCTestCase {
     }
 
     @MainActor
-    func testLaunch() throws {
+    func testLaunch() {
         let app = XCUIApplication()
         app.launch()
 

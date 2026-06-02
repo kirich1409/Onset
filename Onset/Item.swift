@@ -1,10 +1,3 @@
-//
-//  Item.swift
-//  Onset
-//
-//  Created by Kirill Rozov on 02.06.2026.
-//
-
 import Foundation
 import SwiftData
 

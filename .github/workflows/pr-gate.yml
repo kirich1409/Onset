@@ -70,6 +70,9 @@ jobs:
             -destination 'platform=macOS' \
             -configuration Debug \
             ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
             | xcpretty --color
 
       # Upload the built .app as an artifact so artifact-checks can consume it
@@ -135,6 +138,9 @@ jobs:
             -destination 'platform=macOS' \
             -configuration Debug \
             ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
             | xcpretty --color
 
   # ─────────────────────────────────────────────

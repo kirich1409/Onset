@@ -27,16 +27,13 @@
 --elseposition same-line
 --guardelse auto
 --emptybraces no-space
---spaceinsidebrackets false
---spaceinsidecomments false
---spaces around
 --trimwhitespace always
 
 # ── Imports ───────────────────────────────────────────────────────────────────
 --importgrouping testable-bottom
 
 # ── Declarations ──────────────────────────────────────────────────────────────
---modifierorder typeMethods,beforeTrailingClosure,nonisolated,override,required,convenience,indirect,lazy,weak,unowned,static,class,final,private,fileprivate,internal,package,public,open
+--modifierorder typeMethods,nonisolated,override,required,convenience,indirect,lazy,weak,unowned,static,class,final,private,fileprivate,internal,package,public,open
 --funcattributes prev-line
 --typeattributes prev-line
 --varattributes prev-line
@@ -51,7 +48,6 @@
 --semicolons never
 --trailingcommas always
 --trimwhitespace always
---linebreakaftercolon true
 --header strip
 
 # ── Swift 6 specific ─────────────────────────────────────────────────────────

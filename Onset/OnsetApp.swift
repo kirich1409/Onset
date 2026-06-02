@@ -1,10 +1,3 @@
-//
-//  OnsetApp.swift
-//  Onset
-//
-//  Created by Kirill Rozov on 02.06.2026.
-//
-
 import SwiftData
 import SwiftUI
 
@@ -25,6 +18,6 @@ struct OnsetApp: App {
         WindowGroup {
             ContentView()
         }
-        .modelContainer(sharedModelContainer)
+        .modelContainer(self.sharedModelContainer)
     }
 }
