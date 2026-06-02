@@ -154,16 +154,12 @@ struct OnboardingView: View {
         // Actual status wins when it resolves to a definitive state — prevents
         // "Ожидание…" chip from sticking after the status changes.
         // Screen recording has no real denied state (CGPreflight is Bool-only),
-        // so .denied/.restricted fall back to .required ("Требуется" + Open Settings).
+        // so all non-authorized statuses fall back to .required ("Требуется" + Open Settings).
         switch self.viewModel.screenStatus {
-        case .notDetermined:
-            self.viewModel.isAwaitingScreen ? .awaiting : .required
-
         case .authorized:
             .authorized
 
-        case .denied, .restricted:
-            // Treat as .required — screen can always be retried via Open Settings.
+        case .notDetermined, .denied, .restricted:
             self.viewModel.isAwaitingScreen ? .awaiting : .required
         }
     }

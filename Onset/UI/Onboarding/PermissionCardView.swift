@@ -233,6 +233,27 @@ struct PermissionCardView: View {
     }
 }
 
+// MARK: - Permission icon colors
+
+/// Shared card icon colors for the camera and microphone permission cards.
+///
+/// Defined once here to avoid duplicate RGB constants across `OnboardingView+DeviceCards`
+/// and `AllSetView`.
+enum PermissionIconColor {
+    private enum RGB {
+        static let cameraRed: CGFloat = 0.15
+        static let cameraGreenBlue: CGFloat = 0.65  // green and blue share this value
+        static let micRed: CGFloat = 0.95
+        static let micGreen: CGFloat = 0.55
+        static let micBlue: CGFloat = 0.15
+    }
+
+    /// Teal icon for the camera card (matches mockup "Logitech MX Brio" card).
+    static let camera = Color(red: RGB.cameraRed, green: RGB.cameraGreenBlue, blue: RGB.cameraGreenBlue)
+    /// Orange icon for the microphone card (matches mockup "MacBook Pro — микрофон" card).
+    static let microphone = Color(red: RGB.micRed, green: RGB.micGreen, blue: RGB.micBlue)
+}
+
 // MARK: - Chip modifier
 
 struct PermissionChipModifier: ViewModifier {

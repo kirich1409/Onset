@@ -22,11 +22,6 @@ struct AllSetView: View {
         static let progressBarHeight: CGFloat = 4
         static let progressBarCornerRadius: CGFloat = 2
         static let headerTopPadding: CGFloat = 8
-        static let cameraColorRed: CGFloat = 0.15
-        static let cameraColorGreen: CGFloat = 0.65
-        static let micColorRed: CGFloat = 0.95
-        static let micColorGreen: CGFloat = 0.55
-        static let micColorBlue: CGFloat = 0.15
         static let footerTextSpacing: CGFloat = 4
     }
 
@@ -113,11 +108,7 @@ struct AllSetView: View {
     private var cameraRow: some View {
         PermissionCardView(
             iconSymbol: "camera.fill",
-            iconColor: Color(
-                red: Metrics.cameraColorRed,
-                green: Metrics.cameraColorGreen,
-                blue: Metrics.cameraColorGreen
-            ),
+            iconColor: PermissionIconColor.camera,
             title: "Камера",
             subtitle: self.permissions.defaultCameraName.map { "\($0)." } ?? "Камера готова.",
             status: .authorized,
@@ -131,11 +122,7 @@ struct AllSetView: View {
     private var microphoneRow: some View {
         PermissionCardView(
             iconSymbol: "mic.fill",
-            iconColor: Color(
-                red: Metrics.micColorRed,
-                green: Metrics.micColorGreen,
-                blue: Metrics.micColorBlue
-            ),
+            iconColor: PermissionIconColor.microphone,
             title: "Микрофон",
             subtitle: self.permissions.defaultMicrophoneName.map { "\($0)." } ?? "Микрофон готов.",
             status: .authorized,

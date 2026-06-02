@@ -6,26 +6,12 @@ import SwiftUI
 ///
 /// Extracted into a separate extension to keep `OnboardingView` body length within limits.
 extension OnboardingView {
-    // MARK: - Icon colors
-
-    enum DeviceCardColors {
-        static let cameraIconRed: CGFloat = 0.15
-        static let cameraIconGreen: CGFloat = 0.65
-        static let micIconRed: CGFloat = 0.95
-        static let micIconGreen: CGFloat = 0.55
-        static let micIconBlue: CGFloat = 0.15
-    }
-
     // MARK: - Camera card
 
     var cameraCard: some View {
         PermissionCardView(
             iconSymbol: "camera.fill",
-            iconColor: Color(
-                red: DeviceCardColors.cameraIconRed,
-                green: DeviceCardColors.cameraIconGreen,
-                blue: DeviceCardColors.cameraIconGreen
-            ),
+            iconColor: PermissionIconColor.camera,
             title: "Камера",
             subtitle: self.cameraCardSubtitle,
             status: self.cameraCardStatus,
@@ -90,11 +76,7 @@ extension OnboardingView {
     var microphoneCard: some View {
         PermissionCardView(
             iconSymbol: "mic.fill",
-            iconColor: Color(
-                red: DeviceCardColors.micIconRed,
-                green: DeviceCardColors.micIconGreen,
-                blue: DeviceCardColors.micIconBlue
-            ),
+            iconColor: PermissionIconColor.microphone,
             title: "Микрофон",
             subtitle: self.microphoneCardSubtitle,
             status: self.microphoneCardStatus,

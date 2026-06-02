@@ -117,14 +117,12 @@ final class OnboardingViewModel {
 
     /// Whether a graceful "Продолжить без экрана" option is available.
     var canContinueWithoutScreen: Bool {
-        let effective = self.permissions.effectivePermissions
-        return effective.cameraAvailable && !effective.screenAvailable
+        self.permissions.effectivePermissions.cameraOnlyAvailable
     }
 
     /// Whether a graceful "Записать без звука" option is available.
     var canRecordWithoutAudio: Bool {
-        let effective = self.permissions.effectivePermissions
-        return effective.canRecord && !effective.microphoneAvailable
+        self.permissions.effectivePermissions.videoWithoutAudioAvailable
     }
 
     /// Whether the primary «Продолжить» button is enabled.
