@@ -1,0 +1,32 @@
+version: 2
+
+updates:
+  # Keep GitHub Actions pinned-SHA dependencies up to date.
+  # Dependabot submits PRs that update the SHA in "uses:" lines.
+  # These PRs go through the normal pr-gate like any other PR.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '04:00'
+      timezone: UTC
+    commit-message:
+      prefix: chore
+    labels:
+      - dependencies
+
+  # SPM / Swift package ecosystem — uncomment when Package.swift is added
+  # (modularization phase). No Package.swift exists in the repo today.
+  # TODO: enable when SPM local packages are introduced.
+  # - package-ecosystem: swift
+  #   directory: /
+  #   schedule:
+  #     interval: weekly
+  #     day: monday
+  #     time: '04:00'
+  #     timezone: UTC
+  #   commit-message:
+  #     prefix: chore
+  #   labels:
+  #     - dependencies

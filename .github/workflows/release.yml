@@ -1,0 +1,179 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# Notarization secrets are in the "release" GitHub Environment (environment-scoped,
+# not repo-wide). This limits exposure: only this workflow on tag pushes can access
+# them. The environment adds a required-reviewers protection layer for public repos.
+#
+# Required secrets (Human sets these up in repo Settings > Environments > release):
+#   DEVELOPER_ID_APPLICATION_P12_BASE64  — Developer ID Application cert (.p12, base64)
+#   DEVELOPER_ID_APPLICATION_P12_PASSWORD — .p12 password
+#   NOTARYTOOL_APPLE_ID                  — Apple ID for notarytool
+#   NOTARYTOOL_APP_SPECIFIC_PASSWORD     — App-specific password for notarytool
+#   NOTARYTOOL_TEAM_ID                   — 10-char Apple Developer Team ID
+
+permissions:
+  contents: write  # Needed to create a GitHub Release and upload artifacts.
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.5.app
+  KEYCHAIN_NAME: onset-release-${{ github.run_id }}
+
+jobs:
+  release:
+    name: Archive, Notarize, Release
+    runs-on: macos-26-arm64
+    environment: release  # Enforces environment protection rules + scoped secrets.
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Confirm Xcode version
+        run: xcodebuild -version
+
+      # Temporary keychain for the signing identity.
+      # The trap ensures cleanup even if subsequent steps fail — prevents the
+      # keychain from persisting across runs (security hygiene on shared runner).
+      - name: Create temporary keychain
+        run: |
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME.keychain-db"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_NAME.keychain-db"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME.keychain-db"
+          # Prepend to keychain search list so code signing finds the identity.
+          security list-keychains -d user -s "$KEYCHAIN_NAME.keychain-db" $(security list-keychains -d user | tr -d '"')
+
+      # Register cleanup trap immediately after keychain creation.
+      # Runs on success, failure, and cancellation.
+      - name: Register keychain cleanup trap
+        run: |
+          # Write a cleanup script that will be called in the post-job step.
+          cat > /tmp/onset-keychain-cleanup.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          KEYCHAIN_NAME="$1"
+          security delete-keychain "$KEYCHAIN_NAME.keychain-db" 2>/dev/null || true
+          echo "Keychain $KEYCHAIN_NAME deleted"
+          EOF
+          chmod +x /tmp/onset-keychain-cleanup.sh
+
+      - name: Import signing certificate
+        env:
+          DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
+        run: |
+          # TODO: Human must set DEVELOPER_ID_APPLICATION_P12_BASE64 and
+          # DEVELOPER_ID_APPLICATION_P12_PASSWORD in GitHub Environment "release".
+          echo "$DEVELOPER_ID_APPLICATION_P12_BASE64" | base64 --decode > /tmp/onset-signing.p12
+          security import /tmp/onset-signing.p12 \
+            -k "$KEYCHAIN_NAME.keychain-db" \
+            -P "$DEVELOPER_ID_APPLICATION_P12_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/xcodebuild
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_NAME.keychain-db"
+          # Verify identity is present
+          security find-identity -v -p codesigning "$KEYCHAIN_NAME.keychain-db"
+          # Scrub the p12 from disk immediately
+          rm -f /tmp/onset-signing.p12
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION"
+
+      - name: Archive (Release)
+        run: |
+          xcodebuild archive \
+            -scheme Onset \
+            -destination 'generic/platform=macOS' \
+            -configuration Release \
+            -archivePath "$RUNNER_TEMP/Onset-${{ steps.version.outputs.version }}.xcarchive" \
+            CURRENT_PROJECT_VERSION="${{ steps.version.outputs.version }}" \
+            MARKETING_VERSION="${{ steps.version.outputs.version }}"
+
+      - name: Export archive
+        run: |
+          # TODO: create ExportOptions.plist for Developer ID distribution.
+          # Requires DEVELOPMENT_TEAM and signing identity configured.
+          # See: xcodebuild -help for exportOptionsPlist keys.
+          cat > /tmp/ExportOptions.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>developer-id</string>
+            <key>signingStyle</key>
+            <string>automatic</string>
+            <key>stripSwiftSymbols</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Onset-${{ steps.version.outputs.version }}.xcarchive" \
+            -exportOptionsPlist /tmp/ExportOptions.plist \
+            -exportPath "$RUNNER_TEMP/export"
+
+      - name: Notarize
+        env:
+          NOTARYTOOL_APPLE_ID: ${{ secrets.NOTARYTOOL_APPLE_ID }}
+          NOTARYTOOL_APP_SPECIFIC_PASSWORD: ${{ secrets.NOTARYTOOL_APP_SPECIFIC_PASSWORD }}
+          NOTARYTOOL_TEAM_ID: ${{ secrets.NOTARYTOOL_TEAM_ID }}
+        run: |
+          # TODO: Human must set notarytool secrets in GitHub Environment "release".
+          # Create a zip for notarization (notarytool accepts zip of .app or .dmg).
+          ditto -c -k --keepParent \
+            "$RUNNER_TEMP/export/Onset.app" \
+            "$RUNNER_TEMP/Onset-${{ steps.version.outputs.version }}.zip"
+
+          xcrun notarytool submit \
+            "$RUNNER_TEMP/Onset-${{ steps.version.outputs.version }}.zip" \
+            --apple-id "$NOTARYTOOL_APPLE_ID" \
+            --password "$NOTARYTOOL_APP_SPECIFIC_PASSWORD" \
+            --team-id "$NOTARYTOOL_TEAM_ID" \
+            --wait
+
+          xcrun stapler staple "$RUNNER_TEMP/export/Onset.app"
+
+      - name: Create DMG
+        run: |
+          # Create a simple DMG for distribution.
+          hdiutil create \
+            -volname "Onset ${{ steps.version.outputs.version }}" \
+            -srcfolder "$RUNNER_TEMP/export/Onset.app" \
+            -ov \
+            -format UDZO \
+            "$RUNNER_TEMP/Onset-${{ steps.version.outputs.version }}.dmg"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Onset ${{ steps.version.outputs.version }}" \
+            --generate-notes \
+            --draft \
+            "$RUNNER_TEMP/Onset-${{ steps.version.outputs.version }}.dmg"
+
+      # Keychain cleanup — runs after all steps regardless of success/failure.
+      # GitHub Actions does not have a native finally block; we use a conditional
+      # always() step as the closest equivalent.
+      - name: Delete temporary keychain
+        if: always()
+        run: |
+          security delete-keychain "$KEYCHAIN_NAME.keychain-db" 2>/dev/null || true
+          echo "Keychain cleanup complete"
