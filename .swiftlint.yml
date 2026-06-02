@@ -26,7 +26,6 @@ opt_in_rules:
   - empty_string
   - enum_case_associated_values_count
   - expiring_todo
-  - extension_access_modifier
   - fallthrough
   - fatal_error_message
   - file_name_no_space

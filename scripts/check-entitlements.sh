@@ -73,7 +73,7 @@ ALLOWED_LIST=(
   "com.apple.security.screen-capture"
   # Microphone access (required for audio recording)
   "com.apple.security.device.microphone"
-  # Hardened runtime base (present on all notarized apps)
+  # JIT-compilation exception — opt-in; only needed by apps that generate executable code at runtime
   "com.apple.security.cs.allow-jit"
 )
 

@@ -70,7 +70,7 @@ done
 # pattern or move to warn-only.
 
 echo "=== URLSession symbol check (undefined symbols in app binary) ==="
-NETWORK_SYMBOLS=$(nm "$BINARY" 2>/dev/null | grep -E "^\s+U .*URLSession|^\s+U .*NWConnection|^\s+U .*CFHTTPMessage|^\s+U .*NSURLConnection" || true)
+NETWORK_SYMBOLS=$(nm "$BINARY" 2>/dev/null | grep -E "^[[:space:]]+U .*URLSession|^[[:space:]]+U .*NWConnection|^[[:space:]]+U .*CFHTTPMessage|^[[:space:]]+U .*NSURLConnection" || true)
 
 if [ -n "$NETWORK_SYMBOLS" ]; then
   echo "NETWORK SYMBOL VIOLATION: Network call symbols found in $BINARY:"

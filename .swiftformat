@@ -41,13 +41,12 @@
 --self insert
 --stripunusedargs closure-only
 --redundanttype inferred
---nospaceoperators ...,  ....<
+--nospaceoperators ...,..<
 
 # ── String / comment ─────────────────────────────────────────────────────────
 --commas always
 --semicolons never
 --trailingcommas always
---trimwhitespace always
 --header strip
 
 # ── Swift 6 specific ─────────────────────────────────────────────────────────
