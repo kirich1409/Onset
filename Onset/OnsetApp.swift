@@ -1,19 +1,10 @@
-//
-//  OnsetApp.swift
-//  Onset
-//
-//  Created by Kirill Rozov on 02.06.2026.
-//
-
-import SwiftUI
 import SwiftData
+import SwiftUI
 
 @main
 struct OnsetApp: App {
     var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
+        let schema = Schema([Item.self])
         let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
 
         do {
@@ -27,6 +18,6 @@ struct OnsetApp: App {
         WindowGroup {
             ContentView()
         }
-        .modelContainer(sharedModelContainer)
+        .modelContainer(self.sharedModelContainer)
     }
 }

@@ -1,12 +1,11 @@
-//
-//  ContentView.swift
-//  Onset
-//
-//  Created by Kirill Rozov on 02.06.2026.
-//
-
-import SwiftUI
 import SwiftData
+import SwiftUI
+
+/// Sidebar column width constants — template placeholder, will be replaced by feature implementation.
+private enum SidebarLayout {
+    static let minWidth: CGFloat = 180
+    static let idealWidth: CGFloat = 200
+}
 
 struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
@@ -15,19 +14,19 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView {
             List {
-                ForEach(items) { item in
+                ForEach(self.items) { item in
                     NavigationLink {
                         Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
                     } label: {
                         Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
                     }
                 }
-                .onDelete(perform: deleteItems)
+                .onDelete(perform: self.deleteItems)
             }
-            .navigationSplitViewColumnWidth(min: 180, ideal: 200)
+            .navigationSplitViewColumnWidth(min: SidebarLayout.minWidth, ideal: SidebarLayout.idealWidth)
             .toolbar {
                 ToolbarItem {
-                    Button(action: addItem) {
+                    Button(action: self.addItem) {
                         Label("Add Item", systemImage: "plus")
                     }
                 }
@@ -40,14 +39,14 @@ struct ContentView: View {
     private func addItem() {
         withAnimation {
             let newItem = Item(timestamp: Date())
-            modelContext.insert(newItem)
+            self.modelContext.insert(newItem)
         }
     }
 
     private func deleteItems(offsets: IndexSet) {
         withAnimation {
             for index in offsets {
-                modelContext.delete(items[index])
+                self.modelContext.delete(self.items[index])
             }
         }
     }

@@ -1,0 +1,45 @@
+// Config/Strict.xcconfig
+// Maximum strictness baseline for the Onset target.
+// Applied via baseConfigurationReference in project.pbxproj (Onset target only).
+// Per-target buildSettings in pbxproj take precedence over xcconfig —
+// SWIFT_VERSION and ENABLE_APP_SANDBOX are edited directly in pbxproj for that reason.
+
+// ── Swift language mode ────────────────────────────────────────────────────
+// SWIFT_VERSION is also set in pbxproj (that copy wins due to precedence),
+// but declaring here makes the intent explicit.
+SWIFT_VERSION = 6.0
+
+// ── Strict concurrency (data-race safety at compile time) ─────────────────
+// Confirmed via: swiftc -frontend -help → -strict-concurrency=complete
+// xcconfig key confirmed via xcodebuild -showBuildSettings with test xcconfig.
+SWIFT_STRICT_CONCURRENCY = complete
+
+// ── Warnings as errors ────────────────────────────────────────────────────
+// Both Swift and C/ObjC (GCC) warnings promoted to errors.
+// Confirmed key names via xcodebuild -showBuildSettings.
+SWIFT_TREAT_WARNINGS_AS_ERRORS = YES
+GCC_TREAT_WARNINGS_AS_ERRORS = YES
+
+// ── Strict memory safety (Swift 6.2 opt-in) ───────────────────────────────
+// Requires explicit `unsafe` annotation for C-interop (VideoToolbox, CoreMedia).
+// Feature name: "StrictMemorySafety" (optional, not upcoming).
+// Frontend flag: -strict-memory-safety
+// xcconfig key SWIFT_STRICT_MEMORY_SAFETY confirmed via xcodebuild -showBuildSettings
+// (accepted as a user-defined build setting, passed to swiftc as -Xswiftc flag
+// by Xcode's build system). Feature availability confirmed via:
+//   swiftc -frontend -print-supported-features
+SWIFT_STRICT_MEMORY_SAFETY = YES
+
+// ── Upcoming-feature flags (default in Swift 7, opt-in in Swift 6) ────────
+// Feature names confirmed via: swiftc -frontend -print-supported-features
+// xcconfig key names confirmed via xcodebuild -showBuildSettings with test xcconfig.
+// All three have enabled_in: "7" in this toolchain (Xcode 26 / Swift 6.x).
+//
+// ExistentialAny — requires `any` keyword on existential types.
+SWIFT_UPCOMING_FEATURE_EXISTENTIAL_ANY = YES
+// InternalImportsByDefault — import declarations default to internal access.
+SWIFT_UPCOMING_FEATURE_INTERNAL_IMPORTS_BY_DEFAULT = YES
+// MemberImportVisibility — member lookup respects import visibility.
+// Note: also set in pbxproj per-target; xcconfig value is shadowed there,
+// both agree on YES.
+SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES

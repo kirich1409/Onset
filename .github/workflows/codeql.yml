@@ -1,0 +1,59 @@
+name: CodeQL Analysis
+
+on:
+  schedule:
+    # Weekly on Monday at 03:00 UTC — off PR critical path (20-30 min compile).
+    - cron: '0 3 * * 1'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Non-required, informational only. Does not block PR merges.
+# Copilot Autofix will propose fix-PRs for CodeQL alerts (verify Swift
+# Autofix support on docs.github.com before relying on it — coverage is
+# narrower than CodeQL Swift GA).
+
+permissions:
+  contents: read
+  security-events: write
+  # actions: read is needed by codeql-action on private repos; harmless for public.
+  actions: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.5.app
+
+jobs:
+  analyze:
+    name: CodeQL (Swift)
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Confirm Xcode version
+        run: xcodebuild -version
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@03e4368ac7daa2bd82b3e85262f3bf87ee112f57 # v3.36.0
+        with:
+          languages: swift
+          # build-mode: manual is required for Swift — autobuild is unreliable
+          # for macOS app targets. We drive xcodebuild explicitly below.
+          build-mode: manual
+
+      - name: Build for CodeQL
+        # Release configuration gives CodeQL the most complete analysis
+        # (WMO exposes more symbols). Slow — acceptable in async/scheduled context.
+        run: |
+          xcodebuild build \
+            -scheme Onset \
+            -destination 'platform=macOS' \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@03e4368ac7daa2bd82b3e85262f3bf87ee112f57 # v3.36.0
+        with:
+          category: /language:swift
