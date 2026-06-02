@@ -4,7 +4,7 @@ import SwiftUI
 struct OnsetApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            DiagnosticView()
         }
     }
 }

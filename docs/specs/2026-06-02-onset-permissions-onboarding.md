@@ -127,8 +127,8 @@ Key integration points:
 
 ## Open Questions
 
-- [ ] Требуется ли перезапуск процесса под ScreenCaptureKit на macOS 26.x именно для уже-запущенного приложения — *non-blocking, implementation-time*
-  - Recommendation: подтвердить по release notes/поведению на этапе реализации; механизм relaunch (та же подписанная копия + transient arg + анти-петля) уже специфицирован и применяется при положительном результате preflight
+- [x] Требуется ли перезапуск процесса под ScreenCaptureKit на macOS 26.x именно для уже-запущенного приложения — **closed 2026-06-02**
+  - Resolved: verification spike на целевой macOS 26.x (`swarm-report/tcc-screen-verify.md`) подтвердил restart-consistent поведение (OS respawn процесса при выдаче доступа running-приложению). Дополнительно опровергнута гипотеза «`SCShareableContent` живее `CGPreflightScreenCaptureAccess()`» — оба API согласованы (lockstep), детект остаётся на `CGPreflight`. Механизм relaunch (та же подписанная копия + transient arg `--post-screen-grant` + анти-петля) применяется как специфицировано.
 - [ ] Поведение при отзыве разрешения во время записи (не на старте) — *non-blocking*
   - Recommendation: остановить затронутый поток, финализировать его файл валидным; см. AC в [`onset-recording-mvp`](2026-06-02-onset-recording-mvp.md)
 

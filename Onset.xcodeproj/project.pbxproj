@@ -438,9 +438,9 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSCameraUsageDescription = "Onset records your camera feed alongside your screen.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Onset записывает вас в кадре одновременно с экраном.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Onset records audio from your microphone.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Onset записывает ваш голос в дорожку видео.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -473,9 +473,9 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSCameraUsageDescription = "Onset records your camera feed alongside your screen.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Onset записывает вас в кадре одновременно с экраном.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Onset records audio from your microphone.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Onset записывает ваш голос в дорожку видео.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",

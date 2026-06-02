@@ -74,10 +74,15 @@ ALLOWED_LIST=(
   # Screen capture entitlement — screen recording goes through TCC, not this entitlement;
   # listed here so it doesn't trigger an UNKNOWN warning if added intentionally later.
   "com.apple.security.screen-capture"
-  # Microphone access (required for audio recording)
-  "com.apple.security.device.microphone"
+  # Camera access (required for webcam overlay recording)
+  "com.apple.security.device.camera"
+  # Microphone / audio-input access (required for voice recording into video track)
+  # Hardened Runtime key is com.apple.security.device.audio-input (not .microphone)
+  "com.apple.security.device.audio-input"
   # JIT-compilation exception — opt-in; only needed by apps that generate executable code at runtime
   "com.apple.security.cs.allow-jit"
+  # Debug-only: injected by Xcode to allow debugger attachment; absent in Release/Distribution builds
+  "com.apple.security.get-task-allow"
 )
 
 # Extract entitlement keys from plist XML for unknown-key detection.
