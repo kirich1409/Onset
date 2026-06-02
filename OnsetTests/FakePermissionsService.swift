@@ -27,6 +27,27 @@ final class FakePermissionsService: PermissionsProviding {
     private(set) var openCameraSettingsCallCount = 0
     private(set) var openMicrophoneSettingsCallCount = 0
     private(set) var checkScreenStatusNowCallCount = 0
+    private(set) var startScreenPollingCallCount = 0
+
+    // MARK: - Grant-on-request hooks (Stage 4)
+
+    /// When `true`, `requestCamera()` also sets `cameraStatus = .authorized` — models
+    /// the AC-2 transition: system prompt granted → camera ✓ without restart.
+    var grantCameraOnRequest = false
+
+    /// When `true`, `requestMicrophone()` also sets `microphoneStatus = .authorized` —
+    /// models the AC-2 transition for microphone.
+    var grantMicrophoneOnRequest = false
+
+    // MARK: - Cancellable polling hook (Stage 4)
+
+    /// When `true`, `startScreenPolling()` returns a real `Task` that parks until
+    /// cancelled (via `Task.yield()` loop) and sets `pollingTaskWasCancelled = true`.
+    /// Default `false` keeps the original instantly-completed behaviour.
+    var useCancellablePollingTask = false
+
+    /// `true` after the cancellable polling task exits due to Task cancellation.
+    private(set) var pollingTaskWasCancelled = false
 
     // MARK: - Init
 
@@ -66,10 +87,16 @@ final class FakePermissionsService: PermissionsProviding {
 
     func requestCamera() async {
         self.requestCameraCallCount += 1
+        if self.grantCameraOnRequest {
+            self.cameraStatus = .authorized
+        }
     }
 
     func requestMicrophone() async {
         self.requestMicrophoneCallCount += 1
+        if self.grantMicrophoneOnRequest {
+            self.microphoneStatus = .authorized
+        }
     }
 
     func requestScreenRecording() {
@@ -89,8 +116,23 @@ final class FakePermissionsService: PermissionsProviding {
     }
 
     func startScreenPolling() -> Task<Void, Never> {
-        // Return an immediately-completed task — polling is not exercised in unit tests.
-        Task {}
+        self.startScreenPollingCallCount += 1
+        guard self.useCancellablePollingTask else {
+            // Default: return an immediately-completed task.
+            return Task {}
+        }
+        // Cancellable path: park until the task is cancelled, then record cancellation.
+        // The `@Sendable` closure captures `self` weakly; `pollingTaskWasCancelled` is
+        // set back on `@MainActor` so the mutation is always isolated correctly.
+        let markCancelled: @Sendable () -> Void = { [weak self] in
+            Task { @MainActor [weak self] in self?.pollingTaskWasCancelled = true }
+        }
+        return Task {
+            while !Task.isCancelled {
+                await Task.yield()
+            }
+            markCancelled()
+        }
     }
 
     func checkScreenStatusNow() {
