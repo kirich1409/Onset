@@ -86,6 +86,9 @@ opt_in_rules:
 
 disabled_rules:
   - todo  # tracked separately; expiring_todo is opt-in above
+  # SwiftFormat uses --trailingcommas always; disable the opposing SwiftLint rule to avoid
+  # a tool conflict on multi-line collection literals.
+  - trailing_comma
 
 # Thresholds
 line_length:
