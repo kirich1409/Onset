@@ -71,6 +71,19 @@ extension OnboardingView {
         .buttonStyle(.bordered)
     }
 
+    /// «Продолжить без экрана» link — shown whenever screen is not granted AND camera is
+    /// available (AC-7 amended: not gated on awaiting state, not gated on denied state).
+    @ViewBuilder
+    var continueWithoutScreenButton: some View {
+        if viewModel.canContinueWithoutScreen {
+            Button("Продолжить без экрана") {
+                onProceedToMain()
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.accentColor)
+        }
+    }
+
     @ViewBuilder
     var footerButtons: some View {
         if viewModel.isAwaitingScreen {
@@ -84,15 +97,7 @@ extension OnboardingView {
     /// «Продолжить без экрана» when camera is already available (AC-7).
     var awaitingFooterButtons: some View {
         HStack(spacing: Metrics.footerHSpacing) {
-            if viewModel.canContinueWithoutScreen {
-                // Available whenever screen is not granted AND camera is available —
-                // not gated on any denied state (AC-6/AC-7 amendment).
-                Button("Продолжить без экрана") {
-                    onProceedToMain()
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(Color.accentColor)
-            }
+            self.continueWithoutScreenButton
             self.checkAgainButton
         }
     }
@@ -106,6 +111,7 @@ extension OnboardingView {
                 .buttonStyle(.plain)
                 .foregroundStyle(Color.accentColor)
             }
+            self.continueWithoutScreenButton
             if !viewModel.effectivePermissions.canRecord {
                 Button("Позже") {
                     onProceedToMain()

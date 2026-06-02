@@ -4,7 +4,7 @@ import SwiftUI
 
 /// The main onboarding screen shown when one or more permissions are not yet granted.
 ///
-/// Composes the header, optional denied-screen banner, three permission cards,
+/// Composes the header, three permission cards,
 /// footer graceful-degradation links + primary button, and the "N из 3" progress bar.
 ///
 /// Polling lifecycle: starts via `.task` when this view appears; the task's cancellation
