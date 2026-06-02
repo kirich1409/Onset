@@ -1,5 +1,5 @@
-import Testing
 @testable import Onset
+import Testing
 
 struct OnsetTests {
     @Test

@@ -75,13 +75,23 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             | xcpretty --color
 
+      - name: Stage app for artifact upload
+        run: |
+          mkdir -p ci-artifacts
+          APP=$(find ~/Library/Developer/Xcode/DerivedData -name "Onset.app" -path "*/Products/Debug/*" 2>/dev/null | head -1)
+          if [ -z "$APP" ]; then
+            echo "ERROR: Onset.app not found in DerivedData"
+            exit 1
+          fi
+          cp -R "$APP" ci-artifacts/
+
       # Upload the built .app as an artifact so artifact-checks can consume it
       # in the same workflow run without re-building.
       - name: Upload app artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: Onset-app-${{ github.run_id }}
-          path: ~/Library/Developer/Xcode/DerivedData/Onset-*/Build/Products/Debug/Onset.app
+          path: ci-artifacts/
           if-no-files-found: error
           retention-days: 1
 

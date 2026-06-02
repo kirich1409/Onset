@@ -30,7 +30,7 @@
 --trimwhitespace always
 
 # ── Imports ───────────────────────────────────────────────────────────────────
---importgrouping testable-bottom
+--importgrouping alpha
 
 # ── Declarations ──────────────────────────────────────────────────────────────
 --modifierorder typeMethods,nonisolated,override,required,convenience,indirect,lazy,weak,unowned,static,class,final,private,fileprivate,internal,package,public,open
