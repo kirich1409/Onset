@@ -1,4 +1,4 @@
-# SwiftFormat configuration — Onset (Swift 6, macOS 26.5)
+# SwiftFormat configuration — Onset (Swift 6, macOS 26.4)
 # Run: swiftformat . --config .swiftformat
 # CI: swiftformat . --lint --config .swiftformat
 
@@ -27,7 +27,6 @@
 --elseposition same-line
 --guardelse auto
 --emptybraces no-space
---spacearoundoperators include
 --spaceinsidebrackets false
 --spaceinsidecomments false
 --spaces around
