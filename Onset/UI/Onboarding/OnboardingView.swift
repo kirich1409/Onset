@@ -47,10 +47,6 @@ struct OnboardingView: View {
     /// Controls the expandable instructions on the screen-recording card.
     @State private var showScreenInstructions = true
 
-    // MARK: - Environment
-
-    @Environment(\.scenePhase) private var scenePhase
-
     // MARK: - Body
 
     var body: some View {
@@ -74,12 +70,6 @@ struct OnboardingView: View {
                 await pollingTask.value
             } onCancel: {
                 pollingTask.cancel()
-            }
-        }
-        // Refresh status on app-foreground (catches revoke-in-Settings).
-        .onChange(of: self.scenePhase) { _, newPhase in
-            if newPhase == .active {
-                self.viewModel.refresh()
             }
         }
     }

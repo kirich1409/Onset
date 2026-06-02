@@ -74,8 +74,6 @@ ALLOWED_LIST=(
   # Microphone / audio-input access (required for voice recording into video track)
   # Hardened Runtime key is com.apple.security.device.audio-input (not .microphone)
   "com.apple.security.device.audio-input"
-  # Debug-only: injected by Xcode to allow debugger attachment; absent in Release/Distribution builds
-  "com.apple.security.get-task-allow"
 )
 
 # Extract entitlement keys from plist XML for unknown-key detection.
@@ -92,6 +90,18 @@ while IFS= read -r KEY; do
     com.apple.security.cs.*)
       echo "CS VIOLATION: $KEY weakens Hardened Runtime — must not be present in Onset"
       VIOLATIONS=$((VIOLATIONS + 1))
+      continue
+      ;;
+    com.apple.security.get-task-allow)
+      # This entitlement is injected by Xcode for Debug builds to allow debugger attachment.
+      # It must never ship in a signed Release/Distribution build.
+      # CI's unsigned build falls into the empty-entitlements branch above, so this check is CI-safe.
+      if [ "${ONSET_ALLOW_GET_TASK_ALLOW:-}" = "1" ] || [ "${ONSET_ALLOW_GET_TASK_ALLOW:-}" = "true" ]; then
+        echo "NOTE: com.apple.security.get-task-allow present but allowed (ONSET_ALLOW_GET_TASK_ALLOW is set)"
+      else
+        echo "GET-TASK-ALLOW VIOLATION: com.apple.security.get-task-allow must not ship in a signed build"
+        VIOLATIONS=$((VIOLATIONS + 1))
+      fi
       continue
       ;;
   esac

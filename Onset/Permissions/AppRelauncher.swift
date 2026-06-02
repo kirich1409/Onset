@@ -15,7 +15,8 @@ nonisolated private let relaunchLogger = Logger(
 /// 1. Writes `pendingScreenGrantRelaunch = true` to `UserDefaults` as an anti-loop guard.
 /// 2. Launches the same signed bundle via `NSWorkspace.openApplication`, passing the
 ///    transient argument `--post-screen-grant`.
-/// 3. Terminates the current process.
+/// 3. Terminates the current process **only after** the new instance launches successfully.
+///    On launch failure, the process stays alive and the anti-loop flag is cleared.
 ///
 /// **Anti-loop:** The composition root (Stage 5) reads the `pendingScreenGrantRelaunch` flag
 /// on startup and passes it as context to `AppRouter.route`. After the process starts with
@@ -91,10 +92,17 @@ final class AppRelauncher {
                 relaunchLogger.error("Failed to launch new instance: \(error)")
                 // Revert the flag so the user is not stuck in a bad state.
                 Self.clearPendingRelaunch()
+            } else {
+                // Terminate only after the new instance is confirmed launched.
+                // Moved here from after the openApplication call: the original synchronous
+                // terminate raced against the completion handler — if launching failed and
+                // terminate won the race, pendingScreenGrantRelaunch stayed true forever,
+                // permanently suppressing future relaunches.
+                Task { @MainActor in
+                    relaunchLogger.info("New instance launched — terminating current process")
+                    NSApp.terminate(nil)
+                }
             }
         }
-
-        relaunchLogger.info("New instance launching — terminating current process")
-        NSApp.terminate(nil)
     }
 }
