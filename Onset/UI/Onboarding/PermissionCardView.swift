@@ -242,7 +242,7 @@ struct PermissionCardView: View {
 enum PermissionIconColor {
     private enum RGB {
         static let cameraRed: CGFloat = 0.15
-        static let cameraGreenBlue: CGFloat = 0.65  // green and blue share this value
+        static let cameraGreenBlue: CGFloat = 0.65 // green and blue share this value
         static let micRed: CGFloat = 0.95
         static let micGreen: CGFloat = 0.55
         static let micBlue: CGFloat = 0.15
