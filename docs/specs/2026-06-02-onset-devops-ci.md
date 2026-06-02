@@ -53,7 +53,7 @@ Onset разрабатывается полностью агентами (см. 
 | **`ENABLE_APP_SANDBOX = YES` → `NO`** в pbxproj | ⬜ Todo (CONFLICT) | Agent | Текущий шаблон с sandbox **противоречит** решению overview «Developer ID без App Sandbox»; со sandbox ломается прямой доступ к `~/Movies` и AVCaptureSession без entitlements |
 | `.swiftlint.yml` (strict) + `.swiftformat` | ⬜ Todo | Agent | Без конфига SwiftLint не strict |
 | L5 — локально (нет CI-prerequisite) | — | Agent | Self-hosted раннеров НЕ будет; L5 выполняется агентом на M3 Max (per-task) и M1 Air (финал MVP) локально, вне GitHub |
-| Xcode 26.5 на GitHub-hosted `macos-26-arm64` — не default | ✅ Verified | — | Подтверждено live (runner-images, image 20260525): Xcode 26.5 + SDK macOS 26.5 установлены; default=26.4.1 → workflows задают `DEVELOPER_DIR=/Applications/Xcode_26.5.app`. Риск ротации версий — fail-fast проверка версии в pr-gate |
+| Раннер: YAML-label `macos-26` (arm64-образ; НЕ `macos-26-arm64` — это имя образа, не label) | ✅ Verified | — | runner-images README: macOS 26 Arm64 → label `macos-26`. На образе Xcode 26.5 + SDK 26.5 (default=26.4.1) → workflows задают `DEVELOPER_DIR=/Applications/Xcode_26.5.app` + fail-fast проверка версии |
 | Notarization secrets (Developer ID `.p12`, ASC API key) как **environment-scoped** GitHub secrets | ⬜ Todo | Human | Не repo-wide; человек заводит credentials, агент настраивает workflow |
 | `.gitignore` (DerivedData, `xcuserdata`, `.DS_Store`, `swarm-report/`) | ⬜ Todo | Agent | Репо без .gitignore |
 
@@ -200,7 +200,7 @@ GitHub-hosted (виртуальные) не имеют capture-hardware / AVCapt
 | CI-архитектура | Двухскоростная: быстрый required гейт + async non-required слой | Убирает 20–30 мин (CodeQL) с PR-пути — прямой ответ на боль скорости |
 | Merge-автоматизация | Native auto-merge (`--auto --squash`), не merge queue | Merge queue требует Team/Enterprise; auto-merge достаточно для личного репо |
 | CodeQL | Weekly + push:main + on-demand, non-required | Compiled-language analyzer пересобирает проект (медленно); узкая поверхность риска (no network) |
-| Runner для PR-гейта | GitHub-hosted `macos-26-arm64` (Xcode 26.5 via DEVELOPER_DIR) | Xcode 26.5 + SDK 26.5 присутствуют (verified live, default=26.4.1); self-hosted не используется |
+| Runner для PR-гейта | GitHub-hosted label `macos-26` (arm64-образ; Xcode 26.5 via DEVELOPER_DIR) | Xcode 26.5 + SDK 26.5 присутствуют (verified live, default=26.4.1); `macos-26-arm64` — имя образа, не label; self-hosted не используется |
 | Исполнение L5 | Локально, агентом, вне CI (M3 Max per-task; M1 Air финал) | GitHub-hosted без реального hardware; self-hosted владелец не подключает |
 | PR-конфигурация | Debug (`-Onone`, без WMO) | Release/WMO на порядки медленнее; не нужен для гейта |
 | Модуляризация | SPM local packages по слоям DAG | Инкрементальность + параллелизм + изоляция тестов + compile-time границы |

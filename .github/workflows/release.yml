@@ -26,7 +26,7 @@ env:
 jobs:
   release:
     name: Archive, Notarize, Release
-    runs-on: macos-26-arm64
+    runs-on: macos-26
     environment: release  # Enforces environment protection rules + scoped secrets.
     timeout-minutes: 60
 

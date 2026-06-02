@@ -29,7 +29,7 @@ jobs:
   # ─────────────────────────────────────────────
   build:
     name: Build (Debug)
-    runs-on: macos-26-arm64
+    runs-on: macos-26
     timeout-minutes: 20
     steps:
       - name: Checkout
@@ -89,7 +89,7 @@ jobs:
   # ─────────────────────────────────────────────
   lint:
     name: Lint
-    runs-on: macos-26-arm64
+    runs-on: macos-26
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -115,7 +115,7 @@ jobs:
   # ─────────────────────────────────────────────
   unit:
     name: Unit Tests
-    runs-on: macos-26-arm64
+    runs-on: macos-26
     timeout-minutes: 20
     steps:
       - name: Checkout
@@ -147,7 +147,7 @@ jobs:
   # ─────────────────────────────────────────────
   artifact-checks:
     name: Artifact Checks
-    runs-on: macos-26-arm64
+    runs-on: macos-26
     needs: build
     timeout-minutes: 10
     steps:
