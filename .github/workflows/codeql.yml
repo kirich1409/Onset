@@ -26,6 +26,7 @@ jobs:
   analyze:
     name: CodeQL (Swift)
     runs-on: macos-26-arm64
+    timeout-minutes: 60
 
     steps:
       - name: Checkout

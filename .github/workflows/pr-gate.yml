@@ -30,9 +30,21 @@ jobs:
   build:
     name: Build (Debug)
     runs-on: macos-26-arm64
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # Fail-fast: verify Xcode 26.5 exists on the runner image before attempting build.
+      # GitHub rotates Xcode versions on macos-* images; a missing directory produces
+      # cryptic errors later. Fail immediately with clear feedback for recovery.
+      - name: Verify Xcode 26.5
+        run: |
+          if [ ! -d "/Applications/Xcode_26.5.app" ]; then
+            echo "::error::Xcode 26.5 not found on runner (image rotated versions). Update DEVELOPER_DIR and target SDK."
+            exit 1
+          fi
+          xcodebuild -version
 
       # Diagnostic: confirm the actual Xcode selected before any build step.
       # A wrong DEVELOPER_DIR produces a cryptic "No such file" error otherwise.
@@ -78,6 +90,7 @@ jobs:
   lint:
     name: Lint
     runs-on: macos-26-arm64
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -103,6 +116,7 @@ jobs:
   unit:
     name: Unit Tests
     runs-on: macos-26-arm64
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -135,6 +149,7 @@ jobs:
     name: Artifact Checks
     runs-on: macos-26-arm64
     needs: build
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
