@@ -69,6 +69,8 @@ done
 ALLOWED_LIST=(
   "com.apple.security.cs.allow-unsigned-executable-memory"
   "com.apple.security.cs.disable-library-validation"
+  # Camera access (required for webcam recording)
+  "com.apple.security.device.camera"
   # Screen capture permission (required for screen recording feature)
   "com.apple.security.screen-capture"
   # Microphone access (required for audio recording)

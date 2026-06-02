@@ -28,6 +28,9 @@
 		56D93BCB2FCE9DF40027E5F0 /* OnsetTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OnsetTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		56D93BD52FCE9DF40027E5F0 /* OnsetUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OnsetUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1B2C3D4E5F60000A1B2C3D4 /* Strict.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Strict.xcconfig; sourceTree = "<group>"; };
+		F100000000000001A0000001 /* ScreenCaptureKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ScreenCaptureKit.framework; path = System/Library/Frameworks/ScreenCaptureKit.framework; sourceTree = SDKROOT; };
+		F100000000000001A0000002 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+		F100000000000001A0000003 /* VideoToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = VideoToolbox.framework; path = System/Library/Frameworks/VideoToolbox.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -48,11 +51,20 @@
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
+/* Begin PBXBuildFile section */
+		F100000000000001B0000001 /* ScreenCaptureKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F100000000000001A0000001 /* ScreenCaptureKit.framework */; };
+		F100000000000001B0000002 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F100000000000001A0000002 /* AVFoundation.framework */; };
+		F100000000000001B0000003 /* VideoToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F100000000000001A0000003 /* VideoToolbox.framework */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFrameworksBuildPhase section */
 		56D93BB92FCE9DF30027E5F0 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F100000000000001B0000001 /* ScreenCaptureKit.framework in Frameworks */,
+				F100000000000001B0000002 /* AVFoundation.framework in Frameworks */,
+				F100000000000001B0000003 /* VideoToolbox.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -77,11 +89,22 @@
 			isa = PBXGroup;
 			children = (
 				A1B2C3D4E5F60001A1B2C3D4 /* Config */,
+				F100000000000001C0000001 /* Frameworks */,
 				56D93BBE2FCE9DF30027E5F0 /* Onset */,
 				56D93BCE2FCE9DF40027E5F0 /* OnsetTests */,
 				56D93BD82FCE9DF40027E5F0 /* OnsetUITests */,
 				56D93BBD2FCE9DF30027E5F0 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		F100000000000001C0000001 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				F100000000000001A0000001 /* ScreenCaptureKit.framework */,
+				F100000000000001A0000002 /* AVFoundation.framework */,
+				F100000000000001A0000003 /* VideoToolbox.framework */,
+			);
+			name = Frameworks;
 			sourceTree = "<group>";
 		};
 		A1B2C3D4E5F60001A1B2C3D4 /* Config */ = {
@@ -406,6 +429,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Onset/Onset.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -414,7 +438,9 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Onset records your camera feed alongside your screen.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Onset records audio from your microphone.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -438,6 +464,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Onset/Onset.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -446,7 +473,9 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "Onset records your camera feed alongside your screen.";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Onset records audio from your microphone.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",

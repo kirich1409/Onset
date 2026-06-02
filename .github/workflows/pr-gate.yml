@@ -194,15 +194,11 @@ jobs:
         run: scripts/check-no-network.sh "${{ steps.locate.outputs.app_path }}"
 
       - name: Lint PrivacyInfo.xcprivacy
-        # Non-fatal if missing — PrivacyInfo.xcprivacy is a TODO for the app target.
-        # When required-reason APIs (e.g. UserDefaults) are added, this must be present.
-        # TODO: make this fatal once PrivacyInfo.xcprivacy is added to the target.
         run: |
           PRIVACY_MANIFEST=$(find "${{ steps.locate.outputs.app_path }}" -name "PrivacyInfo.xcprivacy" | head -1)
           if [ -z "$PRIVACY_MANIFEST" ]; then
-            echo "WARNING: PrivacyInfo.xcprivacy not found in built .app — add it before using required-reason APIs"
-          else
-            echo "Found PrivacyInfo.xcprivacy at: $PRIVACY_MANIFEST"
-            # Validate XML is well-formed
-            plutil -lint "$PRIVACY_MANIFEST" && echo "PrivacyInfo.xcprivacy is valid"
+            echo "::error::PrivacyInfo.xcprivacy not found in built .app"
+            exit 1
           fi
+          echo "Found PrivacyInfo.xcprivacy at: $PRIVACY_MANIFEST"
+          plutil -lint "$PRIVACY_MANIFEST" && echo "PrivacyInfo.xcprivacy is valid"
