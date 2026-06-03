@@ -1,0 +1,279 @@
+import Foundation
+
+// swiftlint:disable no_magic_numbers
+// Rationale: the numeric literals in this file are calibration-placeholder values for
+// VBR bitrate targets and the engine-throughput budget cap. They are not "magic" — each
+// is documented with its source (spec anchor or research report) and is expected to be
+// tuned post-MVP against real hardware. Disabling the rule file-wide avoids cluttering
+// every constant with a named-constant indirection layer that provides no semantic value
+// before calibration.
+
+// MARK: - RecordingConfiguration
+
+/// Pure recording policy: codec settings, rate control, pixel preferences, and file layout.
+///
+/// This type holds POLICY only — plain Swift values, no VideoToolbox/CoreMedia/CoreVideo
+/// imports. The mapping from these values to framework constants happens in the encoder
+/// and writer layers.
+///
+/// ### Numeric values are calibration placeholders
+/// VBR bitrate targets (`bitrateTable`, `dataRateLimitsPeakMultiplier`) are starting
+/// hypotheses based on industry knowledge. They MUST be calibrated against real Apple
+/// Silicon hardware (M1 Air through M3 Max) before the MVP ships. The structure is the
+/// contract; the scalars are not.
+///
+/// ### DataRateLimits fallback
+/// The encoder layer must handle `kVTPropertyNotSupportedErr` returned by some hardware
+/// encoders when setting DataRateLimits (peak cap). In that case, fall back to
+/// AverageBitRate-only and log the event via `os.Logger`. This fallback is implemented
+/// in the encoder, not here.
+///
+/// All members are `nonisolated` so this pure value type is usable from any isolation
+/// context without actor hopping (required under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`).
+nonisolated struct RecordingConfiguration {
+    // MARK: - Container & Codec
+
+    /// Output file container. AC-4: must be `.mp4`.
+    nonisolated let container: Container
+    /// Video codec. AC-4: must be `.hevc`.
+    nonisolated let codec: VideoCodec
+    /// HEVC sample entry tag in the MP4 container. AC-4: must be `.hvc1`.
+    nonisolated let sampleEntry: HEVCSampleEntry
+    /// HEVC profile / level. Spec: "ProfileLevel = HEVC_Main_AutoLevel".
+    nonisolated let profileLevel: HEVCProfileLevel
+
+    // MARK: - Color
+
+    /// Color primaries. Spec: "SDR Rec.709".
+    nonisolated let colorPrimaries: ColorPrimaries
+    /// Transfer function. Spec: "SDR Rec.709".
+    nonisolated let transferFunction: TransferFunction
+    /// YCbCr matrix. Spec: "SDR Rec.709".
+    nonisolated let yCbCrMatrix: YCbCrMatrix
+    /// Bit depth. Spec: "8-bit". AC-4.
+    nonisolated let bitDepth: Int
+
+    // MARK: - Frame Rate
+
+    /// Maximum screen recording frame rate (fps). AC-5: target fps = min(native refresh, 60).
+    nonisolated let maxScreenFps: Int
+    /// Minimum camera recording frame rate (fps). AC-5: camera auto-selects highest
+    /// resolution format with fps ≥ this value.
+    nonisolated let minCameraFps: Int
+
+    // MARK: - Rate Control (VBR)
+
+    /// Average-bitrate lookup table as an ordered array of (key, value) pairs.
+    ///
+    /// VBR rate control: the encoder layer sets `AverageBitRate` from this table and
+    /// `DataRateLimits` = average × `dataRateLimitsPeakMultiplier` as the peak cap.
+    ///
+    /// Array (not `Dictionary`) because `BitrateKey: Hashable` cannot be made `nonisolated`
+    /// under `InferIsolatedConformances` — see `BitrateKey` comment above. Linear scan is
+    /// acceptable for a table of O(10) entries.
+    ///
+    /// **Values are placeholders** — calibrate before MVP ship. See type-level doc.
+    nonisolated let bitrateTable: [(key: BitrateKey, value: Int)]
+
+    /// Peak-bitrate multiplier applied on top of the average bitrate.
+    ///
+    /// DataRateLimits peak = averageBitrate × this multiplier. Typical range 1.5–2.5.
+    /// **Placeholder** — calibrate post-MVP.
+    nonisolated let dataRateLimitsPeakMultiplier: Double
+
+    // MARK: - GOP / Reordering
+
+    /// Key-frame interval in seconds. Used to compute `MaxKeyFrameInterval` for the
+    /// encoder. A stable GOP simplifies CFR and seek. **Placeholder**.
+    nonisolated let keyFrameIntervalSeconds: Double
+
+    /// Whether B-frames are permitted (`AllowFrameReordering`).
+    /// Spec: `true` — B-frames improve compression; recording is not live streaming.
+    nonisolated let allowFrameReordering: Bool
+
+    // MARK: - Pixel Format Preference
+
+    /// Ordered list of preferred pixel formats for encoder input, most-preferred first.
+    ///
+    /// The capture layer tries formats in this order and uses the first one the source
+    /// can deliver without a CPU-copy conversion. See `PixelFormat` doc.
+    nonisolated let pixelFormatPreference: [PixelFormat]
+
+    // MARK: - File Durability
+
+    /// Movie-fragment interval in seconds.
+    ///
+    /// `AVAssetWriter.movieFragmentInterval` controls how often the container is
+    /// finalised in-stream. Shorter = less data lost on crash. Spec: "рекомендуется 2–5 с";
+    /// AC-10: file must be valid after a crash. Set to 4 s.
+    nonisolated let movieFragmentInterval: Double
+
+    // MARK: - Engine Budget Cap
+
+    /// Throughput ceiling for the encode engine. Used by CapabilityProbe pre-flight.
+    ///
+    /// Spec anchor: "один движок ≈ 4K120 ≈ ~995M px/s" (CapabilityProbe section).
+    /// AC-5: screen resolution is capped so combined pixel-rate stays within this budget.
+    nonisolated let budgetCap: EngineBudgetCap
+
+    // MARK: - Output Directory
+
+    /// Root directory for all recorded files (`~/Movies/Onset/`).
+    ///
+    /// Resolved via `FileManager` at init time. The directory is created on first
+    /// recording start if absent; this property only provides the target URL.
+    /// Spec: `~/Movies/Onset/`; Technical Constraints: Developer ID path, no sandbox.
+    nonisolated let outputDirectory: URL
+
+    // MARK: - Bitrate Lookup
+
+    /// Returns the average bitrate for the given resolution and frame rate.
+    ///
+    /// Performs an exact key lookup first; falls back to a resolution-bucket heuristic
+    /// if the key is absent (covers slight frame-rate variations and unlisted resolutions).
+    ///
+    /// The fallback value is a conservative estimate — prefer calibrated table entries.
+    ///
+    /// - Parameters:
+    ///   - width: Frame width in pixels.
+    ///   - height: Frame height in pixels.
+    ///   - fps: Frames per second.
+    /// - Returns: Average bitrate in bits per second (always positive).
+    nonisolated func averageBitrate(forWidth width: Int, height: Int, fps: Int) -> Int {
+        let queryKey = BitrateKey(width: width, height: height, fps: fps)
+
+        // Exact match first (linear scan; table is O(10) entries).
+        if let exact = self.bitrateTable.first(where: { $0.key == queryKey }) {
+            return exact.value
+        }
+
+        // Fallback: find the entry whose pixel count is closest to the requested one
+        // and whose fps matches. If no fps match, use the entry with the closest pixel
+        // count regardless of fps and scale linearly by the fps ratio.
+        let pixelCount = width * height
+        let fpsBucket = self.bitrateTable
+            .filter { $0.key.fps == fps }
+            .min { abs($0.key.pixelCount - pixelCount) < abs($1.key.pixelCount - pixelCount) }
+
+        if let match = fpsBucket {
+            // Scale linearly from the closest same-fps entry by pixel-count ratio.
+            let ratio = Double(pixelCount) / Double(max(1, match.key.pixelCount))
+            return max(1_000_000, Int(Double(match.value) * ratio))
+        }
+
+        // No same-fps entry either — scale from any closest entry by both pixel and fps.
+        let anyBucket = self.bitrateTable
+            .min { abs($0.key.pixelCount - pixelCount) < abs($1.key.pixelCount - pixelCount) }
+
+        if let match = anyBucket {
+            let pixelRatio = Double(pixelCount) / Double(max(1, match.key.pixelCount))
+            let fpsRatio = Double(fps) / Double(max(1, match.key.fps))
+            return max(1_000_000, Int(Double(match.value) * pixelRatio * fpsRatio))
+        }
+
+        // Table is empty — hard fallback.
+        return 10_000_000
+    }
+
+    // MARK: - Default Profile
+
+    /// The canonical MVP recording policy.
+    ///
+    /// Codec/container/color settings are fixed (AC-4). Numeric bitrate values are
+    /// calibration placeholders (see type-level doc). The default profile targets ≤4K60
+    /// per AC-5 and uses the engine throughput cap from the spec (995M px/s, AC-5).
+    ///
+    /// Bitrate table placeholder values (bits per second):
+    /// - 4K (3840×2160) @ 60 fps  : 60 Mbps average  (industry reference: ~50–80 Mbps HEVC)
+    /// - 4K (3840×2160) @ 30 fps  : 36 Mbps average
+    /// - 1080p (1920×1080) @ 60 fps: 18 Mbps average
+    /// - 1080p (1920×1080) @ 30 fps: 12 Mbps average
+    /// - 1440p (2560×1440) @ 60 fps: 28 Mbps average
+    /// These MUST be re-calibrated against hardware before MVP ship.
+    nonisolated static let mvpDefault = Self.makeMVPDefault()
+
+    // MARK: - Private factory
+
+    /// Builds the canonical MVP default value.
+    ///
+    /// Extracted into a named `nonisolated static func` so that the function body is
+    /// explicitly `nonisolated`. Under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` +
+    /// `NonisolatedNonsendingByDefault`, a closure literal assigned to a `nonisolated static let`
+    /// is still inferred as `@MainActor`-isolated, causing a compile error. A named function
+    /// carries its `nonisolated` annotation unambiguously through the type-checker.
+    nonisolated private static func makeMVPDefault() -> Self {
+        // `NSHomeDirectory()` is a plain Foundation free function with no actor isolation,
+        // so it is safe to call from this `nonisolated` context.
+        // `FileManager.default.urls(for:in:)` is `@MainActor`-isolated under these compiler
+        // flags and therefore cannot be called here. The home-directory path is stable for
+        // the lifetime of the process and does not require FileManager.
+        let outputDirectory = URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory)
+            .appending(path: "Movies", directoryHint: .isDirectory)
+            .appending(path: "Onset", directoryHint: .isDirectory)
+
+        let bitrateTable: [(key: BitrateKey, value: Int)] = [
+            (key: BitrateKey(width: 3840, height: 2160, fps: 60), value: 60_000_000),
+            (key: BitrateKey(width: 3840, height: 2160, fps: 30), value: 36_000_000),
+            (key: BitrateKey(width: 2560, height: 1440, fps: 60), value: 28_000_000),
+            (key: BitrateKey(width: 2560, height: 1440, fps: 30), value: 18_000_000),
+            (key: BitrateKey(width: 1920, height: 1080, fps: 60), value: 18_000_000),
+            (key: BitrateKey(width: 1920, height: 1080, fps: 30), value: 12_000_000),
+        ]
+
+        // Engine throughput cap: 4K120 ≈ 995M px/s.
+        // Source: spec "CapabilityProbe и pre-flight бюджет": "один движок ≈ 4K120 ≈ ~995M px/s"
+        let budgetCap = EngineBudgetCap(maxPixelsPerSecond: 995_000_000)
+
+        return Self(
+            container: .mp4,
+            codec: .hevc,
+            sampleEntry: .hvc1,
+            profileLevel: .mainAutoLevel,
+            colorPrimaries: .rec709,
+            transferFunction: .rec709,
+            yCbCrMatrix: .rec709,
+            bitDepth: 8,
+            maxScreenFps: 60,
+            minCameraFps: 30,
+            bitrateTable: bitrateTable,
+            dataRateLimitsPeakMultiplier: 2.0,
+            keyFrameIntervalSeconds: 2.0,
+            allowFrameReordering: true,
+            pixelFormatPreference: [.biPlanar420v, .biPlanar420f],
+            movieFragmentInterval: 4.0,
+            budgetCap: budgetCap,
+            outputDirectory: outputDirectory
+        )
+    }
+}
+
+extension RecordingConfiguration: Equatable {
+    /// Manual `nonisolated` implementation.
+    nonisolated static func == (lhs: RecordingConfiguration, rhs: RecordingConfiguration) -> Bool {
+        // Tuples are not `Equatable` in Swift, so compare bitrateTable element-by-element.
+        let bitrateTablesEqual = lhs.bitrateTable.count == rhs.bitrateTable.count
+            && zip(lhs.bitrateTable, rhs.bitrateTable).allSatisfy { leftEntry, rightEntry in
+                leftEntry.key == rightEntry.key && leftEntry.value == rightEntry.value
+            }
+        return lhs.container == rhs.container
+            && lhs.codec == rhs.codec
+            && lhs.sampleEntry == rhs.sampleEntry
+            && lhs.profileLevel == rhs.profileLevel
+            && lhs.colorPrimaries == rhs.colorPrimaries
+            && lhs.transferFunction == rhs.transferFunction
+            && lhs.yCbCrMatrix == rhs.yCbCrMatrix
+            && lhs.bitDepth == rhs.bitDepth
+            && lhs.maxScreenFps == rhs.maxScreenFps
+            && lhs.minCameraFps == rhs.minCameraFps
+            && bitrateTablesEqual
+            && lhs.dataRateLimitsPeakMultiplier == rhs.dataRateLimitsPeakMultiplier
+            && lhs.keyFrameIntervalSeconds == rhs.keyFrameIntervalSeconds
+            && lhs.allowFrameReordering == rhs.allowFrameReordering
+            && lhs.pixelFormatPreference == rhs.pixelFormatPreference
+            && lhs.movieFragmentInterval == rhs.movieFragmentInterval
+            && lhs.budgetCap == rhs.budgetCap
+            && lhs.outputDirectory == rhs.outputDirectory
+    }
+}
+
+// swiftlint:enable no_magic_numbers
