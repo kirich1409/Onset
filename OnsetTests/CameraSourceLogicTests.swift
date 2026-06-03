@@ -274,6 +274,31 @@ struct HostTimeConversionTests {
     }
 }
 
+// MARK: - Disconnect filter tests (AC-12 regression)
+
+/// Locks the B1 fix: unplugging a non-camera device (e.g. microphone) must NOT trigger
+/// the disconnect handler. Tests the `shouldHandleDisconnect` pure helper extracted from
+/// `VideoOutputShim.deviceDidDisconnect(_:)`.
+@Suite("CameraSource — disconnect filter")
+struct DisconnectFilterTests {
+    private let cameraID = "camera-unique-id"
+
+    @Test("matching device ID triggers disconnect")
+    func matchingID_triggersDisconnect() {
+        #expect(shouldHandleDisconnect(notificationDeviceID: self.cameraID, cameraID: self.cameraID) == true)
+    }
+
+    @Test("non-matching device ID does not trigger disconnect")
+    func nonMatchingID_doesNotTriggerDisconnect() {
+        #expect(shouldHandleDisconnect(notificationDeviceID: "other-device-id", cameraID: self.cameraID) == false)
+    }
+
+    @Test("nil device ID (non-AVCaptureDevice notification object) does not trigger disconnect")
+    func nilID_doesNotTriggerDisconnect() {
+        #expect(shouldHandleDisconnect(notificationDeviceID: nil, cameraID: self.cameraID) == false)
+    }
+}
+
 // MARK: - L5 live hardware harness
 
 // MARK: - Stop teardown contract tests
@@ -327,6 +352,46 @@ struct CameraSourceStopTeardownTests {
         let source = Self.makeSyntheticSource()
         await source.stop()
         let first = await source.drops.first { _ in true }
+        #expect(first == nil)
+    }
+}
+
+// MARK: - Stop teardown (nil mic) tests (AC-11 regression)
+
+/// Guards the nil-mic teardown path in `CameraSource.stop()`.
+///
+/// Constructs a `CameraSource` with `micDevice: nil` (screen-only-compatible path) and
+/// asserts that `stop()` finishes all streams cleanly without ever calling `start()`.
+/// The load-bearing assertion is `audioSamples` — confirms the audio continuation is
+/// finished even when no microphone device was provided at init time.
+/// CI-runnable — no camera or microphone hardware required.
+@Suite("CameraSource — stop teardown (nil mic)", .timeLimit(.minutes(1)))
+struct CameraSourceNilMicStopTeardownTests {
+    private static func makeNilMicSource() -> CameraSource {
+        let format = CameraFormat(pixelWidth: 1280, pixelHeight: 720, minFps: 30.0, maxFps: 60.0)
+        let device = CameraDevice(uniqueID: "synthetic-camera-id", formats: [format])
+        return CameraSource(
+            cameraDevice: device,
+            format: format,
+            micDevice: nil,
+            config: .mvpDefault
+        )
+    }
+
+    @Test("nil-mic stop() without start() finishes the audioSamples stream")
+    func nilMic_stopWithoutStart_finishesAudioSamples() async {
+        let source = Self.makeNilMicSource()
+        await source.stop()
+        // audioSamples must finish (yield nil) regardless of whether a mic was provided.
+        let first = await source.audioSamples.first { _ in true }
+        #expect(first == nil)
+    }
+
+    @Test("nil-mic stop() without start() finishes the frames stream")
+    func nilMic_stopWithoutStart_finishesFrames() async {
+        let source = Self.makeNilMicSource()
+        await source.stop()
+        let first = await source.frames.first { _ in true }
         #expect(first == nil)
     }
 }

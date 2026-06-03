@@ -106,3 +106,18 @@ nonisolated func isCaptureAuthorized(
 -> Bool {
     video == .authorized && audio == .authorized
 }
+
+/// Returns `true` when the disconnected device matches the camera this source was configured for.
+///
+/// Extracted from `VideoOutputShim.deviceDidDisconnect(_:)` so the filtering predicate can be
+/// unit-tested without live `AVCaptureDevice` or `Notification` machinery.
+///
+/// - Parameters:
+///   - notificationDeviceID: The `uniqueID` of the device that fired the disconnect notification
+///     (`(notification.object as? AVCaptureDevice)?.uniqueID`). `nil` when the notification
+///     object is not an `AVCaptureDevice` — treated as non-matching.
+///   - cameraID: The `uniqueID` of the camera this source is recording from.
+/// - Returns: `true` only when `notificationDeviceID` equals `cameraID`.
+nonisolated func shouldHandleDisconnect(notificationDeviceID: String?, cameraID: String) -> Bool {
+    notificationDeviceID == cameraID
+}

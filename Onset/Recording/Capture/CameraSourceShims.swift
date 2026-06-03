@@ -89,7 +89,11 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         // Only react when the disconnected device is the camera this shim belongs to.
         // Without this check, unplugging a microphone or any other capture device fires
         // handleCameraDisconnect and terminates the camera recording (violates AC-12).
-        guard (notification.object as? AVCaptureDevice)?.uniqueID == self.cameraUniqueID else {
+        // Predicate extracted to shouldHandleDisconnect() for unit-testability (T-A).
+        guard shouldHandleDisconnect(
+            notificationDeviceID: (notification.object as? AVCaptureDevice)?.uniqueID,
+            cameraID: self.cameraUniqueID
+        ) else {
             return
         }
         Task { await self.onDisconnect() }
