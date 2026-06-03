@@ -48,26 +48,41 @@ nonisolated enum CapabilityResolver {
         var fps: Int
     }
 
-    // MARK: - Entry point
+    // MARK: - Public result type
 
-    /// Resolves the concrete start profile for a recording session.
+    /// The result of `resolve(display:cameraFormat:config:)`.
+    ///
+    /// Carries the resolved plan together with the budget-classification flag the probe
+    /// needs, so the probe can derive `.ok` vs `.budgetExceeded` without re-implementing
+    /// the clamp logic.
+    nonisolated struct ScreenProfileResolution {
+        /// The concrete start profile (downscaled if necessary to fit the budget).
+        nonisolated let plan: ResolvedRecordingPlan
+        /// `true` when the ≤4K60 clamped baseline (before fps-fallback or downscale)
+        /// already exceeded the engine budget — i.e. the resolved plan is reduced.
+        nonisolated let budgetExceeded: Bool
+    }
+
+    // MARK: - Entry points
+
+    /// Resolves the concrete start profile together with a budget-exceeded flag.
+    ///
+    /// Prefer this over `resolveStartProfile` when the caller also needs to know whether
+    /// the clamped baseline exceeded the budget (e.g. `CapabilityProbe`).
     ///
     /// - Parameters:
     ///   - display: The already-selected display snapshot (from DeviceDiscovery).
     ///   - cameraFormat: The already-selected camera format, or `nil` when no camera is
-    ///     used. Format picking (choosing among available formats) is U3.1 / #29 — this
-    ///     function receives the result, not the raw list.
+    ///     used.
     ///   - config: The recording policy (budget cap, fps limits).
-    /// - Returns: A `ResolvedRecordingPlan` with even dimensions and a budget-respecting
-    ///   pixel-rate. Use `ResolvedRecordingPlan.combinedPixelsPerSecond` and
-    ///   `RecordingConfiguration.budgetCap.fits(screen:camera:)` in U1.2 to decide
-    ///   whether the plan is hardware-feasible.
-    nonisolated static func resolveStartProfile(
+    /// - Returns: A `ScreenProfileResolution` with the resolved plan and the
+    ///   `budgetExceeded` flag.
+    nonisolated static func resolve(
         display: Display,
         cameraFormat: CameraFormat?,
         config: RecordingConfiguration
     )
-    -> ResolvedRecordingPlan {
+    -> ScreenProfileResolution {
         // --- Step 1: cap ---
         var capped = Self.clampScreen(display: display, config: config)
 
@@ -77,8 +92,10 @@ nonisolated enum CapabilityResolver {
 
         // --- Step 2: fps fallback ---
         // Try the minimum fps (config.minCameraFps, typically 30) before downscaling.
-        let exceedsBudgetAt60 = capped.width * capped.height * capped.fps + cameraRate > cap.maxPixelsPerSecond
-        if exceedsBudgetAt60, capped.fps > config.minCameraFps {
+        // `exceedsBudgetAtCap` is computed here — before any fallback or downscale —
+        // because this is the flag the probe needs to classify `.budgetExceeded`.
+        let exceedsBudgetAtCap = capped.width * capped.height * capped.fps + cameraRate > cap.maxPixelsPerSecond
+        if exceedsBudgetAtCap, capped.fps > config.minCameraFps {
             let rateAtMin = capped.width * capped.height * config.minCameraFps + cameraRate
             if rateAtMin <= cap.maxPixelsPerSecond {
                 capped.fps = config.minCameraFps
@@ -107,13 +124,35 @@ nonisolated enum CapabilityResolver {
             )
         }
 
-        return ResolvedRecordingPlan(
+        let plan = ResolvedRecordingPlan(
             displayID: display.displayID,
             screenWidth: evenWidth,
             screenHeight: evenHeight,
             screenFps: capped.fps,
             cameraPlan: cameraPlan
         )
+        return ScreenProfileResolution(plan: plan, budgetExceeded: exceedsBudgetAtCap)
+    }
+
+    /// Resolves the concrete start profile for a recording session.
+    ///
+    /// - Parameters:
+    ///   - display: The already-selected display snapshot (from DeviceDiscovery).
+    ///   - cameraFormat: The already-selected camera format, or `nil` when no camera is
+    ///     used. Format picking (choosing among available formats) is U3.1 / #29 — this
+    ///     function receives the result, not the raw list.
+    ///   - config: The recording policy (budget cap, fps limits).
+    /// - Returns: A `ResolvedRecordingPlan` with even dimensions and a budget-respecting
+    ///   pixel-rate. Use `ResolvedRecordingPlan.combinedPixelsPerSecond` and
+    ///   `RecordingConfiguration.budgetCap.fits(screen:camera:)` in U1.2 to decide
+    ///   whether the plan is hardware-feasible.
+    nonisolated static func resolveStartProfile(
+        display: Display,
+        cameraFormat: CameraFormat?,
+        config: RecordingConfiguration
+    )
+    -> ResolvedRecordingPlan {
+        self.resolve(display: display, cameraFormat: cameraFormat, config: config).plan
     }
 
     // MARK: - Helpers

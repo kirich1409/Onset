@@ -56,23 +56,40 @@ extension ProbeResult: Equatable {
     }
 }
 
+// MARK: - HEVCProfileLevel + VideoToolbox mapping
+
+/// Maps the pure-Swift `HEVCProfileLevel` to the VideoToolbox `CFString` constant.
+///
+/// Declared in the impure encoder layer (CapabilityProbe.swift) rather than
+/// RecordingPolicyTypes.swift, which deliberately defers the VT-constant mapping to
+/// here (see "Known Unknown" in the spec Open Questions).
+extension HEVCProfileLevel {
+    /// The corresponding `kVTProfileLevel_HEVC_*` constant for `VTSessionSetProperty`.
+    nonisolated fileprivate var vtProfileLevel: CFString {
+        switch self {
+        case .mainAutoLevel:
+            kVTProfileLevel_HEVC_Main_AutoLevel
+        }
+    }
+}
+
 // MARK: - CapabilityProbe
 
 /// Impure pre-flight probe: verifies hardware HEVC availability and budget fitness.
 ///
 /// ### Probe algorithm (spec §"CapabilityProbe и pre-flight бюджет", AC-5, AC-6)
 ///
-/// 1. **Resolve** — call `CapabilityResolver.resolveStartProfile` to obtain the
-///    budget-fitted plan (≤4K60 cap + downscale if needed).
+/// 1. **Resolve** — call `CapabilityResolver.resolve` to obtain the budget-fitted plan
+///    (≤4K60 cap + downscale if needed) and the `budgetExceeded` flag.
 /// 2. **HW-encoder check (AC-6)** — attempt to create a `VTCompressionSession` with
-///    `RequireHardwareAcceleratedVideoEncoder = true`. If that fails, or if
-///    `UsingHardwareAcceleratedVideoEncoder` is false, return `.noHardwareEncoder`.
+///    `RequireHardwareAcceleratedVideoEncoder = true` and set `ProfileLevel` to
+///    `HEVC_Main_AutoLevel`. If that fails, or if `UsingHardwareAcceleratedVideoEncoder`
+///    is false, return `.noHardwareEncoder`.
 ///    The session is probed at a fixed 1920×1080; encoder existence is
 ///    resolution-independent and probing at a degenerate size (e.g. 2×2) risks
 ///    false negatives.
-/// 3. **Budget classification** — check whether the ≤4K60 clamped profile itself fits
-///    the budget using `EngineBudgetCap.fits(screen:camera:)`. If it fits → `.ok(plan)`.
-///    If not → `.budgetExceeded(suggested: plan)`.
+/// 3. **Budget classification** — use the `budgetExceeded` flag from the resolver.
+///    If the clamped ≤4K60 baseline fits → `.ok(plan)`. If not → `.budgetExceeded(suggested: plan)`.
 ///
 /// ### Non-isolation
 /// All members are `nonisolated`. Under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` +
@@ -89,11 +106,6 @@ nonisolated enum CapabilityProbe {
     /// budget-overflow paths) while keeping session setup cost negligible.
     private static let probeWidth: Int32 = 1920
     private static let probeHeight: Int32 = 1080
-
-    /// Maximum screen width in the default ≤4K60 profile (matches `CapabilityResolver`).
-    private static let maxScreenWidth4K = 3840
-    /// Maximum screen height in the default ≤4K60 profile.
-    private static let maxScreenHeight4K = 2160
 
     // MARK: - Logger
 
@@ -117,7 +129,7 @@ nonisolated enum CapabilityProbe {
         config: RecordingConfiguration
     )
     -> ProbeResult {
-        let plan = CapabilityResolver.resolveStartProfile(
+        let resolution = CapabilityResolver.resolve(
             display: display,
             cameraFormat: cameraFormat,
             config: config
@@ -130,34 +142,36 @@ nonisolated enum CapabilityProbe {
             return .noHardwareEncoder
         }
 
-        // Budget classification: does the default ≤4K60 clamped profile fit the budget?
-        // Using fits() rather than dimension comparison correctly handles the even-floor
-        // step (odd native dims shrink by 1 without any budget pressure).
-        let clampedScreen = self.clampedScreenDimensions(display: display, config: config)
-        let clampedCamera = self.clampedCameraSource(cameraFormat: cameraFormat, config: config)
-
-        if config.budgetCap.fits(screen: clampedScreen, camera: clampedCamera) {
+        // Budget classification: derived from the resolver's pre-downscale clamped baseline.
+        // `resolution.budgetExceeded` is true exactly when the ≤4K60 cap (before fps-fallback
+        // or downscale) already exceeded the engine budget — the same condition the probe used
+        // to check via re-derived clamped dimensions.
+        let plan = resolution.plan
+        if resolution.budgetExceeded {
+            Self.logger.warning(
+                "Probe: budget exceeded — suggested \(plan.screenWidth)×\(plan.screenHeight)@\(plan.screenFps)fps"
+            )
+            return .budgetExceeded(suggested: plan)
+        } else {
             let hasCamera = plan.cameraPlan != nil
             Self.logger.info(
                 "Probe: ok — \(plan.screenWidth)×\(plan.screenHeight)@\(plan.screenFps)fps, camera: \(hasCamera)"
             )
             return .ok(plan)
-        } else {
-            Self.logger.warning(
-                "Probe: budget exceeded — suggested \(plan.screenWidth)×\(plan.screenHeight)@\(plan.screenFps)fps"
-            )
-            return .budgetExceeded(suggested: plan)
         }
     }
 
     // MARK: - Helpers
 
-    /// Returns `true` when a hardware HEVC encoder can be created via VideoToolbox.
+    /// Returns `true` when a hardware HEVC encoder can be created via VideoToolbox
+    /// configured for HEVC Main AutoLevel.
     ///
-    /// Creates a minimal `VTCompressionSession` with `RequireHardwareAcceleratedVideoEncoder`
-    /// set to `true`, queries `UsingHardwareAcceleratedVideoEncoder`, then invalidates the
-    /// session. The session is strictly local — `VTCompressionSessionRef` is `CM_SWIFT_NONSENDABLE`
-    /// and never escapes this function.
+    /// Creates a `VTCompressionSession` with `RequireHardwareAcceleratedVideoEncoder = true`,
+    /// sets `ProfileLevel` to `kVTProfileLevel_HEVC_Main_AutoLevel` (the profile the real
+    /// encoder will use), then queries `UsingHardwareAcceleratedVideoEncoder`.
+    /// A HW encoder that does not support this profile in hardware fails here rather
+    /// than at session start. The session is strictly local — `VTCompressionSessionRef`
+    /// is `CM_SWIFT_NONSENDABLE` and never escapes this function.
     ///
     /// - Parameters:
     ///   - width: Frame width passed to `VTCompressionSessionCreate`.
@@ -190,6 +204,20 @@ nonisolated enum CapabilityProbe {
 
         defer { VTCompressionSessionInvalidate(session) }
 
+        // Set the profile level the real encoder will use. A HW encoder that cannot
+        // accept HEVC Main AutoLevel in hardware must fail here, not at session start.
+        // VTSessionSetProperty takes (VTSessionRef, CFString, CFTypeRef?) — no raw pointer.
+        let profileLevel = HEVCProfileLevel.mainAutoLevel.vtProfileLevel
+        let setStatus = VTSessionSetProperty(
+            session,
+            key: kVTCompressionPropertyKey_ProfileLevel,
+            value: profileLevel
+        )
+        guard setStatus == noErr else {
+            Self.logger.debug("VTSessionSetProperty(ProfileLevel) failed: OSStatus \(setStatus)")
+            return false
+        }
+
         return self.queryUsingHardwareEncoder(session: session)
     }
 
@@ -200,17 +228,6 @@ nonisolated enum CapabilityProbe {
         session: VTCompressionSession
     )
     -> Bool {
-        // VTSessionCopyProperty writes a retained CFTypeRef via a void* out-pointer.
-        // Under SWIFT_STRICT_MEMORY_SAFETY = YES, `&value` on a CFTypeRef? (AnyObject?)
-        // would form an UnsafeMutableRawPointer to an Optional object — doubly unsafe.
-        // withUnsafeMutablePointer is the correct safe bridge: it guarantees the pointer
-        // is valid for the duration of the call and does not require forming raw pointers
-        // to AnyObject directly.
-        // VTSessionCopyProperty writes a retained CFTypeRef via a void* out-pointer.
-        // Under SWIFT_STRICT_MEMORY_SAFETY = YES, `&value` on a CFTypeRef? (AnyObject?)
-        // forms an UnsafeMutableRawPointer to an Optional object — doubly unsafe.
-        // withUnsafeMutablePointer gives a typed pointer scoped to the call duration.
-        // UnsafeMutableRawPointer(ptr) is itself unsafe and requires the `unsafe` block.
         // VTSessionCopyProperty writes a retained CFTypeRef via a void* out-pointer.
         // `withUnsafeMutablePointer` gives a typed pointer scoped to the call duration.
         // The whole block is marked `unsafe`: both `UnsafeMutableRawPointer(ptr)` (forming
@@ -244,40 +261,5 @@ nonisolated enum CapabilityProbe {
         let isHW = unsafe CFBooleanGetValue(unsafeDowncast(rawValue, to: CFBoolean.self))
         Self.logger.debug("UsingHardwareAcceleratedVideoEncoder = \(isHW)")
         return isHW
-    }
-
-    /// Reconstructs the ≤4K60 clamped screen as `SourceDimensions` for budget-fitness check.
-    ///
-    /// Mirrors `CapabilityResolver.clampScreen` logic: refreshHz==0 is treated as maxScreenFps.
-    /// Even-floor is applied here for consistency with what the resolver produces — ensuring
-    /// `fits()` uses the same pixel counts as the resolved plan's unmodified clamped baseline.
-    nonisolated private static func clampedScreenDimensions(
-        display: Display,
-        config: RecordingConfiguration
-    )
-    -> SourceDimensions {
-        let fps = display.refreshHz == 0.0
-            ? config.maxScreenFps
-            : min(Int(display.refreshHz), config.maxScreenFps)
-        let width = min(display.pixelWidth, self.maxScreenWidth4K)
-        let height = min(display.pixelHeight, self.maxScreenHeight4K)
-        return SourceDimensions(width: width, height: height, fps: fps)
-    }
-
-    /// Returns the clamped camera `SourceDimensions`, or zero-rate when no camera.
-    nonisolated private static func clampedCameraSource(
-        cameraFormat: CameraFormat?,
-        config: RecordingConfiguration
-    )
-    -> SourceDimensions {
-        guard let format = cameraFormat else {
-            return SourceDimensions(width: 0, height: 0, fps: 0)
-        }
-        let fps = min(Int(format.maxFps), config.maxScreenFps)
-        return SourceDimensions(
-            width: Int(format.pixelWidth),
-            height: Int(format.pixelHeight),
-            fps: fps
-        )
     }
 }
