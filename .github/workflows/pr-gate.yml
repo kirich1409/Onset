@@ -108,11 +108,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
-      - name: Install SwiftLint
-        # brew pulls latest SwiftLint. This is intentional for MVP: pinning requires
-        # a binary download step or a Mint lockfile; add Mint-pinning in a follow-up.
-        # TODO: pin SwiftLint version via Mint or direct binary download.
-        run: brew install swiftlint
+      # Read the pinned version from Mintfile so the download and cache key
+      # stay in sync with the single source of truth.
+      - name: Resolve SwiftLint version from Mintfile
+        id: swiftlint-version
+        run: echo "version=$(grep -oE '[^@]+$' Mintfile)" >> "$GITHUB_OUTPUT"
+
+      # Cache the downloaded .pkg by OS + version.
+      # The pkg is a pre-built binary — it is NOT compiled by the active Xcode
+      # toolchain, so the cache key is toolchain-independent and safe across
+      # Xcode bumps.
+      - name: Cache SwiftLint package
+        id: cache-swiftlint
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: /tmp/SwiftLint.pkg
+          key: swiftlint-pkg-${{ runner.os }}-${{ steps.swiftlint-version.outputs.version }}
+
+      - name: Download SwiftLint package
+        if: steps.cache-swiftlint.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSLo /tmp/SwiftLint.pkg \
+            "https://github.com/realm/SwiftLint/releases/download/${{ steps.swiftlint-version.outputs.version }}/SwiftLint.pkg"
+
+      # Installs to /usr/local/bin/swiftlint — deterministic, no PATH ambiguity.
+      # SwiftLint is not pre-installed on macos-26, so this is the only binary.
+      - name: Install SwiftLint (pinned)
+        run: |
+          sudo installer -pkg /tmp/SwiftLint.pkg -target /
+          swiftlint version
 
       - name: SwiftLint (strict)
         run: swiftlint lint --strict --config .swiftlint.yml
