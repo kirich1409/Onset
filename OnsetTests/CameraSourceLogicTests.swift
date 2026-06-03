@@ -276,9 +276,85 @@ struct HostTimeConversionTests {
 
 // MARK: - L5 live hardware harness
 
+// MARK: - Stop teardown contract tests
+
+/// Guards the nil-session teardown branch in `CameraSource.stop()`.
+///
+/// Constructs a `CameraSource` from synthetic value-type models (no live device),
+/// calls `stop()` WITHOUT ever calling `start()`, and asserts that all streams finish
+/// (consumers receive `nil`, not a hang). CI-runnable — no camera or microphone required.
+@Suite("CameraSource — stop teardown", .timeLimit(.minutes(1)))
+struct CameraSourceStopTeardownTests {
+    private static func makeSyntheticSource() -> CameraSource {
+        let format = CameraFormat(pixelWidth: 1280, pixelHeight: 720, minFps: 30.0, maxFps: 60.0)
+        let device = CameraDevice(uniqueID: "synthetic-camera-id", formats: [format])
+        let mic = MicrophoneDevice(uniqueID: "synthetic-mic-id")
+        return CameraSource(
+            cameraDevice: device,
+            format: format,
+            micDevice: mic,
+            config: .mvpDefault
+        )
+    }
+
+    @Test("stop() without start() finishes the frames stream")
+    func stopWithoutStart_finishesFrames() async {
+        let source = Self.makeSyntheticSource()
+        await source.stop()
+        // AsyncStream whose continuation was finished yields nil on first iteration.
+        let first = await source.frames.first { _ in true }
+        #expect(first == nil)
+    }
+
+    @Test("stop() without start() finishes the audioSamples stream")
+    func stopWithoutStart_finishesAudioSamples() async {
+        let source = Self.makeSyntheticSource()
+        await source.stop()
+        let first = await source.audioSamples.first { _ in true }
+        #expect(first == nil)
+    }
+
+    @Test("stop() without start() finishes the events stream")
+    func stopWithoutStart_finishesEvents() async {
+        let source = Self.makeSyntheticSource()
+        await source.stop()
+        let first = await source.events.first { _ in true }
+        #expect(first == nil)
+    }
+
+    @Test("stop() without start() finishes the drops stream")
+    func stopWithoutStart_finishesDrops() async {
+        let source = Self.makeSyntheticSource()
+        await source.stop()
+        let first = await source.drops.first { _ in true }
+        #expect(first == nil)
+    }
+}
+
+// MARK: - L5 opt-in condition
+
+/// Returns `true` when the L5 live-capture test should run.
+///
+/// Both conditions must hold:
+/// 1. `ONSET_RUN_L5_CAPTURE=1` is set in the environment (explicit opt-in).
+/// 2. TCC authorization is granted for both camera and microphone.
+///
+/// Used as the `.enabled(if:)` trait on `liveCapture_producesFramesAndSamples` so that
+/// a non-opted-in run reports as a genuine SKIP rather than a false PASS.
+private func l5CaptureEnabled() -> Bool {
+    guard ProcessInfo.processInfo.environment["ONSET_RUN_L5_CAPTURE"] == "1" else {
+        return false
+    }
+    let videoStatus = AVCaptureDevice.authorizationStatus(for: .video)
+    let audioStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+    return isCaptureAuthorized(video: videoStatus, audio: audioStatus)
+}
+
+// MARK: - L5 live hardware harness
+
 /// Live-hardware capture harness for CameraSource.
 ///
-/// Opt-in: skips unless BOTH conditions hold:
+/// Opt-in: skips (SKIP, not PASS) unless BOTH conditions hold:
 /// 1. TCC authorization is granted for camera + microphone.
 /// 2. The env flag `ONSET_RUN_L5_CAPTURE=1` is set explicitly.
 ///
@@ -287,19 +363,11 @@ struct HostTimeConversionTests {
 /// To run deliberately: `ONSET_RUN_L5_CAPTURE=1 xcodebuild test …`
 @Suite("CameraSource — L5 live hardware", .serialized, .timeLimit(.minutes(1)))
 struct CameraSourceLiveTests {
-    @Test("live capture produces host-time-stamped video frames and audio samples")
+    @Test(
+        "live capture produces host-time-stamped video frames and audio samples",
+        .enabled(if: l5CaptureEnabled())
+    )
     func liveCapture_producesFramesAndSamples() async throws {
-        // Opt-in guard: set ONSET_RUN_L5_CAPTURE=1 to run hardware capture deliberately;
-        // CI and routine local runs skip this test (camera is never opened unintentionally).
-        guard ProcessInfo.processInfo.environment["ONSET_RUN_L5_CAPTURE"] == "1" else { return }
-
-        let videoStatus = AVCaptureDevice.authorizationStatus(for: .video)
-        let audioStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-        guard isCaptureAuthorized(video: videoStatus, audio: audioStatus) else {
-            // No TCC permission — skip gracefully.
-            return
-        }
-
         let setup = try makeLiveCaptureSource()
 
         try await setup.source.start(anchoredTo: setup.anchor)

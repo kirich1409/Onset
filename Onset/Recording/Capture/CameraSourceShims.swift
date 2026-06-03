@@ -17,6 +17,9 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
     private let framesContinuation: AsyncStream<VideoFrame>.Continuation
     private let dropsContinuation: AsyncStream<DropEvent>.Continuation
     private let onDisconnect: @Sendable () async -> Void
+    /// The `uniqueID` of the camera device this shim was configured for.
+    /// Used to filter `wasDisconnectedNotification` to the correct device only (B1).
+    private let cameraUniqueID: String
 
     /// Rate-limiting flag for buffer-anomaly error logs.
     /// `nonisolated(unsafe)`: confined to `videoQueue` (serial). That queue is the lock.
@@ -28,13 +31,15 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         syncClock: CMClock,
         framesContinuation: AsyncStream<VideoFrame>.Continuation,
         dropsContinuation: AsyncStream<DropEvent>.Continuation,
-        onDisconnect: @escaping @Sendable () async -> Void
+        onDisconnect: @escaping @Sendable () async -> Void,
+        cameraUniqueID: String
     ) {
         self.sessionStart = sessionStart
         self.syncClock = syncClock
         self.framesContinuation = framesContinuation
         self.dropsContinuation = dropsContinuation
         self.onDisconnect = onDisconnect
+        self.cameraUniqueID = cameraUniqueID
     }
 
     // MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
@@ -72,13 +77,21 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         let rawPts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let pts = toHostTime(pts: rawPts, from: self.syncClock)
         self.dropsContinuation.yield(captureDropEvent(pts: pts))
-        cameraSourceLogger.debug("Video frame dropped by AVCapture — pts: \(pts.value)/\(pts.timescale)")
+        // .info: capture-level drops are production-visible events; .debug is stripped in
+        // release builds and leaves sustained backpressure drops invisible in the field.
+        cameraSourceLogger.info("Video frame dropped by AVCapture — pts: \(pts.value)/\(pts.timescale)")
     }
 
     // MARK: - Device disconnect
 
     @objc
     nonisolated func deviceDidDisconnect(_ notification: Notification) {
+        // Only react when the disconnected device is the camera this shim belongs to.
+        // Without this check, unplugging a microphone or any other capture device fires
+        // handleCameraDisconnect and terminates the camera recording (violates AC-12).
+        guard (notification.object as? AVCaptureDevice)?.uniqueID == self.cameraUniqueID else {
+            return
+        }
         Task { await self.onDisconnect() }
     }
 }
@@ -138,4 +151,11 @@ nonisolated enum CameraSourceError: Error {
     case micNotFound
     case cannotAddInput
     case sessionDidNotStart
+    /// `AVCaptureSession.canAddOutput` returned `false` for the video data output.
+    /// The session started (camera input was accepted) but the video delegate was never
+    /// attached — `start()` would return `.running` while silently delivering zero frames.
+    case cannotAddVideoOutput
+    /// `AVCaptureSession.canAddOutput` returned `false` for the audio data output,
+    /// even though a microphone device was requested.
+    case cannotAddAudioOutput
 }

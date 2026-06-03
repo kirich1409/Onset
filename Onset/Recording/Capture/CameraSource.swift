@@ -36,9 +36,10 @@ nonisolated let cameraSourceLogger = Logger(
 /// configuration and injected immutably into both shims.
 ///
 /// ### Preview (`SessionHandle`)
-/// The actor exposes a `SessionHandle` via `sessionHandle` after a successful `start()`.
-/// MainActor consumers obtain `AVCaptureVideoPreviewLayer(session: handle.session)` without
-/// crossing into actor isolation. See `SessionHandle` for the `@unchecked Sendable` rationale.
+/// The actor exposes a `SessionHandle` via the `sessionHandle()` accessor after a successful
+/// `start()`. MainActor consumers `await source.sessionHandle()` and pass the result to
+/// `AVCaptureVideoPreviewLayer(session:)`. Returns `nil` when not in the `.running` state.
+/// See `SessionHandle` for the `@unchecked Sendable` rationale.
 actor CameraSource: VideoFrameSource, AudioSampleSource {
     // MARK: - Constants
 
@@ -82,9 +83,6 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
     )
 
     var captureState: CameraCaptureState = .idle
-
-    /// Populated after a successful `start()`. MainActor preview consumers read this.
-    nonisolated(unsafe) var sessionHandle: SessionHandle?
 
     // MARK: - Init
 
@@ -158,7 +156,10 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
         do {
             try await self.buildAndStartSession(anchor: anchor)
         } catch {
-            self.captureState = .idle
+            // Use .stopped, not .idle: all four continuations are finished after
+            // finishAllStreams() and cannot be re-used. .idle would advertise this
+            // instance as restartable, leading to a silent zero-frame session on retry.
+            self.captureState = .stopped
             self.finishAllStreams()
             throw error
         }
@@ -188,6 +189,19 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
         cameraSourceLogger.error("Camera device disconnected — stopping")
         self.eventsContinuation.yield(.cameraDisconnected)
         self.finishAllStreams()
+    }
+
+    // MARK: - Preview
+
+    /// Returns a `SessionHandle` wrapping the live `AVCaptureSession`, or `nil` when
+    /// capture is not in the `.running` state (before `start()`, after `stop()`, or after
+    /// a disconnect).
+    ///
+    /// Callers must `await` this accessor — the actor hop is intentional and replaces the
+    /// former `nonisolated(unsafe) var sessionHandle` field that had no thread-safety guarantee.
+    func sessionHandle() -> SessionHandle? {
+        guard case let .running(session, _) = self.captureState else { return nil }
+        return SessionHandle(session: session)
     }
 
     // MARK: - Stream teardown

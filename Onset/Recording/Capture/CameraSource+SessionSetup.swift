@@ -25,7 +25,7 @@ extension CameraSource {
             syncClock: syncClock,
             onDisconnect: onDisconnect
         )
-        self.attachOutputs(to: session, shims: shims)
+        try self.attachOutputs(to: session, shims: shims)
 
         session.startRunning()
         guard session.isRunning else {
@@ -34,12 +34,19 @@ extension CameraSource {
             throw RecordingError.captureSetupFailed(err)
         }
 
+        // Close the stop()-during-.starting race: if stop() ran while buildAndStartSession
+        // was suspended (before .running was set), captureState is now .stopped. Continuing
+        // would overwrite it with .running and create a zombie session whose streams are
+        // already finished. Observer is not yet registered, so no removal is needed here.
+        guard case .starting = self.captureState else {
+            session.stopRunning()
+            cameraSourceLogger.info("Capture aborted — stop() called during startup")
+            return
+        }
+
         // Observer registered after startRunning so a failed-start path never needs to remove it.
         self.registerDisconnectObserver(shims: shims)
         self.captureState = .running(session: session, shims: shims)
-        // nonisolated(unsafe): written here (actor context), read later on MainActor for preview.
-        // Safety: written once before any MainActor read; no concurrent writes after this point.
-        unsafe self.sessionHandle = SessionHandle(session: session)
         cameraSourceLogger.info(
             "Capture started — dims: \(self.format.pixelWidth)×\(self.format.pixelHeight)"
         )
@@ -139,7 +146,8 @@ extension CameraSource {
             syncClock: syncClock,
             framesContinuation: self.framesContinuation,
             dropsContinuation: self.dropsContinuation,
-            onDisconnect: onDisconnect
+            onDisconnect: onDisconnect,
+            cameraUniqueID: self.cameraDevice.uniqueID
         )
         let audio = AudioOutputShim(
             sessionStart: sessionStart,
@@ -150,28 +158,28 @@ extension CameraSource {
         return CameraCaptureShims(video: video, audio: audio)
     }
 
-    func attachOutputs(to session: AVCaptureSession, shims: CameraCaptureShims) {
+    func attachOutputs(to session: AVCaptureSession, shims: CameraCaptureShims) throws {
         let videoOutput = AVCaptureVideoDataOutput()
         videoOutput.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
         ]
         // Late frames are discarded by the OS, surfaced as didDrop → DropEvent(.captureDrop).
         videoOutput.alwaysDiscardsLateVideoFrames = true
-        if session.canAddOutput(videoOutput) {
-            session.addOutput(videoOutput)
-            videoOutput.setSampleBufferDelegate(shims.video, queue: self.videoQueue)
-        } else {
+        guard session.canAddOutput(videoOutput) else {
             cameraSourceLogger.error("Cannot add video data output to session")
+            throw RecordingError.captureSetupFailed(CameraSourceError.cannotAddVideoOutput)
         }
+        session.addOutput(videoOutput)
+        videoOutput.setSampleBufferDelegate(shims.video, queue: self.videoQueue)
 
         if self.micDevice != nil {
             let audioOutput = AVCaptureAudioDataOutput()
-            if session.canAddOutput(audioOutput) {
-                session.addOutput(audioOutput)
-                audioOutput.setSampleBufferDelegate(shims.audio, queue: self.audioQueue)
-            } else {
+            guard session.canAddOutput(audioOutput) else {
                 cameraSourceLogger.error("Cannot add audio data output to session")
+                throw RecordingError.captureSetupFailed(CameraSourceError.cannotAddAudioOutput)
             }
+            session.addOutput(audioOutput)
+            audioOutput.setSampleBufferDelegate(shims.audio, queue: self.audioQueue)
         }
     }
 
