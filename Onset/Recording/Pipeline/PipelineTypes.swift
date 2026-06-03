@@ -11,7 +11,7 @@ import CoreVideo
 ///
 /// In Wave 1, sources that run without a `RecordingSession` (e.g. unit tests, preview actors)
 /// use `HostTimeAnchor.now()` as a standalone default until `RecordingSession` exists.
-nonisolated struct HostTimeAnchor: Sendable {
+nonisolated struct HostTimeAnchor {
     /// The host-clock time at which recording started.
     ///
     /// All pipeline pts values are offsets from this origin: pts = sampleHostTime − anchorTime.
@@ -208,7 +208,7 @@ nonisolated struct EncodedSample: @unchecked Sendable {
 ///   emitted for hold-repeat but the downstream is already full.
 /// - `encoderBackpressureDrops`: counted when an `AsyncStream` buffer overflows because
 ///   the encoder or writer is not consuming fast enough.
-nonisolated enum DropReason: Sendable {
+nonisolated enum DropReason {
     /// The capture hardware or SCStream dropped a frame before it reached the pipeline.
     ///
     /// SCStreamOutput delivers this via `SCStreamOutputType.screen` with a status flag;
@@ -285,7 +285,7 @@ extension DropReason: Hashable {
 /// The count field enables batch reporting: if the source detects N drops in a single
 /// callback (e.g. the async-stream buffer was full for N consecutive ticks), it may
 /// emit one `DropEvent` with `count > 1` instead of N individual events.
-nonisolated struct DropEvent: Sendable {
+nonisolated struct DropEvent {
     /// The pipeline stage where the drop occurred.
     nonisolated let reason: DropReason
 
@@ -296,13 +296,7 @@ nonisolated struct DropEvent: Sendable {
     nonisolated let detectedAt: CMTime
 }
 
-extension DropEvent: Equatable {
-    nonisolated static func == (lhs: DropEvent, rhs: DropEvent) -> Bool {
-        lhs.reason == rhs.reason
-            && lhs.count == rhs.count
-            && lhs.detectedAt == rhs.detectedAt
-    }
-}
+extension DropEvent: Equatable {}
 
 // MARK: - SourceEvent
 
@@ -311,7 +305,7 @@ extension DropEvent: Equatable {
 /// Delivered on `VideoFrameSource.events: AsyncStream<SourceEvent>`. These are low-volume
 /// signals about the source's health, not frame-level data. `RecordingSession` (#34)
 /// observes this stream to decide whether to pause, stop, or degrade gracefully.
-nonisolated enum SourceEvent: Sendable {
+nonisolated enum SourceEvent {
     /// The display being recorded was physically disconnected.
     ///
     /// Emitted by `ScreenSource` (#28) when SCKit reports the display is no longer

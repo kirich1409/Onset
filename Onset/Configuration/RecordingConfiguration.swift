@@ -30,7 +30,7 @@ import Foundation
 ///
 /// All members are `nonisolated` so this pure value type is usable from any isolation
 /// context without actor hopping (required under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`).
-nonisolated struct RecordingConfiguration: Sendable {
+nonisolated struct RecordingConfiguration {
     // MARK: - Container & Codec
 
     /// Output file container. AC-4: must be `.mp4`.
@@ -212,12 +212,12 @@ nonisolated struct RecordingConfiguration: Sendable {
             .appending(path: "Onset", directoryHint: .isDirectory)
 
         let bitrateTable: [(key: BitrateKey, value: Int)] = [
-            (key: BitrateKey(width: 3_840, height: 2_160, fps: 60), value: 60_000_000),
-            (key: BitrateKey(width: 3_840, height: 2_160, fps: 30), value: 36_000_000),
-            (key: BitrateKey(width: 2_560, height: 1_440, fps: 60), value: 28_000_000),
-            (key: BitrateKey(width: 2_560, height: 1_440, fps: 30), value: 18_000_000),
-            (key: BitrateKey(width: 1_920, height: 1_080, fps: 60), value: 18_000_000),
-            (key: BitrateKey(width: 1_920, height: 1_080, fps: 30), value: 12_000_000),
+            (key: BitrateKey(width: 3840, height: 2160, fps: 60), value: 60_000_000),
+            (key: BitrateKey(width: 3840, height: 2160, fps: 30), value: 36_000_000),
+            (key: BitrateKey(width: 2560, height: 1440, fps: 60), value: 28_000_000),
+            (key: BitrateKey(width: 2560, height: 1440, fps: 30), value: 18_000_000),
+            (key: BitrateKey(width: 1920, height: 1080, fps: 60), value: 18_000_000),
+            (key: BitrateKey(width: 1920, height: 1080, fps: 30), value: 12_000_000),
         ]
 
         // Engine throughput cap: 4K120 ≈ 995M px/s.

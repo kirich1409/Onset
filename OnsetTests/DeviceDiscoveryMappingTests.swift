@@ -208,7 +208,7 @@ struct CameraDeviceTests {
     func cameraDevice_multipleFormats() {
         let formats = [
             CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30.0, maxFps: 60.0),
-            CameraFormat(pixelWidth: 3840, pixelHeight: 2160, minFps: 24.0, maxFps: 30.0)
+            CameraFormat(pixelWidth: 3840, pixelHeight: 2160, minFps: 24.0, maxFps: 30.0),
         ]
         let device = CameraDevice(uniqueID: "device-001", formats: formats)
 

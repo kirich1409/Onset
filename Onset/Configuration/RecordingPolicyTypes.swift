@@ -174,7 +174,7 @@ extension PixelFormat: Equatable {
 ///
 /// Resolution is expressed as pixel count (width × height) + fps.
 /// The encoder layer resolves a concrete pixel size to the nearest table entry.
-nonisolated struct BitrateKey: Sendable {
+nonisolated struct BitrateKey {
     /// Frame width in pixels.
     nonisolated let width: Int
     /// Frame height in pixels.
@@ -182,11 +182,16 @@ nonisolated struct BitrateKey: Sendable {
     /// Frames per second (integer; fractional fps not used in MVP).
     nonisolated let fps: Int
 
-    nonisolated var pixelCount: Int { self.width * self.height }
+    nonisolated var pixelCount: Int {
+        self.width * self.height
+    }
 }
 
+// swiftformat:disable:next redundantEquatable
 extension BitrateKey: Equatable {
-    /// Manual `nonisolated` implementation — see `PermissionStatus` for the pattern rationale.
+    /// Explicit `nonisolated` operator — required under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`.
+    /// The compiler infers synthesised `==` as `@MainActor`-isolated, making it unusable from
+    /// `nonisolated` contexts (e.g. the bitrate-table lookup in `RecordingConfiguration`).
     nonisolated static func == (lhs: BitrateKey, rhs: BitrateKey) -> Bool {
         lhs.width == rhs.width && lhs.height == rhs.height && lhs.fps == rhs.fps
     }
@@ -205,7 +210,7 @@ extension BitrateKey: Equatable {
 /// Width × height × fps for one capture source.
 ///
 /// Used by `EngineBudgetCap.fits(screen:camera:)` to avoid a six-parameter function.
-nonisolated struct SourceDimensions: Sendable {
+nonisolated struct SourceDimensions {
     /// Frame width in pixels.
     nonisolated let width: Int
     /// Frame height in pixels.
@@ -213,7 +218,9 @@ nonisolated struct SourceDimensions: Sendable {
     /// Frames per second.
     nonisolated let fps: Int
 
-    nonisolated var pixelRate: Int { self.width * self.height * self.fps }
+    nonisolated var pixelRate: Int {
+        self.width * self.height * self.fps
+    }
 }
 
 // MARK: - EngineBudgetCap
@@ -227,7 +234,7 @@ nonisolated struct SourceDimensions: Sendable {
 /// The default recording profile caps at ≤4K60, which is ~49.8% of this ceiling.
 /// The cap is applied by CapabilityProbe before starting the session; it is NOT
 /// a runtime throttle (post-MVP).
-nonisolated struct EngineBudgetCap: Sendable, Equatable {
+nonisolated struct EngineBudgetCap: Equatable {
     /// Maximum pixel-rate (pixels/second) the encode engine supports.
     ///
     /// Value: 995_000_000 — anchored to "4K120 ≈ ~995M px/s" in the spec.

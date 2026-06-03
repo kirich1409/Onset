@@ -34,7 +34,8 @@ extension DeviceDiscovery {
     ///   throws despite `screenAuthorized == true`.
     nonisolated static func displays(
         screenAuthorized: Bool
-    ) async throws(RecordingError) -> [Display] {
+    ) async throws(RecordingError)
+    -> [Display] {
         guard screenAuthorized else {
             discoveryDisplayLogger.debug("Display enumeration skipped — screen permission not granted")
             return []
@@ -69,9 +70,9 @@ extension DeviceDiscovery {
     nonisolated static func makeDisplay(from scDisplay: SCDisplay) -> Display {
         let displayID = scDisplay.displayID
         let mode = CGDisplayCopyDisplayMode(displayID)
-        let pixelWidth = mode.map { $0.pixelWidth } ?? 0
-        let pixelHeight = mode.map { $0.pixelHeight } ?? 0
-        let refreshHz = mode.map { $0.refreshRate } ?? 0.0
+        let pixelWidth = mode.map(\.pixelWidth) ?? 0
+        let pixelHeight = mode.map(\.pixelHeight) ?? 0
+        let refreshHz = mode.map(\.refreshRate) ?? 0.0
 
         return Display(
             displayID: displayID,
@@ -98,7 +99,8 @@ extension DeviceDiscovery {
         pixelWidth: Int,
         pixelHeight: Int,
         refreshHz: Double
-    ) -> Display {
+    )
+    -> Display {
         Display(
             displayID: displayID,
             pixelWidth: pixelWidth,

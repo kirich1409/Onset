@@ -11,7 +11,7 @@ import CoreGraphics
 /// Apple built-in displays (Liquid Retina, Pro Display XDR, etc.) — the OS reports 0
 /// because the refresh rate is variable. Callers must not substitute a default value;
 /// carry 0.0 faithfully so downstream logic can distinguish "unknown" from a true 0-Hz result.
-nonisolated struct Display: Sendable {
+nonisolated struct Display {
     /// The Core Graphics display identifier.
     let displayID: CGDirectDisplayID
 
@@ -27,14 +27,7 @@ nonisolated struct Display: Sendable {
     let refreshHz: Double
 }
 
-extension Display: Equatable {
-    nonisolated static func == (lhs: Display, rhs: Display) -> Bool {
-        lhs.displayID == rhs.displayID &&
-            lhs.pixelWidth == rhs.pixelWidth &&
-            lhs.pixelHeight == rhs.pixelHeight &&
-            lhs.refreshHz == rhs.refreshHz
-    }
-}
+extension Display: Equatable {}
 
 // MARK: - CameraFormat
 
@@ -43,7 +36,7 @@ extension Display: Equatable {
 /// Raw values from the format's `CMVideoFormatDescription` and its
 /// `videoSupportedFrameRateRanges`. Min/max fps are the extremes across all ranges
 /// in the format — the caller picks the specific target fps at session setup time.
-nonisolated struct CameraFormat: Sendable {
+nonisolated struct CameraFormat {
     /// Frame width in pixels (`CMVideoFormatDescriptionGetDimensions(...).width`).
     let pixelWidth: Int32
 
@@ -57,14 +50,7 @@ nonisolated struct CameraFormat: Sendable {
     let maxFps: Double
 }
 
-extension CameraFormat: Equatable {
-    nonisolated static func == (lhs: CameraFormat, rhs: CameraFormat) -> Bool {
-        lhs.pixelWidth == rhs.pixelWidth &&
-            lhs.pixelHeight == rhs.pixelHeight &&
-            lhs.minFps == rhs.minFps &&
-            lhs.maxFps == rhs.maxFps
-    }
-}
+extension CameraFormat: Equatable {}
 
 // MARK: - CameraDevice
 
@@ -74,7 +60,7 @@ extension CameraFormat: Equatable {
 /// framework objects in stored state breaks Sendable discipline and causes stale
 /// references after TCC state changes. Re-query via `uniqueID` when a session needs
 /// a live reference.
-nonisolated struct CameraDevice: Sendable {
+nonisolated struct CameraDevice {
     /// The `AVCaptureDevice.uniqueID` value — stable across app launches for the same device.
     ///
     /// **Never log this field.** Device uniqueIDs are PII-adjacent; log counts only.
@@ -108,15 +94,11 @@ extension CameraDevice: Equatable {
 /// An immutable snapshot of a microphone `AVCaptureDevice` at the moment of enumeration.
 ///
 /// Same design rationale as `CameraDevice` — no live framework references.
-nonisolated struct MicrophoneDevice: Sendable {
+nonisolated struct MicrophoneDevice {
     /// The `AVCaptureDevice.uniqueID` value — stable across app launches for the same device.
     ///
     /// **Never log this field.** Device uniqueIDs are PII-adjacent; log counts only.
     let uniqueID: String
 }
 
-extension MicrophoneDevice: Equatable {
-    nonisolated static func == (lhs: MicrophoneDevice, rhs: MicrophoneDevice) -> Bool {
-        lhs.uniqueID == rhs.uniqueID
-    }
-}
+extension MicrophoneDevice: Equatable {}

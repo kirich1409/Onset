@@ -32,7 +32,7 @@ extension DeviceDiscovery {
             deviceTypes: [
                 .builtInWideAngleCamera,
                 .external,
-                .continuityCamera
+                .continuityCamera,
             ],
             mediaType: .video,
             position: .unspecified
