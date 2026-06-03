@@ -243,6 +243,75 @@ struct ScreenSourceLiveTests {
     }
 }
 
+// MARK: - stop() teardown contract (no hardware required)
+
+/// Verifies that `stop()` terminates all three streams even when `start()` was never called
+/// (stream == nil path) — the same nil-stream branch hit after a failed start().
+///
+/// This is a pure concurrency test: no SCStream, no TCC permission, no hardware.
+/// The `.timeLimit` trait caps any regression-induced hang at 1 minute (minimum granularity
+/// of the Swift Testing timeLimit API on this toolchain).
+@Suite("ScreenSource — stop() teardown contract")
+struct ScreenSourceStopTeardownTests {
+    // Arbitrary even dimensions that satisfy ResolvedRecordingPlan's HEVC preconditions.
+    private static let plan = ResolvedRecordingPlan(
+        displayID: CGMainDisplayID(),
+        screenWidth: 1920,
+        screenHeight: 1080,
+        screenFps: 30,
+        cameraPlan: nil
+    )
+
+    /// `stop()` on a never-started source must finish all three streams so that a consumer
+    /// already iterating `frames` (or `events` / `drops`) terminates instead of hanging.
+    @Test("stop() before start() finishes frames stream", .timeLimit(.minutes(1)))
+    func stopBeforeStart_finishesFramesStream() async {
+        let source = ScreenSource(plan: Self.plan, config: .mvpDefault)
+
+        await source.stop()
+
+        // If finishAllStreams() was not called, this for-await loop hangs until the
+        // .timeLimit trait fires and fails the test. A correct implementation returns
+        // immediately because the stream is already finished.
+        var received: [VideoFrame] = []
+        for await frame in source.frames {
+            received.append(frame)
+        }
+        #expect(received.isEmpty)
+    }
+
+    @Test("stop() before start() finishes events stream", .timeLimit(.minutes(1)))
+    func stopBeforeStart_finishesEventsStream() async {
+        let source = ScreenSource(plan: Self.plan, config: .mvpDefault)
+        await source.stop()
+
+        var received: [SourceEvent] = []
+        for await event in source.events {
+            received.append(event)
+        }
+        #expect(received.isEmpty)
+    }
+
+    @Test("stop() before start() finishes drops stream", .timeLimit(.minutes(1)))
+    func stopBeforeStart_finishesDropsStream() async {
+        let source = ScreenSource(plan: Self.plan, config: .mvpDefault)
+        await source.stop()
+
+        var received: [DropEvent] = []
+        for await drop in source.drops {
+            received.append(drop)
+        }
+        #expect(received.isEmpty)
+    }
+
+    @Test("stop() is idempotent — second call does not hang", .timeLimit(.minutes(1)))
+    func doubleStop_isIdempotent() async {
+        let source = ScreenSource(plan: Self.plan, config: .mvpDefault)
+        await source.stop()
+        await source.stop() // finish-after-finish is a no-op; must not hang or crash
+    }
+}
+
 // MARK: - Private test logger
 
 /// Test-scoped logger under the Onset subsystem.

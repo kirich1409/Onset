@@ -75,9 +75,11 @@ nonisolated private let screenSourceLogger = Logger(
 actor ScreenSource: VideoFrameSource {
     // MARK: - Constants
 
-    /// Buffer depth for the `frames` AsyncStream. Matches `captureQueueDepth` in
-    /// `ScreenStreamConfigurationBuilder` (SCStream header cap = 8).
+    /// Buffer depth for the `frames` stream. Matches `captureQueueDepth` (SCStream cap = 8).
     private static let framesBufferDepth = 8
+
+    /// Buffer depth for the `events` AsyncStream. 4 slots: headroom for #34 teardown races.
+    private static let eventsBufferDepth = 4
 
     // MARK: - Protocol streams (nonisolated let — no actor hop for subscribers)
 
@@ -141,7 +143,7 @@ actor ScreenSource: VideoFrameSource {
         self.frames = AsyncStream(VideoFrame.self, bufferingPolicy: .bufferingNewest(Self.framesBufferDepth)) { cont in
             capturedFrames = cont
         }
-        self.events = AsyncStream(SourceEvent.self, bufferingPolicy: .bufferingNewest(1)) { cont in
+        self.events = AsyncStream(SourceEvent.self, bufferingPolicy: .bufferingNewest(Self.eventsBufferDepth)) { cont in
             capturedEvents = cont
         }
         self.drops = AsyncStream(DropEvent.self, bufferingPolicy: .bufferingNewest(Self.framesBufferDepth)) { cont in
@@ -202,6 +204,7 @@ actor ScreenSource: VideoFrameSource {
 
     /// Builds, wires, and starts an SCStream for display using shim as output/delegate.
     private func startSCStream(display: SCDisplay, shim: StreamOutputShim) async throws {
+        defer { if stream == nil { outputShim = nil } } // on throw: clear orphaned shim
         let streamConfig = ScreenStreamConfigurationBuilder.makeConfiguration(plan: self.plan, config: self.config)
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let scStream = SCStream(filter: filter, configuration: streamConfig, delegate: shim)
@@ -225,11 +228,12 @@ actor ScreenSource: VideoFrameSource {
         screenSourceLogger.info("Capture started — fps: \(fps)")
     }
 
-    /// Stops display capture and finishes all three streams.
-    ///
-    /// Calling `stop()` on an already-stopped source is a no-op.
+    /// Stops display capture. Finishes all three streams idempotently — safe before `start()` or twice.
     func stop() async {
-        guard let scStream = stream else { return }
+        guard let scStream = stream else {
+            self.finishAllStreams()
+            return
+        }
 
         self.stream = nil
 
@@ -245,12 +249,15 @@ actor ScreenSource: VideoFrameSource {
             screenSourceLogger.error("stopCapture error (ignored): \(error)")
         }
 
-        // Finish all streams — consumers' `for await` loops will terminate.
+        self.finishAllStreams()
+        screenSourceLogger.info("Capture stopped")
+    }
+
+    /// Finishes all three AsyncStream continuations. `finish()` after `finish()` is a no-op.
+    private func finishAllStreams() {
         self.framesContinuation.finish()
         self.eventsContinuation.finish()
         self.dropsContinuation.finish()
-
-        screenSourceLogger.info("Capture stopped")
     }
 }
 
