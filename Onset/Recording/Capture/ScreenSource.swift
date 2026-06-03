@@ -60,6 +60,13 @@ nonisolated func shouldKeepFrame(frameHostTime: CMTime, sessionStart: CMTime) ->
     CMTimeCompare(frameHostTime, sessionStart) >= 0
 }
 
+/// Returns `.displayDisconnected` when `displayPresent` is `false`, otherwise
+/// `.sourceInterrupted(reason:)`. Extracted as a pure `nonisolated` helper so
+/// the classification can be unit-tested without SCShareableContent or actor machinery.
+nonisolated func terminalStopEvent(displayPresent: Bool, reason: String) -> SourceEvent {
+    displayPresent ? .sourceInterrupted(reason: reason) : .displayDisconnected
+}
+
 // MARK: - Private logger
 
 /// Logger is `Sendable`; `nonisolated let` avoids a `@MainActor` hop under
@@ -250,15 +257,16 @@ actor ScreenSource: VideoFrameSource {
         guard case .running = self.captureState else { return }
         self.captureState = .stopped
         screenSourceLogger.error("SCStream stopped with error: \(error)")
-        let event: SourceEvent
+        // Default true: if the query throws we cannot confirm the display is gone,
+        // so fall back to .sourceInterrupted — matching the original catch-branch.
+        var displayPresent = true
         do {
             let content = try await SCShareableContent.current
-            let stillPresent = content.displays.contains { $0.displayID == self.plan.displayID }
-            event = stillPresent ? .sourceInterrupted(reason: "SCStream stopped with error") : .displayDisconnected
+            displayPresent = content.displays.contains { $0.displayID == self.plan.displayID }
         } catch {
             screenSourceLogger.error("SCShareableContent.current failed during stop: \(error)")
-            event = .sourceInterrupted(reason: "SCStream stopped with error")
         }
+        let event = terminalStopEvent(displayPresent: displayPresent, reason: "SCStream stopped with error")
         self.eventsContinuation.yield(event)
         // No auto-restart: finish streams so consumer for-await loops terminate.
         self.finishAllStreams()

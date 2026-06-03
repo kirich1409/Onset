@@ -10,6 +10,9 @@ import Testing
 // parent class), so the rule's `test_parent_classes` exclusion in .swiftlint.yml does
 // not apply; the numeric literals here are expected-value test data, not magic numbers.
 // swiftlint:disable no_magic_numbers
+// file_length is disabled: this single-concern test file covers all pure helpers from
+// ScreenSource; it naturally grows alongside the helpers it tests.
+// swiftlint:disable file_length
 
 // MARK: - Frame status classification tests
 
@@ -386,6 +389,22 @@ struct ScreenSourceStopTeardownTests {
         let source = ScreenSource(plan: Self.plan, config: .mvpDefault)
         await source.stop()
         await source.stop() // finish-after-finish is a no-op; must not hang or crash
+    }
+}
+
+// MARK: - Terminal stop event classification tests
+
+@Suite("ScreenSource — terminal stop event classification")
+struct TerminalStopEventTests {
+    @Test("display absent produces .displayDisconnected")
+    func displayAbsent_producesDisplayDisconnected() {
+        #expect(terminalStopEvent(displayPresent: false, reason: "SCStream stopped with error") == .displayDisconnected)
+    }
+
+    @Test("display present produces .sourceInterrupted with reason")
+    func displayPresent_producesSourceInterrupted() {
+        let event = terminalStopEvent(displayPresent: true, reason: "SCStream stopped with error")
+        #expect(event == .sourceInterrupted(reason: "SCStream stopped with error"))
     }
 }
 
