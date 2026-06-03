@@ -39,6 +39,11 @@ struct FrameStatusClassificationTests {
     func stopped_mapsToSkipStatic() {
         #expect(classifyFrameStatus(.stopped) == .skipStatic)
     }
+
+    @Test(".suspended maps to .skipStatic — NOT a drop")
+    func suspended_mapsToSkipStatic() {
+        #expect(classifyFrameStatus(.suspended) == .skipStatic)
+    }
 }
 
 // MARK: - T0 gating tests
@@ -110,6 +115,78 @@ struct FrameActionEquatabilityTests {
     @Test(".process does not equal .skipStatic")
     func process_doesNotEqualSkipStatic() {
         #expect(FrameAction.process != .skipStatic)
+    }
+}
+
+// MARK: - Backpressure drop event tests
+
+@Suite("ScreenSource — backpressure drop event")
+struct BackpressureDropEventTests {
+    private let pts = CMTime(value: 1000, timescale: 1000)
+
+    /// Produces a `.dropped` result: fills a depth-1 buffer, then yields again.
+    /// `stream` is kept alive via `withExtendedLifetime` — a released stream yields `.terminated`.
+    private func makeDroppedResult() -> AsyncStream<VideoFrame>.Continuation.YieldResult {
+        var cont: AsyncStream<VideoFrame>.Continuation!
+        let stream = AsyncStream<VideoFrame>(bufferingPolicy: .bufferingNewest(1)) { cont = $0 }
+        // stream must be referenced after yields to prevent premature ARC dealloc.
+        let dummyBuffer = self.makeMinimalPixelBuffer()
+        let dummy = VideoFrame(pixelBuffer: dummyBuffer, ptsHostTime: pts, isHoldRepeat: false)
+        _ = cont.yield(dummy) // enqueued — fills the single slot
+        let result = cont.yield(dummy) // dropped — buffer is full
+        withExtendedLifetime(stream) {}
+        return result
+    }
+
+    private func makeEnqueuedResult() -> AsyncStream<VideoFrame>.Continuation.YieldResult {
+        var cont: AsyncStream<VideoFrame>.Continuation!
+        let stream = AsyncStream<VideoFrame>(bufferingPolicy: .bufferingNewest(4)) { cont = $0 }
+        let dummyBuffer = self.makeMinimalPixelBuffer()
+        let dummy = VideoFrame(pixelBuffer: dummyBuffer, ptsHostTime: pts, isHoldRepeat: false)
+        let result = cont.yield(dummy)
+        withExtendedLifetime(stream) {}
+        return result
+    }
+
+    private func makeTerminatedResult() -> AsyncStream<VideoFrame>.Continuation.YieldResult {
+        var cont: AsyncStream<VideoFrame>.Continuation!
+        _ = AsyncStream<VideoFrame>(bufferingPolicy: .bufferingNewest(4)) { cont = $0 }
+        cont.finish()
+        let dummyBuffer = self.makeMinimalPixelBuffer()
+        let dummy = VideoFrame(pixelBuffer: dummyBuffer, ptsHostTime: pts, isHoldRepeat: false)
+        return cont.yield(dummy)
+    }
+
+    private func makeMinimalPixelBuffer() -> CVPixelBuffer {
+        var buf: CVPixelBuffer!
+        CVPixelBufferCreate(nil, 2, 2, kCVPixelFormatType_32BGRA, nil, &buf)
+        return buf
+    }
+
+    @Test(".dropped yield result produces a DropEvent")
+    func droppedYield_producesDropEvent() throws {
+        let result = backpressureDropEvent(for: makeDroppedResult(), pts: pts)
+        let drop = try #require(result)
+        // Use pattern-match for DropReason: Equatable conformance is @MainActor-inferred
+        // under InferIsolatedConformances; guard case avoids the conformance entirely.
+        guard case .encoderBackpressureDrops = drop.reason else {
+            Issue.record("Expected .encoderBackpressureDrops, got \(drop.reason)")
+            return
+        }
+        #expect(drop.count == 1)
+        #expect(CMTimeCompare(drop.detectedAt, self.pts) == 0)
+    }
+
+    @Test(".enqueued yield result produces no DropEvent")
+    func enqueuedYield_producesNoDropEvent() {
+        let result = backpressureDropEvent(for: makeEnqueuedResult(), pts: pts)
+        #expect(result == nil)
+    }
+
+    @Test(".terminated yield result produces no DropEvent")
+    func terminatedYield_producesNoDropEvent() {
+        let result = backpressureDropEvent(for: makeTerminatedResult(), pts: pts)
+        #expect(result == nil)
     }
 }
 
@@ -253,7 +330,7 @@ struct ScreenSourceLiveTests {
 /// of the Swift Testing timeLimit API on this toolchain).
 @Suite("ScreenSource — stop() teardown contract")
 struct ScreenSourceStopTeardownTests {
-    // Arbitrary even dimensions that satisfy ResolvedRecordingPlan's HEVC preconditions.
+    /// Arbitrary even dimensions that satisfy ResolvedRecordingPlan's HEVC preconditions.
     private static let plan = ResolvedRecordingPlan(
         displayID: CGMainDisplayID(),
         screenWidth: 1920,

@@ -21,6 +21,11 @@ nonisolated enum ScreenStreamConfigurationBuilder {
     /// The ScreenCaptureKit header (`SCStream.h`) states:
     /// "Determines the number of frames kept in the queue. The default value is 8 and
     /// should not exceed 8." Both the default and the ceiling are 8.
+    ///
+    /// This is intentionally decoupled from `ScreenSource.framesBufferDepth` (4).
+    /// SCKit needs the full 8-slot pool to sustain hardware capture; the frames AsyncStream
+    /// uses a shallower buffer (4) so pool buffers are returned to SCKit sooner under
+    /// consumer backpressure.
     private static let captureQueueDepth = 8
 
     // MARK: - Public API
