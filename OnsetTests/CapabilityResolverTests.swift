@@ -122,30 +122,24 @@ struct CapabilityResolverTests {
         #expect(plan.screenHeight.isMultiple(of: 2))
     }
 
-    // MARK: - fps fallback before resolution downscale
+    // MARK: - Downscale resolution is PRIMARY; fps 60→30 is secondary
 
-    @Test("fps 60→30 avoids sub-4K downscale when 30fps fits budget")
-    func resolve_fpsFallback_60to30_preserves4K() {
-        // A 4K display + a large camera whose combined 60fps rate exceeds budget, but
-        // the same combination at 30fps fits. The resolver must drop fps before shrinking
-        // the screen resolution.
-        //
-        // 4K60 + 4K60 = 2 × (3840×2160×60) ≈ 995M × 2 — way over budget.
-        // 4K30 + 4K60 = 3840×2160×30 + 3840×2160×60 ≈ 995M × 1.5 — still over budget.
-        // 4K30 + 1080p30 = 498M + 62M ≈ 560M — well within 995M.
-        // Use a camera that is fixed at 60fps and a display where 4K30+cam fits.
-        // Camera: 1920×1080@60fps → 124M px/s; 4K30 → 248M px/s; total 373M ≤ 995M.
-        // Camera: 3840×2160@60fps → 497M px/s; 4K30 → 248M px/s; total 745M ≤ 995M.
-        // Camera: 3840×2160@60fps → 497M; 4K60 → 497M; total 994M ≤ 995M — just fits!
-        //
-        // Pick a case where 4K60 + camera EXCEEDS but 4K30 + camera FITS:
-        // Camera: 1920×1080@60fps → 124_416_000 px/s
-        // 4K60: 497_664_000 px/s → total 622_080_000 ≤ 995M (fits even at 60fps)
-        //
-        // We need a camera large enough that screen@60 + camera > 995M but screen@30 + camera ≤ 995M.
-        // Camera: 4096×2160@60fps → 530_841_600; 4K60 → 497M; total 1_027M > 995M (over!)
-        //                                          4K30 → 248M; total 779M ≤ 995M (fits!)
+    // Spec AC-5 / §"CapabilityProbe и pre-flight бюджет":
+    //   PRIMARY lever  — downscale screen resolution at the capped fps to fit budget.
+    //   SECONDARY lever — fps 60→30 "при необходимости", only after downscale, last resort.
+    //
+    // For a 4K60 display + 4096×2160@60 camera (combined 1028M > 995M budget):
+    //   Camera rate: 4096×2160×60 = 530_841_600
+    //   Remainder for screen at fps=60: 995M − 530M ≈ 464M px/s
+    //   Downscale solver: h = floor(sqrt(464M/60 / (16/9))) ≈ 2085, w = floor(2085 × 16/9) ≈ 3706
+    //   Solver emits 3708×2086 (exact integer arithmetic may vary by ±2 via even-floor).
+    //   Combined: 3708×2086×60 + 530M ≈ 994M ≤ 995M ✓
+    //
+    // The spec-load-bearing assertions: fps stays 60, resolution is below 4K.
+    @Test("4K60 display + over-budget camera — resolution downscaled at fps=60 (PRIMARY lever)")
+    func resolve_overBudget_resolutionDownscaledAt60fps() {
         let display = makeDisplay(pixelWidth: 3840, pixelHeight: 2160, refreshHz: 60.0)
+        // 4096×2160@60 → 530_841_600 px/s; combined with 4K60 → 1_028M > 995M budget.
         let bigCamera = makeCamera(pixelWidth: 4096, pixelHeight: 2160, maxFps: 60.0)
 
         let plan = CapabilityResolver.resolveStartProfile(
@@ -154,14 +148,19 @@ struct CapabilityResolverTests {
             config: self.config
         )
 
-        // FPS must have been dropped to 30 (not the screen downscaled below 4K)
-        #expect(plan.screenFps == 30)
-        // Screen resolution must still be 4K (only fps dropped, no downscale)
-        #expect(plan.screenWidth == 3840)
-        #expect(plan.screenHeight == 2160)
+        // PRIMARY: fps must remain at the capped value (60), NOT dropped to 30.
+        #expect(plan.screenFps == 60)
+        // PRIMARY: resolution must have been downscaled below 4K.
+        #expect(plan.screenWidth < 3840)
+        // Exact solver output (even-floored): 3708×2086@60.
+        #expect(plan.screenWidth == 3708)
+        #expect(plan.screenHeight == 2086)
         // Budget invariant
         #expect(plan.combinedPixelsPerSecond <= self.config.budgetCap.maxPixelsPerSecond)
-        // Dims even
+        // Aspect ratio ≈ 16:9
+        let aspect = Double(plan.screenWidth) / Double(plan.screenHeight)
+        #expect(abs(aspect - 16.0 / 9.0) < 0.05)
+        // Even dims
         #expect(plan.screenWidth.isMultiple(of: 2))
         #expect(plan.screenHeight.isMultiple(of: 2))
     }
@@ -225,8 +224,8 @@ struct CapabilityResolverTests {
         #expect(plan.combinedPixelsPerSecond <= self.config.budgetCap.maxPixelsPerSecond)
     }
 
-    @Test("Budget invariant: combinedPixelsPerSecond ≤ engine ceiling for 4K60 + large-camera fps-fallback case")
-    func budgetInvariant_4K60_largeCamera_fpsFallback() {
+    @Test("Budget invariant: combinedPixelsPerSecond ≤ engine ceiling for 4K60 + large-camera downscale case")
+    func budgetInvariant_4K60_largeCamera_downscale() {
         let display = makeDisplay(pixelWidth: 3840, pixelHeight: 2160, refreshHz: 60.0)
         let bigCamera = makeCamera(pixelWidth: 4096, pixelHeight: 2160, maxFps: 60.0)
         let plan = CapabilityResolver.resolveStartProfile(

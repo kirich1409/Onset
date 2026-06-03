@@ -7,20 +7,26 @@ import CoreGraphics
 /// Converts a (display, optional camera format, config) triple into a
 /// `ResolvedRecordingPlan` that fits the engine budget without hardware access.
 ///
-/// ### Algorithm (spec §"CapabilityProbe и pre-flight бюджет")
+/// ### Algorithm (spec §"CapabilityProbe и pre-flight бюджет", AC-5)
 ///
 /// 1. **Cap** — clamp the native display resolution to ≤4K (3840×2160), and fps
-///    to ≤`config.maxScreenFps` (60). `Display.refreshHz == 0.0` (built-in displays)
-///    is treated as 60 Hz at this stage — 0 is a sentinel for "unknown", not "zero Hz".
+///    to `min(display.refreshHz, config.maxScreenFps)` (60). `Display.refreshHz == 0.0`
+///    (built-in displays) is treated as `config.maxScreenFps` — 0 is a sentinel for
+///    "unknown / variable rate", not "zero Hz".
 ///
-/// 2. **Budget: fps fallback first** — if the combined pixel-rate exceeds
-///    `budgetCap.maxPixelsPerSecond` at the capped fps, try halving the screen fps
-///    to `config.minCameraFps` (30). Preferring fps reduction over resolution reduction
-///    preserves maximum detail.
+/// 2. **Primary lever — downscale resolution at the capped fps** (spec: "downscale экрана
+///    до вписывания, дефолт ≤ 4K60") — if the combined pixel-rate at the capped fps
+///    exceeds the engine budget, shrink the screen resolution (preserving aspect ratio,
+///    even dims) while keeping the capped fps unchanged. This is the PRIMARY budget lever.
 ///
-/// 3. **Budget: sub-4K downscale** — if fps fallback was not enough (or fps is already
-///    at the minimum), shrink the screen resolution (preserving aspect ratio) until
-///    the combined pixel-rate fits. This is the last resort.
+/// 3. **Secondary lever — fps 60→30 "if needed"** (spec: "при необходимости fps 60→30") —
+///    applied only AFTER the downscale step, as a last resort. In practice the downscale
+///    at capped fps fits whenever the camera alone is within budget (the solver shrinks the
+///    screen to the 2×2 floor). The fps fallback is therefore reachable only in the
+///    camera-dominated corner (camera alone ≥ budget → screen already at 2×2 floor),
+///    where it is applied as a best-effort per-spec "if needed". It does not rescue the
+///    budget in that corner (camera fps is capped independently; the plan remains
+///    `budgetExceeded`), but it records the intent faithfully.
 ///
 /// 4. **Even floor** — screen dimensions are rounded DOWN to the nearest even number on
 ///    every code path (HEVC requires even frame dimensions).
@@ -91,22 +97,16 @@ nonisolated enum CapabilityResolver {
         let cap = config.budgetCap
         let cameraDims = Self.cameraDimensions(cameraFormat: cameraFormat, config: config)
 
-        // --- Step 2: fps fallback ---
-        // Try the minimum fps (config.minCameraFps, typically 30) before downscaling.
-        // `exceedsBudgetAtCap` is computed here — before any fallback or downscale —
+        // `exceedsBudgetAtCap` is computed here — before any lever —
         // because this is the flag the probe needs to classify `.budgetExceeded`.
         let cappedDims = SourceDimensions(width: capped.width, height: capped.height, fps: capped.fps)
         let exceedsBudgetAtCap = !cap.fits(screen: cappedDims, camera: cameraDims)
-        if exceedsBudgetAtCap, capped.fps > config.minCameraFps {
-            let dimsAtMin = SourceDimensions(width: capped.width, height: capped.height, fps: config.minCameraFps)
-            if cap.fits(screen: dimsAtMin, camera: cameraDims) {
-                capped.fps = config.minCameraFps
-            }
-        }
 
-        // --- Step 3: sub-4K downscale (last resort) ---
-        // The raw scalar arithmetic is kept here: the solver legitimately needs the scalar
-        // values (budget remainder, pixel count, sqrt aspect-solve) — not the boolean predicate.
+        // --- Step 2: downscale resolution at the capped fps (PRIMARY lever) ---
+        // Spec: "downscale экрана до вписывания, дефолт ≤ 4K60" — resolution is reduced
+        // while preserving the capped fps. The raw scalar arithmetic is kept here: the
+        // solver legitimately needs the scalar values (budget remainder, pixel count,
+        // sqrt aspect-solve) — not the boolean predicate.
         (capped.width, capped.height) = Self.downscaleIfNeeded(
             width: capped.width,
             height: capped.height,
@@ -114,6 +114,17 @@ nonisolated enum CapabilityResolver {
             cameraRate: cameraRate,
             cap: cap
         )
+
+        // --- Step 3: fps 60→30 (SECONDARY lever, "при необходимости") ---
+        // Fires only when the downscaled plan still exceeds budget — i.e. the
+        // camera-dominated corner where the screen is already at the 2×2 floor.
+        // In that corner the fps fallback does not rescue the budget (camera rate alone
+        // exceeds the ceiling; plan is `.budgetExceeded`), but it records the spec's
+        // "if needed" intent as a best-effort.
+        let downsizedDims = SourceDimensions(width: capped.width, height: capped.height, fps: capped.fps)
+        if !cap.fits(screen: downsizedDims, camera: cameraDims), capped.fps > config.minCameraFps {
+            capped.fps = config.minCameraFps
+        }
 
         // --- Step 4: floor to even (unconditional) ---
         // HEVC requires even frame dimensions. Applied on every code path.

@@ -197,12 +197,14 @@ struct CapabilityProbeTests {
 
     /// 4K60 + large 4K@60 camera: clamped combined rate 497M + 530M ≈ 1027M > 995M → `.budgetExceeded`.
     ///
-    /// This is the same math as the CapabilityResolverTests fps-fallback case.
+    /// Per spec AC-5 / §"CapabilityProbe и pre-flight бюджет", the suggested plan uses
+    /// resolution downscale (PRIMARY lever) at the capped fps=60, not fps reduction.
     @Test("4K60 display + large 4K@60 camera — clamped baseline > 995M → .budgetExceeded")
     func probe_4K60_largeCam60_isBudgetExceeded() {
         // Camera: 4096×2160@60 → 530_841_600 px/s
         // Screen clamped: 3840×2160@60 → 497_664_000 px/s
         // Combined: 1_028_505_600 > 995_000_000
+        // Suggested plan (downscale-first at fps=60): 3708×2086@60 + camera ≈ 994M ≤ 995M.
         let display = makeDisplay(pixelWidth: 3840, pixelHeight: 2160, refreshHz: 60.0)
         let bigCamera = makeCamera(pixelWidth: 4096, pixelHeight: 2160, maxFps: 60.0)
 
@@ -222,12 +224,15 @@ struct CapabilityProbeTests {
             // Dimensions must be even.
             #expect(suggested.screenWidth.isMultiple(of: 2))
             #expect(suggested.screenHeight.isMultiple(of: 2))
-            // fps-fallback yields 4K@30 for this input (screen@30 + camera@60 ≈ 779M ≤ 995M).
-            #expect(suggested.screenFps == 30)
-            #expect(suggested.screenWidth == 3840)
-            // Aspect ratio of suggested screen ≈ 16:9 (fps-fallback path preserves 4K dims).
+            // PRIMARY lever: resolution is downscaled, fps stays at the capped value (60).
+            #expect(suggested.screenFps == 60)
+            #expect(suggested.screenWidth < 3840)
+            // Exact solver output: 3708×2086@60.
+            #expect(suggested.screenWidth == 3708)
+            #expect(suggested.screenHeight == 2086)
+            // Aspect ratio of suggested screen ≈ 16:9.
             let aspect = Double(suggested.screenWidth) / Double(suggested.screenHeight)
-            #expect(abs(aspect - 16.0 / 9.0) < 0.1)
+            #expect(abs(aspect - 16.0 / 9.0) < 0.05)
 
         case .ok:
             Issue.record("Expected .budgetExceeded, got \(result)")
