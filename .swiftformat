@@ -33,7 +33,11 @@
 --importgrouping alpha
 
 # ── Declarations ──────────────────────────────────────────────────────────────
---modifierorder typeMethods,nonisolated,override,required,convenience,indirect,lazy,weak,unowned,static,class,final,private,fileprivate,internal,package,public,open
+# Modifier order mirrors SwiftLint's preferred_modifier_order categories:
+# override → isolation(nonisolated) → acl → lazy → final → required → convenience →
+# typeMethods(static/class) → owned(weak/unowned) → indirect.
+# Both tools now enforce the same idiomatic order (e.g. `private static let`).
+--modifierorder override,nonisolated,private,fileprivate,internal,package,public,open,lazy,final,required,convenience,static,class,weak,unowned,indirect
 --funcattributes prev-line
 --typeattributes prev-line
 --varattributes prev-line

@@ -2,9 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- Hardened Runtime: allow camera access (required for on-screen recording with webcam overlay) -->
 	<key>com.apple.security.device.camera</key>
 	<true/>
-	<key>com.apple.security.device.microphone</key>
+	<!-- Hardened Runtime: allow microphone/audio input (required for voice recording into video track) -->
+	<key>com.apple.security.device.audio-input</key>
 	<true/>
 </dict>
 </plist>

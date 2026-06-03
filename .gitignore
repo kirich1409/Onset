@@ -22,3 +22,7 @@ swarm-report/
 
 # Local agent infrastructure (Claude Code agent-memory, local settings)
 .claude/
+
+# LLVM coverage artifacts
+*.profraw
+*.profdata

@@ -1,11 +1,9 @@
-@testable import Onset
-import Testing
-
-struct OnsetTests {
-    @Test
-    func example() {
-        // Write your test here and use APIs like `#expect(...)` to check expected conditions.
-        // Swift Testing Documentation
-        // https://developer.apple.com/documentation/testing
-    }
-}
+// Onset unit tests — Stage 3: Permissions layer
+//
+// Active test suites:
+//   - EffectivePermissionsTests — pure logic for recording-mode availability (AC-7, AC-11)
+//   - AppRouterRouteTests       — start-route computation (AC-5, AC-8, AC-9)
+//   - AppRouterRelaunchTests    — relaunch-trigger predicate (AC-5 anti-loop)
+//
+// Support:
+//   - FakePermissionsService    — reusable fake for Stage 4 OnboardingViewModel tests
