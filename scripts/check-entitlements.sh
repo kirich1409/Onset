@@ -69,7 +69,10 @@ done
 ALLOWED_LIST=(
   "com.apple.security.cs.allow-unsigned-executable-memory"
   "com.apple.security.cs.disable-library-validation"
-  # Screen capture permission (required for screen recording feature)
+  # Camera access (required for webcam recording)
+  "com.apple.security.device.camera"
+  # Screen capture entitlement — screen recording goes through TCC, not this entitlement;
+  # listed here so it doesn't trigger an UNKNOWN warning if added intentionally later.
   "com.apple.security.screen-capture"
   # Microphone access (required for audio recording)
   "com.apple.security.device.microphone"
