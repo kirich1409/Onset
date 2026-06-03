@@ -39,6 +39,15 @@ nonisolated enum CapabilityResolver {
     /// Minimum even dimension for a down-scaled screen axis (HEVC floor).
     private static let minEvenDimension = 2
 
+    // MARK: - Private types
+
+    /// Capped screen dimensions and fps returned by `clampScreen(display:config:)`.
+    private struct ClampedScreen {
+        var width: Int
+        var height: Int
+        var fps: Int
+    }
+
     // MARK: - Entry point
 
     /// Resolves the concrete start profile for a recording session.
@@ -60,55 +69,35 @@ nonisolated enum CapabilityResolver {
     )
     -> ResolvedRecordingPlan {
         // --- Step 1: cap ---
-        // refreshHz == 0.0 means "built-in / variable" — use maxScreenFps as the fallback.
-        let nativeFps = display.refreshHz == 0.0
-            ? config.maxScreenFps
-            : min(Int(display.refreshHz), config.maxScreenFps)
+        var capped = Self.clampScreen(display: display, config: config)
 
-        var resolvedFps = nativeFps
-        var resolvedWidth = min(display.pixelWidth, Self.maxScreenWidth4K)
-        var resolvedHeight = min(display.pixelHeight, Self.maxScreenHeight4K)
-
-        // Camera target fps: maxFps of the selected format, clamped to maxScreenFps.
-        // Int(Double) truncates fractional Hz (e.g. 29.97 → 29); callers should supply
-        // formats whose maxFps is a clean integer value when possible.
-        // Explicit-typed intermediates avoid Optional.map { <arithmetic> } type-checker timeouts.
-        let cameraFps: Int
-        let cameraRate: Int
-        if let format = cameraFormat {
-            cameraFps = min(Int(format.maxFps), config.maxScreenFps)
-            let camWidth = Int(format.pixelWidth)
-            let camHeight = Int(format.pixelHeight)
-            cameraRate = camWidth * camHeight * cameraFps
-        } else {
-            cameraFps = 0
-            cameraRate = 0
-        }
+        // Camera pixel-rate (0 when no camera).
+        let (cameraFps, cameraRate) = Self.cameraRateInfo(cameraFormat: cameraFormat, config: config)
         let cap = config.budgetCap
 
         // --- Step 2: fps fallback ---
         // Try the minimum fps (config.minCameraFps, typically 30) before downscaling.
-        let exceedsBudgetAt60 = resolvedWidth * resolvedHeight * resolvedFps + cameraRate > cap.maxPixelsPerSecond
-        if exceedsBudgetAt60, resolvedFps > config.minCameraFps {
-            let rateAtMin = resolvedWidth * resolvedHeight * config.minCameraFps + cameraRate
+        let exceedsBudgetAt60 = capped.width * capped.height * capped.fps + cameraRate > cap.maxPixelsPerSecond
+        if exceedsBudgetAt60, capped.fps > config.minCameraFps {
+            let rateAtMin = capped.width * capped.height * config.minCameraFps + cameraRate
             if rateAtMin <= cap.maxPixelsPerSecond {
-                resolvedFps = config.minCameraFps
+                capped.fps = config.minCameraFps
             }
         }
 
         // --- Step 3: sub-4K downscale (last resort) ---
-        (resolvedWidth, resolvedHeight) = Self.downscaleIfNeeded(
-            width: resolvedWidth,
-            height: resolvedHeight,
-            fps: resolvedFps,
+        (capped.width, capped.height) = Self.downscaleIfNeeded(
+            width: capped.width,
+            height: capped.height,
+            fps: capped.fps,
             cameraRate: cameraRate,
             cap: cap
         )
 
         // --- Step 4: floor to even (unconditional) ---
         // HEVC requires even frame dimensions. Applied on every code path.
-        let evenWidth = max(resolvedWidth & ~1, Self.minEvenDimension)
-        let evenHeight = max(resolvedHeight & ~1, Self.minEvenDimension)
+        let evenWidth = max(capped.width & ~1, Self.minEvenDimension)
+        let evenHeight = max(capped.height & ~1, Self.minEvenDimension)
 
         let cameraPlan: ResolvedCameraPlan? = cameraFormat.map { format in
             ResolvedCameraPlan(
@@ -122,12 +111,49 @@ nonisolated enum CapabilityResolver {
             displayID: display.displayID,
             screenWidth: evenWidth,
             screenHeight: evenHeight,
-            screenFps: resolvedFps,
+            screenFps: capped.fps,
             cameraPlan: cameraPlan
         )
     }
 
     // MARK: - Helpers
+
+    /// Clamps the display's native resolution to ≤4K and fps to `config.maxScreenFps`.
+    ///
+    /// `Display.refreshHz == 0.0` is a sentinel for "built-in / variable rate" — treated
+    /// as `config.maxScreenFps` (60) rather than zero Hz.
+    nonisolated private static func clampScreen(
+        display: Display,
+        config: RecordingConfiguration
+    )
+    -> ClampedScreen {
+        // refreshHz == 0.0 means "built-in / variable" — use maxScreenFps as the fallback.
+        let fps = display.refreshHz == 0.0
+            ? config.maxScreenFps
+            : min(Int(display.refreshHz), config.maxScreenFps)
+        return ClampedScreen(
+            width: min(display.pixelWidth, Self.maxScreenWidth4K),
+            height: min(display.pixelHeight, Self.maxScreenHeight4K),
+            fps: fps
+        )
+    }
+
+    /// Returns the camera's pixel-rate and target fps for the selected format.
+    ///
+    /// Camera target fps: maxFps of the selected format, clamped to `config.maxScreenFps`.
+    /// `Int(Double)` truncates fractional Hz (e.g. 29.97 → 29); callers should supply
+    /// formats whose maxFps is a clean integer value when possible.
+    /// Explicit-typed intermediates avoid `Optional.map { <arithmetic> }` type-checker timeouts.
+    nonisolated private static func cameraRateInfo(
+        cameraFormat: CameraFormat?,
+        config: RecordingConfiguration
+    )
+    -> (fps: Int, rate: Int) {
+        guard let format = cameraFormat else { return (fps: 0, rate: 0) }
+        let fps = min(Int(format.maxFps), config.maxScreenFps)
+        let rate = Int(format.pixelWidth) * Int(format.pixelHeight) * fps
+        return (fps: fps, rate: rate)
+    }
 
     /// Downscales `width`/`height` (preserving aspect ratio) until the combined pixel-rate
     /// fits within `cap`, or returns `(minEvenDimension, minEvenDimension)` when
