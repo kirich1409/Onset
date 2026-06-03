@@ -25,11 +25,11 @@ private func makeCamera(pixelWidth: Int32, pixelHeight: Int32, maxFps: Double) -
 
 // MARK: - CapabilityProbeTests
 
+// swiftlint:disable type_body_length
 /// Tests for `CapabilityProbe.probe(display:cameraFormat:config:)`.
 ///
 /// These tests run on the host machine (Apple Silicon), so `hwEncoderAvailable` returns `true`.
-/// `.noHardwareEncoder` is not injectable via the current static `probe()` API and is covered
-/// by manual verification (L5) on a reference machine.
+/// The `.noHardwareEncoder` path is covered by the injectable `hwCheck` seam tests below.
 @Suite("CapabilityProbe.probe — live HW-encoder tests (Apple Silicon)")
 struct CapabilityProbeTests {
     private let config = RecordingConfiguration.mvpDefault
@@ -47,14 +47,20 @@ struct CapabilityProbeTests {
             config: self.config
         )
 
-        guard case let .ok(plan) = result else {
-            Issue.record("Expected .ok, got \(result)")
+        switch result {
+        case let .ok(plan):
+            #expect(plan.screenWidth == 3840)
+            #expect(plan.screenHeight == 2160)
+            #expect(plan.screenFps == 60)
+            #expect(plan.cameraPlan == nil)
+
+        case .noHardwareEncoder:
+            // HW HEVC absent on this runner — skip budget assertions.
             return
+
+        case .budgetExceeded:
+            Issue.record("Expected .ok or .noHardwareEncoder, got \(result)")
         }
-        #expect(plan.screenWidth == 3840)
-        #expect(plan.screenHeight == 2160)
-        #expect(plan.screenFps == 60)
-        #expect(plan.cameraPlan == nil)
     }
 
     /// 1080p60 display, no camera → well within budget → `.ok`.
@@ -68,8 +74,15 @@ struct CapabilityProbeTests {
             config: self.config
         )
 
-        if case .ok = result {} else {
-            Issue.record("Expected .ok, got \(result)")
+        switch result {
+        case .ok:
+            break
+
+        case .noHardwareEncoder:
+            return // HW HEVC absent on this runner — skip.
+
+        case .budgetExceeded:
+            Issue.record("Expected .ok or .noHardwareEncoder, got \(result)")
         }
     }
 
@@ -85,10 +98,15 @@ struct CapabilityProbeTests {
             config: self.config
         )
 
-        if case let .ok(plan) = result {
+        switch result {
+        case let .ok(plan):
             #expect(plan.screenFps == self.config.maxScreenFps)
-        } else {
-            Issue.record("Expected .ok, got \(result)")
+
+        case .noHardwareEncoder:
+            return // HW HEVC absent on this runner — skip.
+
+        case .budgetExceeded:
+            Issue.record("Expected .ok or .noHardwareEncoder, got \(result)")
         }
     }
 
@@ -105,12 +123,17 @@ struct CapabilityProbeTests {
             config: self.config
         )
 
-        if case let .ok(plan) = result {
+        switch result {
+        case let .ok(plan):
             // Clamped to ≤4K60.
             #expect(plan.screenWidth <= 3840)
             #expect(plan.screenHeight <= 2160)
-        } else {
-            Issue.record("Expected .ok, got \(result)")
+
+        case .noHardwareEncoder:
+            return // HW HEVC absent on this runner — skip.
+
+        case .budgetExceeded:
+            Issue.record("Expected .ok or .noHardwareEncoder, got \(result)")
         }
     }
 
@@ -128,7 +151,14 @@ struct CapabilityProbeTests {
             config: self.config
         )
 
-        if case .ok = result {} else {
+        switch result {
+        case .ok:
+            break
+
+        case .noHardwareEncoder:
+            return // HW HEVC absent on this runner — skip.
+
+        case .budgetExceeded:
             Issue.record("Expected .ok (even-floor is not a budget downscale), got \(result)")
         }
     }
@@ -145,7 +175,8 @@ struct CapabilityProbeTests {
             config: self.config
         )
 
-        if case let .ok(plan) = result {
+        switch result {
+        case let .ok(plan):
             guard let cam = plan.cameraPlan else {
                 Issue.record("Expected a camera plan")
                 return
@@ -153,8 +184,12 @@ struct CapabilityProbeTests {
             #expect(cam.width == 1920)
             #expect(cam.height == 1080)
             #expect(cam.fps == 30)
-        } else {
-            Issue.record("Expected .ok, got \(result)")
+
+        case .noHardwareEncoder:
+            return // HW HEVC absent on this runner — skip.
+
+        case .budgetExceeded:
+            Issue.record("Expected .ok or .noHardwareEncoder, got \(result)")
         }
     }
 
@@ -177,15 +212,65 @@ struct CapabilityProbeTests {
             config: self.config
         )
 
-        guard case let .budgetExceeded(suggested) = result else {
+        switch result {
+        case .noHardwareEncoder:
+            return // HW HEVC absent on this runner — skip budget assertions.
+
+        case let .budgetExceeded(suggested):
+            // The suggested plan must fit within budget.
+            #expect(suggested.combinedPixelsPerSecond <= self.config.budgetCap.maxPixelsPerSecond)
+            // Dimensions must be even.
+            #expect(suggested.screenWidth.isMultiple(of: 2))
+            #expect(suggested.screenHeight.isMultiple(of: 2))
+            // fps-fallback yields 4K@30 for this input (screen@30 + camera@60 ≈ 779M ≤ 995M).
+            #expect(suggested.screenFps == 30)
+            #expect(suggested.screenWidth == 3840)
+            // Aspect ratio of suggested screen ≈ 16:9 (fps-fallback path preserves 4K dims).
+            let aspect = Double(suggested.screenWidth) / Double(suggested.screenHeight)
+            #expect(abs(aspect - 16.0 / 9.0) < 0.1)
+
+        case .ok:
             Issue.record("Expected .budgetExceeded, got \(result)")
-            return
         }
-        // The suggested plan must fit within budget.
-        #expect(suggested.combinedPixelsPerSecond <= self.config.budgetCap.maxPixelsPerSecond)
-        // Dimensions must be even.
-        #expect(suggested.screenWidth.isMultiple(of: 2))
-        #expect(suggested.screenHeight.isMultiple(of: 2))
+    }
+
+    // MARK: - AC-6: .noHardwareEncoder path (injectable seam)
+
+    /// Forces `.noHardwareEncoder` via the injectable `hwCheck` seam.
+    ///
+    /// Tests the path without requiring a machine that lacks a HW HEVC encoder.
+    @Test("hwCheck returning false → .noHardwareEncoder (AC-6 injectable seam)")
+    func probe_hwCheckFalse_isNoHardwareEncoder() {
+        let display = makeDisplay(pixelWidth: 3840, pixelHeight: 2160, refreshHz: 60.0)
+
+        let result = CapabilityProbe.probe(
+            display: display,
+            cameraFormat: nil,
+            config: self.config
+        ) { _, _ in false }
+
+        #expect(result == .noHardwareEncoder)
+    }
+
+    /// Verifies the seam passes the correct probe dimensions to `hwCheck`.
+    @Test("hwCheck receives the fixed probe dimensions (1920×1080)")
+    func probe_hwCheckReceivesProbe1080p() {
+        let display = makeDisplay(pixelWidth: 4096, pixelHeight: 2160, refreshHz: 60.0)
+        var capturedWidth = 0
+        var capturedHeight = 0
+
+        _ = CapabilityProbe.probe(
+            display: display,
+            cameraFormat: nil,
+            config: self.config
+        ) { probeWidth, probeHeight in
+            capturedWidth = probeWidth
+            capturedHeight = probeHeight
+            return false // force early return; result not relevant here
+        }
+
+        #expect(capturedWidth == 1920)
+        #expect(capturedHeight == 1080)
     }
 
     // MARK: - ProbeResult equality
@@ -240,3 +325,4 @@ struct CapabilityProbeTests {
 }
 
 // swiftlint:enable no_magic_numbers
+// swiftlint:enable type_body_length

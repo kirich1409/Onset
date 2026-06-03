@@ -76,6 +76,10 @@ struct CapabilityResolverTests {
         // Invariant: combined rate fits budget
         #expect(plan.combinedPixelsPerSecond <= self.config.budgetCap.maxPixelsPerSecond)
 
+        // Aspect ratio of downscaled screen ≈ source aspect (16:9 in this case)
+        let aspect = Double(plan.screenWidth) / Double(plan.screenHeight)
+        #expect(abs(aspect - 16.0 / 9.0) < 0.1)
+
         // Camera plan must be present and reflect the chosen format
         guard let cameraPlan = plan.cameraPlan else {
             Issue.record("Expected a camera plan, but got nil")
@@ -231,6 +235,30 @@ struct CapabilityResolverTests {
             config: self.config
         )
         #expect(plan.combinedPixelsPerSecond <= self.config.budgetCap.maxPixelsPerSecond)
+    }
+
+    // MARK: - Camera alone exhausts budget
+
+    @Test("Camera alone exhausts budget — screen floored to minimum even size")
+    func resolve_cameraAloneExceedsBudget_screenFlooredToMin() {
+        // 8K60 camera: 7680×4320@60 ≈ 1_990_656_000 px/s > 995_000_000 budget.
+        // After capping camera fps to maxScreenFps (60), camera rate alone exceeds the budget.
+        // Screen must be floored to the minimum even dimension (2×2) on both axes.
+        let display = makeDisplay(pixelWidth: 1920, pixelHeight: 1080, refreshHz: 60.0)
+        let hugeCamera = makeCamera(pixelWidth: 7680, pixelHeight: 4320, maxFps: 60.0)
+
+        let plan = CapabilityResolver.resolveStartProfile(
+            display: display,
+            cameraFormat: hugeCamera,
+            config: self.config
+        )
+
+        // Screen must be at the minimum even floor — camera alone consumes all budget.
+        #expect(plan.screenWidth == 2)
+        #expect(plan.screenHeight == 2)
+        // Dimensions remain even.
+        #expect(plan.screenWidth.isMultiple(of: 2))
+        #expect(plan.screenHeight.isMultiple(of: 2))
     }
 
     // MARK: - No camera — cameraPlan is nil

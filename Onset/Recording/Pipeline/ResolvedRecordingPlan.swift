@@ -15,6 +15,17 @@ nonisolated struct ResolvedCameraPlan {
     /// Target frame rate for the session. `Int(CameraFormat.maxFps)`,
     /// not exceeding `RecordingConfiguration.maxScreenFps`.
     nonisolated let fps: Int
+
+    init(width: Int, height: Int, fps: Int) {
+        // HEVC invariant: camera dimensions must be even and positive.
+        // swiftlint:disable no_magic_numbers
+        precondition(width > 0 && width.isMultiple(of: 2), "width must be even+positive, got \(width)")
+        precondition(height > 0 && height.isMultiple(of: 2), "height must be even+positive, got \(height)")
+        // swiftlint:enable no_magic_numbers
+        self.width = width
+        self.height = height
+        self.fps = fps
+    }
 }
 
 extension ResolvedCameraPlan: Equatable {}
@@ -51,6 +62,32 @@ nonisolated struct ResolvedRecordingPlan {
 
     /// Resolved camera plan, or `nil` when no camera is selected for this session.
     nonisolated let cameraPlan: ResolvedCameraPlan?
+
+    init(
+        displayID: CGDirectDisplayID,
+        screenWidth: Int,
+        screenHeight: Int,
+        screenFps: Int,
+        cameraPlan: ResolvedCameraPlan?
+    ) {
+        // HEVC invariants: screen dimensions must be even and positive; fps must be positive.
+        // swiftlint:disable no_magic_numbers
+        precondition(
+            screenWidth > 0 && screenWidth.isMultiple(of: 2),
+            "screenWidth must be even+positive, got \(screenWidth)"
+        )
+        precondition(
+            screenHeight > 0 && screenHeight.isMultiple(of: 2),
+            "screenHeight must be even+positive, got \(screenHeight)"
+        )
+        precondition(screenFps > 0, "screenFps must be > 0, got \(screenFps)")
+        // swiftlint:enable no_magic_numbers
+        self.displayID = displayID
+        self.screenWidth = screenWidth
+        self.screenHeight = screenHeight
+        self.screenFps = screenFps
+        self.cameraPlan = cameraPlan
+    }
 
     // MARK: - Diagnostic
 

@@ -89,20 +89,24 @@ nonisolated enum CapabilityResolver {
         // Camera pixel-rate (0 when no camera).
         let (cameraFps, cameraRate) = Self.cameraRateInfo(cameraFormat: cameraFormat, config: config)
         let cap = config.budgetCap
+        let cameraDims = Self.cameraDimensions(cameraFormat: cameraFormat, config: config)
 
         // --- Step 2: fps fallback ---
         // Try the minimum fps (config.minCameraFps, typically 30) before downscaling.
         // `exceedsBudgetAtCap` is computed here — before any fallback or downscale —
         // because this is the flag the probe needs to classify `.budgetExceeded`.
-        let exceedsBudgetAtCap = capped.width * capped.height * capped.fps + cameraRate > cap.maxPixelsPerSecond
+        let cappedDims = SourceDimensions(width: capped.width, height: capped.height, fps: capped.fps)
+        let exceedsBudgetAtCap = !cap.fits(screen: cappedDims, camera: cameraDims)
         if exceedsBudgetAtCap, capped.fps > config.minCameraFps {
-            let rateAtMin = capped.width * capped.height * config.minCameraFps + cameraRate
-            if rateAtMin <= cap.maxPixelsPerSecond {
+            let dimsAtMin = SourceDimensions(width: capped.width, height: capped.height, fps: config.minCameraFps)
+            if cap.fits(screen: dimsAtMin, camera: cameraDims) {
                 capped.fps = config.minCameraFps
             }
         }
 
         // --- Step 3: sub-4K downscale (last resort) ---
+        // The raw scalar arithmetic is kept here: the solver legitimately needs the scalar
+        // values (budget remainder, pixel count, sqrt aspect-solve) — not the boolean predicate.
         (capped.width, capped.height) = Self.downscaleIfNeeded(
             width: capped.width,
             height: capped.height,
@@ -116,10 +120,16 @@ nonisolated enum CapabilityResolver {
         let evenWidth = max(capped.width & ~1, Self.minEvenDimension)
         let evenHeight = max(capped.height & ~1, Self.minEvenDimension)
 
+        // FIX 3: apply even-floor to camera dimensions for symmetric HEVC contract enforcement.
+        // AVCaptureDevice formats are even in practice, but the contract must hold on both sides.
+        // Hoisted into explicit lets: chained Int(...) & ~1 inside an init-call argument triggers
+        // the Swift type-checker timeout under load (warnings-as-errors → red CI).
         let cameraPlan: ResolvedCameraPlan? = cameraFormat.map { format in
-            ResolvedCameraPlan(
-                width: Int(format.pixelWidth),
-                height: Int(format.pixelHeight),
+            let evenCamW: Int = max(Int(format.pixelWidth) & ~1, Self.minEvenDimension)
+            let evenCamH: Int = max(Int(format.pixelHeight) & ~1, Self.minEvenDimension)
+            return ResolvedCameraPlan(
+                width: evenCamW,
+                height: evenCamH,
                 fps: cameraFps
             )
         }
@@ -192,6 +202,24 @@ nonisolated enum CapabilityResolver {
         let fps = min(Int(format.maxFps), config.maxScreenFps)
         let rate = Int(format.pixelWidth) * Int(format.pixelHeight) * fps
         return (fps: fps, rate: rate)
+    }
+
+    /// Returns camera capture dimensions as `SourceDimensions` for use with
+    /// `EngineBudgetCap.fits(screen:camera:)`.
+    ///
+    /// When `cameraFormat` is `nil`, returns a zero-rate sentinel so the boolean predicate
+    /// produces the same result as the scalar arithmetic (`cameraRate == 0`).
+    nonisolated private static func cameraDimensions(
+        cameraFormat: CameraFormat?,
+        config: RecordingConfiguration
+    )
+    -> SourceDimensions {
+        guard let format = cameraFormat else { return SourceDimensions(width: 0, height: 0, fps: 0) }
+        return SourceDimensions(
+            width: Int(format.pixelWidth),
+            height: Int(format.pixelHeight),
+            fps: min(Int(format.maxFps), config.maxScreenFps)
+        )
     }
 
     /// Downscales `width`/`height` (preserving aspect ratio) until the combined pixel-rate

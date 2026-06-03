@@ -129,6 +129,29 @@ nonisolated enum CapabilityProbe {
         config: RecordingConfiguration
     )
     -> ProbeResult {
+        self.probe(display: display, cameraFormat: cameraFormat, config: config) { width, height in
+            self.hwEncoderAvailable(width: Int32(width), height: Int32(height))
+        }
+    }
+
+    /// Internal overload that accepts an injectable hardware-encoder check closure.
+    ///
+    /// The closure receives the probe dimensions (Int, Int) and returns `true` when a
+    /// hardware HEVC encoder is available. Exposed for testing: pass `{ _, _ in false }`
+    /// to force the `.noHardwareEncoder` path without requiring real hardware absence.
+    ///
+    /// - Parameters:
+    ///   - display: The selected display snapshot (from DeviceDiscovery).
+    ///   - cameraFormat: The selected camera format, or `nil` when no camera is used.
+    ///   - config: The recording policy (budget cap, fps limits).
+    ///   - hwCheck: Closure that performs the hardware-encoder availability check.
+    nonisolated static func probe(
+        display: Display,
+        cameraFormat: CameraFormat?,
+        config: RecordingConfiguration,
+        hwCheck: (Int, Int) -> Bool
+    )
+    -> ProbeResult {
         let resolution = CapabilityResolver.resolve(
             display: display,
             cameraFormat: cameraFormat,
@@ -137,7 +160,7 @@ nonisolated enum CapabilityProbe {
 
         // AC-6: HW-encoder check comes first.
         // Probing at fixed 1080p avoids spurious failures on degenerate plan dimensions.
-        guard self.hwEncoderAvailable(width: self.probeWidth, height: self.probeHeight) else {
+        guard hwCheck(Int(self.probeWidth), Int(self.probeHeight)) else {
             Self.logger.warning("Hardware HEVC encoder unavailable on this system")
             return .noHardwareEncoder
         }
@@ -198,7 +221,7 @@ nonisolated enum CapabilityProbe {
         )
 
         guard createStatus == noErr, let session else {
-            Self.logger.debug("VTCompressionSessionCreate failed: OSStatus \(createStatus)")
+            Self.logger.error("VTCompressionSessionCreate failed: \(createStatus) — no HW encoder")
             return false
         }
 
@@ -214,7 +237,7 @@ nonisolated enum CapabilityProbe {
             value: profileLevel
         )
         guard setStatus == noErr else {
-            Self.logger.debug("VTSessionSetProperty(ProfileLevel) failed: OSStatus \(setStatus)")
+            Self.logger.error("VTSessionSetProperty(ProfileLevel) failed: \(setStatus) — no HW encoder")
             return false
         }
 
@@ -251,11 +274,12 @@ nonisolated enum CapabilityProbe {
         // `as?` is rejected ("always succeeds"), `as!` is rejected ("will never produce nil").
         // Guard via CFGetTypeID, then use `unsafeDowncast` — the correct compiler-suggested
         // replacement for unsafeBitCast between two AnyObject-compatible CF types.
-        guard copyStatus == noErr,
-              let rawValue = value,
-              CFGetTypeID(rawValue) == CFBooleanGetTypeID()
-        else {
-            Self.logger.debug("UsingHardwareAcceleratedVideoEncoder query failed: OSStatus \(copyStatus)")
+        guard copyStatus == noErr else {
+            Self.logger.error("VTSessionCopyProperty(UsingHWEncoder) failed: \(copyStatus) — no HW encoder")
+            return false
+        }
+        guard let rawValue = value, CFGetTypeID(rawValue) == CFBooleanGetTypeID() else {
+            Self.logger.error("UsingHWEncoder: absent/wrong CFType (copyStatus was noErr) — no HW encoder")
             return false
         }
         let isHW = unsafe CFBooleanGetValue(unsafeDowncast(rawValue, to: CFBoolean.self))
