@@ -20,7 +20,7 @@ import Testing
 
 @Suite("EncoderConfigBuilder")
 struct EncoderConfigBuilderTests {
-    // Shared configuration — the canonical MVP default, same source used in production.
+    /// Shared configuration — the canonical MVP default, same source used in production.
     private let config = RecordingConfiguration.mvpDefault
 
     // MARK: - 4K60 (exact table hit)
@@ -31,7 +31,7 @@ struct EncoderConfigBuilderTests {
     ///   GOP            = 2.0 s
     @Test("4K60 — rate control fields (exact table hit)")
     func build_4K60_rateControl() {
-        let settings = EncoderConfigBuilder.build(config: config, width: 3840, height: 2160, fps: 60)
+        let settings = EncoderConfigBuilder.build(config: self.config, width: 3840, height: 2160, fps: 60)
 
         #expect(settings.averageBitRate == 60_000_000)
         #expect(settings.peakDataRate == 120_000_000)
@@ -40,7 +40,7 @@ struct EncoderConfigBuilderTests {
 
     @Test("4K60 — profile and encoding flags")
     func build_4K60_profileAndFlags() {
-        let settings = EncoderConfigBuilder.build(config: config, width: 3840, height: 2160, fps: 60)
+        let settings = EncoderConfigBuilder.build(config: self.config, width: 3840, height: 2160, fps: 60)
 
         #expect(settings.profileLevel == .mainAutoLevel)
         #expect(settings.allowFrameReordering == true)
@@ -49,7 +49,7 @@ struct EncoderConfigBuilderTests {
 
     @Test("4K60 — bit depth and Rec.709 color")
     func build_4K60_colorAndDepth() {
-        let settings = EncoderConfigBuilder.build(config: config, width: 3840, height: 2160, fps: 60)
+        let settings = EncoderConfigBuilder.build(config: self.config, width: 3840, height: 2160, fps: 60)
 
         #expect(settings.bitDepth == 8)
         #expect(settings.colorPrimaries == .rec709)
@@ -65,7 +65,7 @@ struct EncoderConfigBuilderTests {
     ///   GOP            = 2.0 s
     @Test("1080p30 — rate control fields (exact table hit)")
     func build_1080p30_rateControl() {
-        let settings = EncoderConfigBuilder.build(config: config, width: 1920, height: 1080, fps: 30)
+        let settings = EncoderConfigBuilder.build(config: self.config, width: 1920, height: 1080, fps: 30)
 
         #expect(settings.averageBitRate == 12_000_000)
         #expect(settings.peakDataRate == 24_000_000)
@@ -74,7 +74,7 @@ struct EncoderConfigBuilderTests {
 
     @Test("1080p30 — profile and encoding flags")
     func build_1080p30_profileAndFlags() {
-        let settings = EncoderConfigBuilder.build(config: config, width: 1920, height: 1080, fps: 30)
+        let settings = EncoderConfigBuilder.build(config: self.config, width: 1920, height: 1080, fps: 30)
 
         #expect(settings.profileLevel == .mainAutoLevel)
         #expect(settings.allowFrameReordering == true)
@@ -83,7 +83,7 @@ struct EncoderConfigBuilderTests {
 
     @Test("1080p30 — bit depth and Rec.709 color")
     func build_1080p30_colorAndDepth() {
-        let settings = EncoderConfigBuilder.build(config: config, width: 1920, height: 1080, fps: 30)
+        let settings = EncoderConfigBuilder.build(config: self.config, width: 1920, height: 1080, fps: 30)
 
         #expect(settings.bitDepth == 8)
         #expect(settings.colorPrimaries == .rec709)
@@ -103,7 +103,7 @@ struct EncoderConfigBuilderTests {
     ///   peak        = Int((5_333_333 × 2.0).rounded()) = 10_666_666
     @Test("720p30 — fallback bitrate path (non-standard resolution)")
     func build_720p30_fallbackBitrate() {
-        let settings = EncoderConfigBuilder.build(config: config, width: 1280, height: 720, fps: 30)
+        let settings = EncoderConfigBuilder.build(config: self.config, width: 1280, height: 720, fps: 30)
 
         // Derived: 12_000_000 × (921_600 / 2_073_600), truncated to Int.
         #expect(settings.averageBitRate == 5_333_333)
@@ -114,7 +114,7 @@ struct EncoderConfigBuilderTests {
 
     @Test("720p30 — flags and color unchanged from config (fallback path)")
     func build_720p30_invariantFields() {
-        let settings = EncoderConfigBuilder.build(config: config, width: 1280, height: 720, fps: 30)
+        let settings = EncoderConfigBuilder.build(config: self.config, width: 1280, height: 720, fps: 30)
 
         #expect(settings.profileLevel == .mainAutoLevel)
         #expect(settings.allowFrameReordering == true)
@@ -129,15 +129,15 @@ struct EncoderConfigBuilderTests {
 
     @Test("VTEncoderSettings Equatable — same inputs produce equal outputs")
     func equatable_sameInputsAreEqual() {
-        let lhs = EncoderConfigBuilder.build(config: config, width: 3840, height: 2160, fps: 60)
-        let rhs = EncoderConfigBuilder.build(config: config, width: 3840, height: 2160, fps: 60)
+        let lhs = EncoderConfigBuilder.build(config: self.config, width: 3840, height: 2160, fps: 60)
+        let rhs = EncoderConfigBuilder.build(config: self.config, width: 3840, height: 2160, fps: 60)
         #expect(lhs == rhs)
     }
 
     @Test("VTEncoderSettings Equatable — different resolutions are not equal")
     func equatable_differentResolutionsAreNotEqual() {
-        let lhs = EncoderConfigBuilder.build(config: config, width: 3840, height: 2160, fps: 60)
-        let rhs = EncoderConfigBuilder.build(config: config, width: 1920, height: 1080, fps: 30)
+        let lhs = EncoderConfigBuilder.build(config: self.config, width: 3840, height: 2160, fps: 60)
+        let rhs = EncoderConfigBuilder.build(config: self.config, width: 1920, height: 1080, fps: 30)
         #expect(lhs != rhs)
     }
 

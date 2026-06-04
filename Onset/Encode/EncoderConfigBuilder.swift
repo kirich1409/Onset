@@ -132,6 +132,7 @@ nonisolated struct VTEncoderSettings: Equatable {
 
 // MARK: - Equatable
 
+// swiftformat:disable:next redundantEquatable
 extension VTEncoderSettings {
     /// Manual `nonisolated` witness — required under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`.
     ///
@@ -176,7 +177,8 @@ nonisolated enum EncoderConfigBuilder {
         width: Int,
         height: Int,
         fps: Int
-    ) -> VTEncoderSettings {
+    )
+    -> VTEncoderSettings {
         let averageBitRate = config.averageBitrate(forWidth: width, height: height, fps: fps)
 
         // Peak = average × multiplier, rounded to the nearest integer.

@@ -1,17 +1,3 @@
-// VideoEncoderTypes.swift
-// Onset
-//
-// U3 of #31 — shared contract types for the VideoEncoder actor: the C-callback → AsyncStream
-// bridge (`EncodedSampleSink`), the injectable session seam (`CompressionSession`), and the
-// internal hard-fail error (`VideoEncoderError`).
-//
-// Split out of VideoEncoder.swift to keep that file within the project's length limit. These
-// are the encoder's boundary contract; the actor (VideoEncoder.swift) consumes them and the
-// production wrapper (VideoEncoder+LiveSession.swift) implements `CompressionSession`.
-//
-// Memory safety: VideoToolbox / CoreMedia C-interop is wrapped in `unsafe` under
-// `SWIFT_STRICT_MEMORY_SAFETY = YES`, mirroring CapabilityProbe.swift.
-
 import CoreMedia
 import CoreVideo
 import VideoToolbox
@@ -53,9 +39,8 @@ final class EncodedSampleSink: @unchecked Sendable {
     /// Per the CoreMedia header: `kCMSampleAttachmentKey_NotSync` absent (or `false`) implies
     /// a sync sample. So a frame is a keyframe unless `NotSync == true`.
     nonisolated static func isKeyframe(_ sampleBuffer: CMSampleBuffer) -> Bool {
-        guard
-            let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false),
-            CFArrayGetCount(attachments) > 0
+        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false),
+              CFArrayGetCount(attachments) > 0
         else {
             // No attachments → treat as sync (matches "absence implies Sync").
             return true

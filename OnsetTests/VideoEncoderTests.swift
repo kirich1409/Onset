@@ -1,20 +1,3 @@
-// VideoEncoderTests.swift
-// OnsetTests
-//
-// U3 of #31 — VideoEncoder actor tests.
-//
-// L2 (always run): drive the encoder through an injected MOCK CompressionSession (no
-// hardware). Covers CFR integration (snap / hold / duplicate-drop), backpressure, the
-// DataRateLimits fallback, the HW-unavailable hard fail, and the anchored-PTS math.
-//
-// L5 (opt-in, env-gated): drive a REAL hardware VTCompressionSession with a synthetic
-// IOSurface-backed gradient buffer (NO camera → no device contention). Gated behind
-// ONSET_RUN_L5_ENCODE=1 so the routine `xcodebuild test` does not exercise it.
-//
-// To run the L5 HW path deliberately:
-//   ONSET_RUN_L5_ENCODE=1 xcodebuild test -scheme Onset -project Onset.xcodeproj \
-//     -destination 'platform=macOS' -only-testing:OnsetTests/VideoEncoderLiveTests
-
 import CoreMedia
 import CoreVideo
 @testable import Onset
@@ -42,7 +25,7 @@ private let testHeight: Int32 = 720
 /// A fixed anchor so anchored-PTS assertions are deterministic.
 /// Anchor at 100s on a 600-timescale host clock (typical CMClock timescale).
 private func makeFixedAnchor() -> HostTimeAnchor {
-    HostTimeAnchor(anchorTime: CMTime(value: 60_000, timescale: 600))
+    HostTimeAnchor(anchorTime: CMTime(value: 60000, timescale: 600))
 }
 
 /// Default settings used by the mock-session tests.
@@ -152,10 +135,15 @@ private final class MockCompressionSession: CompressionSession, @unchecked Senda
         return noErr
     }
 
-    nonisolated func pendingFrameCount() -> Int { self.pending }
+    nonisolated func pendingFrameCount() -> Int {
+        self.pending
+    }
+
     nonisolated func completeFrames() {}
     nonisolated func invalidate() {}
-    nonisolated func usingHardwareEncoder() -> Bool { self.usingHardware }
+    nonisolated func usingHardwareEncoder() -> Bool {
+        self.usingHardware
+    }
 }
 
 /// Builds a minimal `CMSampleBuffer` carrying `pts` for the R2 PTS echo.
@@ -202,7 +190,8 @@ private func makeEncoder(
     mock: MockCompressionSession,
     anchor: HostTimeAnchor,
     maxPendingFrames: Int = 4
-) -> VideoEncoder {
+)
+-> VideoEncoder {
     VideoEncoder(
         settings: makeSettings(),
         width: testWidth,
@@ -228,12 +217,12 @@ struct VideoEncoderTests {
         let encoder = await makeEncoder(mock: mock, anchor: anchor)
         try await encoder.start()
 
-        for slot in 0 ..< 4 {
+        for slot in 0..<4 {
             await encoder.ingest(makeFrame(slotIndex: slot, anchor: anchor))
         }
 
         #expect(mock.encodedPTS.count == 4)
-        for slot in 0 ..< 4 {
+        for slot in 0..<4 {
             let expected = CMTimeAdd(anchor.anchorTime, CMTimeMake(value: CMTimeValue(slot), timescale: Int32(testFps)))
             #expect(CMTimeCompare(mock.encodedPTS[slot], expected) == 0)
         }
@@ -610,31 +599,47 @@ struct VideoEncoderTests {
         // CFEqual avoids CFBoolean / CFNumber cast requirements; it is type-safe at CFTypeRef.
         let props = mock.appliedProperties
 
-        let realTime = try #require(props[kVTCompressionPropertyKey_RealTime as String],
-            "RealTime must be applied to the session")
+        let realTime = try #require(
+            props[kVTCompressionPropertyKey_RealTime as String],
+            "RealTime must be applied to the session"
+        )
         #expect(CFEqual(realTime, kCFBooleanTrue), "RealTime must be true (real-time encode)")
 
-        let allowReorder = try #require(props[kVTCompressionPropertyKey_AllowFrameReordering as String],
-            "AllowFrameReordering must be applied to the session")
+        let allowReorder = try #require(
+            props[kVTCompressionPropertyKey_AllowFrameReordering as String],
+            "AllowFrameReordering must be applied to the session"
+        )
         #expect(CFEqual(allowReorder, kCFBooleanTrue), "AllowFrameReordering must be true (B-frames)")
 
-        let profileLevel = try #require(props[kVTCompressionPropertyKey_ProfileLevel as String],
-            "ProfileLevel must be applied to the session")
+        let profileLevel = try #require(
+            props[kVTCompressionPropertyKey_ProfileLevel as String],
+            "ProfileLevel must be applied to the session"
+        )
         // Assert the literal VT constant so a change in settings default is caught early.
-        #expect(CFEqual(profileLevel, kVTProfileLevel_HEVC_Main_AutoLevel),
-            "ProfileLevel must be HEVC Main AutoLevel")
+        #expect(
+            CFEqual(profileLevel, kVTProfileLevel_HEVC_Main_AutoLevel),
+            "ProfileLevel must be HEVC Main AutoLevel"
+        )
 
         let settings = makeSettings()
 
-        let averageBitRate = try #require(props[kVTCompressionPropertyKey_AverageBitRate as String],
-            "AverageBitRate must be applied to the session")
-        #expect(CFEqual(averageBitRate, settings.averageBitRate as CFNumber),
-            "AverageBitRate must match the resolved settings value")
+        let averageBitRate = try #require(
+            props[kVTCompressionPropertyKey_AverageBitRate as String],
+            "AverageBitRate must be applied to the session"
+        )
+        #expect(
+            CFEqual(averageBitRate, settings.averageBitRate as CFNumber),
+            "AverageBitRate must match the resolved settings value"
+        )
 
-        let maxKFI = try #require(props[kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration as String],
-            "MaxKeyFrameIntervalDuration must be applied to the session")
-        #expect(CFEqual(maxKFI, settings.maxKeyFrameIntervalDurationSeconds as CFNumber),
-            "MaxKeyFrameIntervalDuration must match the resolved settings value")
+        let maxKFI = try #require(
+            props[kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration as String],
+            "MaxKeyFrameIntervalDuration must be applied to the session"
+        )
+        #expect(
+            CFEqual(maxKFI, settings.maxKeyFrameIntervalDurationSeconds as CFNumber),
+            "MaxKeyFrameIntervalDuration must match the resolved settings value"
+        )
     }
 
     // MARK: - R2: emitted EncodedSample carries the anchored PTS end-to-end
@@ -709,8 +714,8 @@ private func makeGradientPixelBuffer(width: Int, height: Int) -> CVPixelBuffer {
         let lumaHeight = CVPixelBufferGetHeightOfPlane(buffer, 0)
         let lumaWidth = CVPixelBufferGetWidthOfPlane(buffer, 0)
         let ptr = lumaBase.assumingMemoryBound(to: UInt8.self)
-        for row in 0 ..< lumaHeight {
-            for col in 0 ..< lumaWidth {
+        for row in 0..<lumaHeight {
+            for col in 0..<lumaWidth {
                 ptr[row * bytesPerRow + col] = UInt8((col * 255) / max(lumaWidth, 1))
             }
         }
@@ -719,8 +724,8 @@ private func makeGradientPixelBuffer(width: Int, height: Int) -> CVPixelBuffer {
         let bytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(buffer, 1)
         let chromaHeight = CVPixelBufferGetHeightOfPlane(buffer, 1)
         let ptr = chromaBase.assumingMemoryBound(to: UInt8.self)
-        for row in 0 ..< chromaHeight {
-            for col in 0 ..< bytesPerRow {
+        for row in 0..<chromaHeight {
+            for col in 0..<bytesPerRow {
                 ptr[row * bytesPerRow + col] = 128
             }
         }
@@ -760,7 +765,7 @@ struct VideoEncoderLiveTests {
         }
 
         // Feed a handful of synthetic gradient frames on the grid.
-        for slot in 0 ..< 10 {
+        for slot in 0..<10 {
             let slotOffset = CMTimeMake(value: CMTimeValue(slot), timescale: Int32(testFps))
             let frame = VideoFrame(
                 pixelBuffer: makeGradientPixelBuffer(width: Int(testWidth), height: Int(testHeight)),

@@ -1,16 +1,3 @@
-// VideoEncoder+LiveSession.swift
-// Onset
-//
-// U3 of #31 — the production `CompressionSession` backed by a real `VTCompressionSession`.
-//
-// Split out of VideoEncoder.swift to keep each file within the project's length limit and to
-// isolate the impure VideoToolbox C-interop (session create, encode, property copy) behind the
-// `CompressionSession` seam declared in VideoEncoder.swift. The actor never touches a
-// `VTCompressionSessionRef` directly — only this wrapper does, and only on the actor.
-//
-// Memory safety: all VideoToolbox / CoreMedia C-interop is wrapped in `unsafe` under
-// `SWIFT_STRICT_MEMORY_SAFETY = YES`, mirroring CapabilityProbe.swift.
-
 import CoreMedia
 import CoreVideo
 import Foundation
@@ -50,9 +37,11 @@ nonisolated final class LiveCompressionSession: CompressionSession, @unchecked S
         category: "VideoEncoder.Session"
     )
 
+    // swiftformat:disable unusedArguments
     /// The C output callback. Non-capturing (a C function pointer captures nothing): it
     /// recovers the sink from the refcon and yields any successfully compressed buffer.
     private static let outputCallback: VTCompressionOutputCallback = { refcon, _, status, infoFlags, sampleBuffer in
+        // swiftformat:enable unusedArguments
         guard let refcon = unsafe refcon else { return }
         // Recover the sink WITHOUT consuming a retain (passUnretained on the create side).
         let sink = unsafe Unmanaged<EncodedSampleSink>.fromOpaque(refcon).takeUnretainedValue()

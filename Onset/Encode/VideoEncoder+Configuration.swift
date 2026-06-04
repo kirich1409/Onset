@@ -1,15 +1,3 @@
-// VideoEncoder+Configuration.swift
-// Onset
-//
-// U3 of #31 — encoder session-property configuration, split out of VideoEncoder.swift to keep
-// that file within the project's length limit (matching the CameraSource+SessionSetup.swift
-// pattern). Maps the pure U1 `VTEncoderSettings` to VideoToolbox property keys.
-//
-// Methods are actor-isolated (default isolation under SWIFT_DEFAULT_ACTOR_ISOLATION =
-// MainActor is overridden by the `actor` declaration) and `internal` rather than `private`
-// because they live in a separate file from the primary `actor VideoEncoder` body; the
-// project uses the same convention for CameraSource's session-setup extension.
-
 import CoreMedia
 import os
 import VideoToolbox
@@ -67,17 +55,14 @@ extension VideoEncoder {
     func setColor(_ session: any CompressionSession) throws {
         // The pure enums only model Rec.709 today; map each to its CMFormatDescription
         // constant. A `switch` keeps the mapping exhaustive if more cases are added later.
-        let primaries: CFString
-        switch self.settings.colorPrimaries {
-        case .rec709: primaries = kCMFormatDescriptionColorPrimaries_ITU_R_709_2
+        let primaries: CFString = switch self.settings.colorPrimaries {
+        case .rec709: kCMFormatDescriptionColorPrimaries_ITU_R_709_2
         }
-        let transfer: CFString
-        switch self.settings.transferFunction {
-        case .rec709: transfer = kCMFormatDescriptionTransferFunction_ITU_R_709_2
+        let transfer: CFString = switch self.settings.transferFunction {
+        case .rec709: kCMFormatDescriptionTransferFunction_ITU_R_709_2
         }
-        let matrix: CFString
-        switch self.settings.yCbCrMatrix {
-        case .rec709: matrix = kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2
+        let matrix: CFString = switch self.settings.yCbCrMatrix {
+        case .rec709: kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2
         }
 
         try self.setRequired(session, kVTCompressionPropertyKey_ColorPrimaries, primaries)

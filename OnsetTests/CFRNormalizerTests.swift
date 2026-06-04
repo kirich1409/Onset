@@ -20,14 +20,14 @@ import Testing
 @Suite("CFRNormalizer — even cadence")
 struct CFRNormalizerEvenCadenceTests {
     // Anchor at t=10s; 30fps → slot width = 1/30 s.
-    private let anchor: Double = 10.0
+    private let anchor = 10.0
     private let fps = 30
 
     @Test("frame exactly on slot 0 snaps to slot 0, no drops")
     func frameOnSlot0() {
         var norm = CFRNormalizer()
-        let pts = anchor // slot 0
-        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: anchor, fps: fps)
+        let pts = self.anchor // slot 0
+        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: self.anchor, fps: self.fps)
         #expect(decision == .encode(slotIndex: 0, snappedPTS: 0.0, isHold: false))
         #expect(norm.cfrNormalizationDrops == 0)
         #expect(norm.lastEmittedSlot == 0)
@@ -36,10 +36,10 @@ struct CFRNormalizerEvenCadenceTests {
     @Test("frames on consecutive grid points each produce encode, no drops")
     func consecutiveGridFrames_noDrops() {
         var norm = CFRNormalizer()
-        for idx in 0 ..< 5 {
-            let pts = anchor + Double(idx) / Double(fps)
-            let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: anchor, fps: fps)
-            let expected = CFRDecision.encode(slotIndex: idx, snappedPTS: Double(idx) / Double(fps), isHold: false)
+        for idx in 0..<5 {
+            let pts = self.anchor + Double(idx) / Double(self.fps)
+            let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: self.anchor, fps: self.fps)
+            let expected = CFRDecision.encode(slotIndex: idx, snappedPTS: Double(idx) / Double(self.fps), isHold: false)
             #expect(decision == expected)
         }
         #expect(norm.cfrNormalizationDrops == 0)
@@ -50,11 +50,11 @@ struct CFRNormalizerEvenCadenceTests {
     func snappedPTSMatchesGrid() {
         var norm = CFRNormalizer()
         let slot = 3
-        let pts = anchor + Double(slot) / Double(fps)
-        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: anchor, fps: fps)
+        let pts = self.anchor + Double(slot) / Double(self.fps)
+        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: self.anchor, fps: self.fps)
         if case let .encode(slotIndex, snappedPTS, isHold) = decision {
             #expect(slotIndex == slot)
-            #expect(snappedPTS == Double(slot) / Double(fps))
+            #expect(snappedPTS == Double(slot) / Double(self.fps))
             #expect(!isHold)
         } else {
             Issue.record("Expected .encode, got \(decision)")
@@ -66,7 +66,7 @@ struct CFRNormalizerEvenCadenceTests {
 
 @Suite("CFRNormalizer — hold (skipped slot)")
 struct CFRNormalizerHoldTests {
-    private let anchor: Double = 0.0
+    private let anchor = 0.0
     private let fps = 30
 
     @Test("tick for a gap slot emits encode(isHold:true), no drop increment")
@@ -74,11 +74,11 @@ struct CFRNormalizerHoldTests {
         var norm = CFRNormalizer()
 
         // Establish slot 0 via a real frame
-        _ = norm.processFrame(ptsSeconds: anchor, anchorSeconds: anchor, fps: fps)
+        _ = norm.processFrame(ptsSeconds: self.anchor, anchorSeconds: self.anchor, fps: self.fps)
 
         // Slot 1 has no frame — clock drives a tick
-        let decision = norm.processTick(slotIndex: 1, fps: fps)
-        #expect(decision == .encode(slotIndex: 1, snappedPTS: 1.0 / Double(fps), isHold: true))
+        let decision = norm.processTick(slotIndex: 1, fps: self.fps)
+        #expect(decision == .encode(slotIndex: 1, snappedPTS: 1.0 / Double(self.fps), isHold: true))
         #expect(norm.cfrNormalizationDrops == 0)
         #expect(norm.lastEmittedSlot == 1)
     }
@@ -86,20 +86,20 @@ struct CFRNormalizerHoldTests {
     @Test("hold does NOT increment cfrNormalizationDrops")
     func hold_doesNotIncrementDropCounter() {
         var norm = CFRNormalizer()
-        _ = norm.processFrame(ptsSeconds: anchor, anchorSeconds: anchor, fps: fps)
-        _ = norm.processTick(slotIndex: 1, fps: fps)
-        _ = norm.processTick(slotIndex: 2, fps: fps)
+        _ = norm.processFrame(ptsSeconds: self.anchor, anchorSeconds: self.anchor, fps: self.fps)
+        _ = norm.processTick(slotIndex: 1, fps: self.fps)
+        _ = norm.processTick(slotIndex: 2, fps: self.fps)
         #expect(norm.cfrNormalizationDrops == 0)
     }
 
     @Test("after hold, next real frame continues from next slot")
     func afterHold_nextFrameEncodesCorrectly() {
         var norm = CFRNormalizer()
-        _ = norm.processFrame(ptsSeconds: anchor, anchorSeconds: anchor, fps: fps) // slot 0
-        _ = norm.processTick(slotIndex: 1, fps: fps)                               // hold slot 1
-        let pts2 = anchor + 2.0 / Double(fps)
-        let decision = norm.processFrame(ptsSeconds: pts2, anchorSeconds: anchor, fps: fps)
-        #expect(decision == .encode(slotIndex: 2, snappedPTS: 2.0 / Double(fps), isHold: false))
+        _ = norm.processFrame(ptsSeconds: self.anchor, anchorSeconds: self.anchor, fps: self.fps) // slot 0
+        _ = norm.processTick(slotIndex: 1, fps: self.fps) // hold slot 1
+        let pts2 = self.anchor + 2.0 / Double(self.fps)
+        let decision = norm.processFrame(ptsSeconds: pts2, anchorSeconds: self.anchor, fps: self.fps)
+        #expect(decision == .encode(slotIndex: 2, snappedPTS: 2.0 / Double(self.fps), isHold: false))
         #expect(norm.cfrNormalizationDrops == 0)
     }
 }
@@ -108,15 +108,15 @@ struct CFRNormalizerHoldTests {
 
 @Suite("CFRNormalizer — duplicate slot drop")
 struct CFRNormalizerDuplicateDropTests {
-    private let anchor: Double = 0.0
+    private let anchor = 0.0
     private let fps = 30
 
     @Test("second frame in the same slot produces drop(.cfrNormalizationDrops)")
     func secondFrameInSameSlot_isDrop() {
         var norm = CFRNormalizer()
-        let pts = anchor // slot 0
-        _ = norm.processFrame(ptsSeconds: pts, anchorSeconds: anchor, fps: fps) // first: encode
-        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: anchor, fps: fps) // second: drop
+        let pts = self.anchor // slot 0
+        _ = norm.processFrame(ptsSeconds: pts, anchorSeconds: self.anchor, fps: self.fps) // first: encode
+        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: self.anchor, fps: self.fps) // second: drop
         #expect(decision == .drop(reason: .cfrNormalizationDrops))
         #expect(norm.cfrNormalizationDrops == 1)
     }
@@ -127,9 +127,9 @@ struct CFRNormalizerDuplicateDropTests {
         // Here we verify the normalizer itself does not set any backpressure state —
         // cfrNormalizationDrops is the only counter the normalizer owns.
         var norm = CFRNormalizer()
-        _ = norm.processFrame(ptsSeconds: anchor, anchorSeconds: anchor, fps: fps)
-        _ = norm.processFrame(ptsSeconds: anchor, anchorSeconds: anchor, fps: fps)
-        _ = norm.processFrame(ptsSeconds: anchor, anchorSeconds: anchor, fps: fps)
+        _ = norm.processFrame(ptsSeconds: self.anchor, anchorSeconds: self.anchor, fps: self.fps)
+        _ = norm.processFrame(ptsSeconds: self.anchor, anchorSeconds: self.anchor, fps: self.fps)
+        _ = norm.processFrame(ptsSeconds: self.anchor, anchorSeconds: self.anchor, fps: self.fps)
         #expect(norm.cfrNormalizationDrops == 2)
         // The normalizer has no backpressure counter — the test asserts by exhaustion
         // (only cfrNormalizationDrops exists as a counter property).
@@ -139,11 +139,11 @@ struct CFRNormalizerDuplicateDropTests {
     func frameMappingToAlreadyEmittedSlot_isDropped() {
         var norm = CFRNormalizer()
         // Emit slot 2 first (via a frame slightly ahead)
-        let pts2 = anchor + 2.0 / Double(fps)
-        _ = norm.processFrame(ptsSeconds: pts2, anchorSeconds: anchor, fps: fps)
+        let pts2 = self.anchor + 2.0 / Double(self.fps)
+        _ = norm.processFrame(ptsSeconds: pts2, anchorSeconds: self.anchor, fps: self.fps)
         // Now a frame that maps to slot 1 arrives (out of order)
-        let pts1 = anchor + 1.0 / Double(fps)
-        let decision = norm.processFrame(ptsSeconds: pts1, anchorSeconds: anchor, fps: fps)
+        let pts1 = self.anchor + 1.0 / Double(self.fps)
+        let decision = norm.processFrame(ptsSeconds: pts1, anchorSeconds: self.anchor, fps: self.fps)
         #expect(decision == .drop(reason: .cfrNormalizationDrops))
         #expect(norm.cfrNormalizationDrops == 1)
         #expect(norm.lastEmittedSlot == 2) // unchanged
@@ -154,7 +154,7 @@ struct CFRNormalizerDuplicateDropTests {
 
 @Suite("CFRNormalizer — jitter")
 struct CFRNormalizerJitterTests {
-    private let anchor: Double = 0.0
+    private let anchor = 0.0
     private let fps = 30
 
     @Test("frame slightly before slot boundary snaps to nearest slot")
@@ -162,8 +162,8 @@ struct CFRNormalizerJitterTests {
         var norm = CFRNormalizer()
         // Slot 1 centre = 1/30 s ≈ 0.03333s. A frame at 0.030s is 0.003s before centre,
         // still closer to slot 1 than slot 0.
-        let pts = anchor + 1.0 / Double(fps) - 0.003
-        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: anchor, fps: fps)
+        let pts = self.anchor + 1.0 / Double(self.fps) - 0.003
+        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: self.anchor, fps: self.fps)
         if case let .encode(slotIndex, _, _) = decision {
             #expect(slotIndex == 1)
         } else {
@@ -175,8 +175,8 @@ struct CFRNormalizerJitterTests {
     func frameAfterSlotBoundary_snapsToNearestSlot() {
         var norm = CFRNormalizer()
         // Slot 1 centre = 1/30s. A frame at 1/30s + 0.003s is closer to slot 1 than slot 2.
-        let pts = anchor + 1.0 / Double(fps) + 0.003
-        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: anchor, fps: fps)
+        let pts = self.anchor + 1.0 / Double(self.fps) + 0.003
+        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: self.anchor, fps: self.fps)
         if case let .encode(slotIndex, _, _) = decision {
             #expect(slotIndex == 1)
         } else {
@@ -189,8 +189,8 @@ struct CFRNormalizerJitterTests {
         var norm = CFRNormalizer()
         // Midpoint between slot 0 and slot 1 = 0.5/fps.
         // Swift's `rounded()` uses .toNearestOrAwayFromZero; 0.5 → 1.
-        let pts = anchor + 0.5 / Double(fps)
-        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: anchor, fps: fps)
+        let pts = self.anchor + 0.5 / Double(self.fps)
+        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: self.anchor, fps: self.fps)
         if case let .encode(slotIndex, _, _) = decision {
             // Either 0 or 1 is acceptable depending on rounding mode;
             // verify it is one of the two adjacent slots.
@@ -205,14 +205,14 @@ struct CFRNormalizerJitterTests {
 
 @Suite("CFRNormalizer — pre-T0 guard")
 struct CFRNormalizerPreAnchorTests {
-    private let anchor: Double = 10.0
+    private let anchor = 10.0
     private let fps = 30
 
     @Test("frame before anchor produces drop(.preAnchor), no slot emitted")
     func frameBefore_anchor_isDropped() {
         var norm = CFRNormalizer()
-        let pts = anchor - 0.5 // 0.5s before T0
-        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: anchor, fps: fps)
+        let pts = self.anchor - 0.5 // 0.5s before T0
+        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: self.anchor, fps: self.fps)
         #expect(decision == .drop(reason: .preAnchor))
         #expect(norm.lastEmittedSlot == -1) // no slot emitted
         #expect(norm.cfrNormalizationDrops == 0)
@@ -223,26 +223,26 @@ struct CFRNormalizerPreAnchorTests {
     @Test("frame within half a slot before anchor snaps to slot 0")
     func frameWithinHalfSlot_beforeAnchor_snapsToSlot0() {
         var norm = CFRNormalizer()
-        let pts = anchor - 0.001 // 1 ms before anchor; well within the 16.67 ms half-slot at 30 fps
-        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: anchor, fps: fps)
+        let pts = self.anchor - 0.001 // 1 ms before anchor; well within the 16.67 ms half-slot at 30 fps
+        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: self.anchor, fps: self.fps)
         #expect(decision == .encode(slotIndex: 0, snappedPTS: 0.0, isHold: false))
     }
 
-    // A frame more than half a slot before the anchor computes slotIndex ≤ -1 and must be dropped.
-    // At 30 fps one slot is ~33.33 ms; one full frame duration before anchor → slotIndex = round(-1.0) = -1 → drop.
+    /// A frame more than half a slot before the anchor computes slotIndex ≤ -1 and must be dropped.
+    /// At 30 fps one slot is ~33.33 ms; one full frame duration before anchor → slotIndex = round(-1.0) = -1 → drop.
     @Test("frame more than half a slot before anchor is dropped")
     func frameMoreThanHalfSlot_beforeAnchor_isDropped() {
         var norm = CFRNormalizer()
-        let frameDuration = 1.0 / Double(fps) // ~33.33 ms at 30 fps
-        let pts = anchor - frameDuration // exactly one frame before anchor → slotIndex = -1
-        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: anchor, fps: fps)
+        let frameDuration = 1.0 / Double(self.fps) // ~33.33 ms at 30 fps
+        let pts = self.anchor - frameDuration // exactly one frame before anchor → slotIndex = -1
+        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: self.anchor, fps: self.fps)
         #expect(decision == .drop(reason: .preAnchor))
     }
 
     @Test("frame exactly at anchor maps to slot 0")
     func frameAt_anchor_isSlot0() {
         var norm = CFRNormalizer()
-        let decision = norm.processFrame(ptsSeconds: anchor, anchorSeconds: anchor, fps: fps)
+        let decision = norm.processFrame(ptsSeconds: self.anchor, anchorSeconds: self.anchor, fps: self.fps)
         #expect(decision == .encode(slotIndex: 0, snappedPTS: 0.0, isHold: false))
     }
 }
@@ -251,19 +251,19 @@ struct CFRNormalizerPreAnchorTests {
 
 @Suite("CFRNormalizer — slot monotonicity")
 struct CFRNormalizerMonotonicityTests {
-    private let anchor: Double = 0.0
+    private let anchor = 0.0
     private let fps = 30
 
     @Test("out-of-order frame with earlier slot index is dropped")
     func outOfOrder_earlierSlot_isDropped() {
         var norm = CFRNormalizer()
         // Process slot 5 first
-        let pts5 = anchor + 5.0 / Double(fps)
-        _ = norm.processFrame(ptsSeconds: pts5, anchorSeconds: anchor, fps: fps)
+        let pts5 = self.anchor + 5.0 / Double(self.fps)
+        _ = norm.processFrame(ptsSeconds: pts5, anchorSeconds: self.anchor, fps: self.fps)
 
         // Now an earlier-slot frame arrives (slot 3)
-        let pts3 = anchor + 3.0 / Double(fps)
-        let decision = norm.processFrame(ptsSeconds: pts3, anchorSeconds: anchor, fps: fps)
+        let pts3 = self.anchor + 3.0 / Double(self.fps)
+        let decision = norm.processFrame(ptsSeconds: pts3, anchorSeconds: self.anchor, fps: self.fps)
         #expect(decision == .drop(reason: .cfrNormalizationDrops))
         #expect(norm.lastEmittedSlot == 5) // did not go backwards
     }
@@ -274,15 +274,15 @@ struct CFRNormalizerMonotonicityTests {
         var previousSlot = -1
 
         let ptsList: [Double] = [
-            anchor + 0.0 / Double(fps),
-            anchor + 1.0 / Double(fps),
-            anchor + 3.0 / Double(fps), // skip slot 2
-            anchor + 2.0 / Double(fps), // out-of-order slot 2 → drop
-            anchor + 4.0 / Double(fps),
+            anchor + 0.0 / Double(self.fps),
+            self.anchor + 1.0 / Double(self.fps),
+            self.anchor + 3.0 / Double(self.fps), // skip slot 2
+            self.anchor + 2.0 / Double(self.fps), // out-of-order slot 2 → drop
+            self.anchor + 4.0 / Double(self.fps),
         ]
 
         for pts in ptsList {
-            let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: anchor, fps: fps)
+            let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: self.anchor, fps: self.fps)
             if case .encode = decision {
                 #expect(norm.lastEmittedSlot > previousSlot)
                 previousSlot = norm.lastEmittedSlot
@@ -295,9 +295,9 @@ struct CFRNormalizerMonotonicityTests {
     @Test("emitting a slot equal to the last emitted slot is not permitted")
     func sameSlot_isDropped() {
         var norm = CFRNormalizer()
-        let pts = anchor // slot 0
-        _ = norm.processFrame(ptsSeconds: pts, anchorSeconds: anchor, fps: fps)
-        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: anchor, fps: fps)
+        let pts = self.anchor // slot 0
+        _ = norm.processFrame(ptsSeconds: pts, anchorSeconds: self.anchor, fps: self.fps)
+        let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: self.anchor, fps: self.fps)
         #expect(decision == .drop(reason: .cfrNormalizationDrops))
     }
 }

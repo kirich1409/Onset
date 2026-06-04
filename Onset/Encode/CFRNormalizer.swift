@@ -48,7 +48,7 @@ import os.log
 /// NOTE for the orchestrator: if the team wants a unified `DropReason` enum covering
 /// `.preAnchor`, the correct change is to extend the shared type in PipelineTypes.swift
 /// (Wave-0 file) in a separate task and re-export it here.
-nonisolated enum CFRDropReason: Equatable, Sendable {
+nonisolated enum CFRDropReason: Equatable {
     /// The frame's PTS is before the session anchor (T0). The normalizer has no valid
     /// slot for it. This should rarely occur in steady state — the source layer gates
     /// pre-T0 frames via `shouldKeepCameraFrame` / `shouldKeepScreenFrame`. The guard
@@ -94,7 +94,7 @@ extension CFRDropReason {
 /// // U3 (actor) — exact reconstruction, no Double round-trip:
 /// let cmPTS = CMTime(value: CMTimeValue(slotIndex), timescale: CMTimeScale(fps))
 /// ```
-nonisolated enum CFRDecision: Equatable, Sendable {
+nonisolated enum CFRDecision: Equatable {
     /// The normalizer approves this slot for encoding.
     ///
     /// - Parameters:
@@ -170,7 +170,7 @@ extension CFRDecision {
 /// `cfrNormalizationDrops` counts frames dropped by the normalizer for the duplicate-slot
 /// reason. It is intentionally separate from any backpressure counter; U3 reads this to
 /// populate the shared `DropMonitor` counter for `DropReason.cfrNormalizationDrops`.
-nonisolated struct CFRNormalizer: Sendable {
+nonisolated struct CFRNormalizer {
     // MARK: - State
 
     /// The last slot index that was emitted via `encode`. Initialised to `-1` so the
@@ -183,7 +183,7 @@ nonisolated struct CFRNormalizer: Sendable {
     /// or pre-T0 drops. U3 reads this to populate `DropMonitor`'s counter for
     /// `DropReason.cfrNormalizationDrops`. Must remain observably separate from any
     /// encoder-backpressure counter.
-    private(set) nonisolated var cfrNormalizationDrops: Int = 0
+    private(set) nonisolated var cfrNormalizationDrops = 0
 
     // MARK: - Frame processing
 
@@ -204,7 +204,8 @@ nonisolated struct CFRNormalizer: Sendable {
         ptsSeconds: Double,
         anchorSeconds: Double,
         fps: Int
-    ) -> CFRDecision {
+    )
+    -> CFRDecision {
         precondition(fps > 0, "fps must be positive")
 
         let offset = ptsSeconds - anchorSeconds
@@ -214,12 +215,12 @@ nonisolated struct CFRNormalizer: Sendable {
             return .drop(reason: .preAnchor)
         }
 
-        if slotIndex <= lastEmittedSlot {
-            cfrNormalizationDrops += 1
+        if slotIndex <= self.lastEmittedSlot {
+            self.cfrNormalizationDrops += 1
             return .drop(reason: .cfrNormalizationDrops)
         }
 
-        lastEmittedSlot = slotIndex
+        self.lastEmittedSlot = slotIndex
         let snappedPTS = Double(slotIndex) / Double(fps)
         return .encode(slotIndex: slotIndex, snappedPTS: snappedPTS, isHold: false)
     }
@@ -243,17 +244,18 @@ nonisolated struct CFRNormalizer: Sendable {
     nonisolated mutating func processTick(
         slotIndex: Int,
         fps: Int
-    ) -> CFRDecision {
+    )
+    -> CFRDecision {
         precondition(fps > 0, "fps must be positive")
 
-        if slotIndex <= lastEmittedSlot {
+        if slotIndex <= self.lastEmittedSlot {
             // Defensive: tick for a past slot — treated as duplicate, not a hold.
             // This path should not occur under correct U3 driving.
-            cfrNormalizationDrops += 1
+            self.cfrNormalizationDrops += 1
             return .drop(reason: .cfrNormalizationDrops)
         }
 
-        lastEmittedSlot = slotIndex
+        self.lastEmittedSlot = slotIndex
         let snappedPTS = Double(slotIndex) / Double(fps)
         return .encode(slotIndex: slotIndex, snappedPTS: snappedPTS, isHold: true)
     }

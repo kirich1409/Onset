@@ -92,7 +92,8 @@ actor VideoEncoder {
         _ width: Int32,
         _ height: Int32,
         _ sink: EncodedSampleSink
-    ) throws -> any CompressionSession
+    ) throws
+        -> any CompressionSession
 
     // MARK: - Stored state
 
@@ -113,7 +114,7 @@ actor VideoEncoder {
     /// also used by tests to drive `tick`/`clockTick`/`ingest` deterministically.
     private let selfClocked: Bool
 
-    // `internal` (not `private`): the VideoEncoder+Configuration.swift extension uses it.
+    /// `internal` (not `private`): the VideoEncoder+Configuration.swift extension uses it.
     nonisolated let logger = Logger(
         subsystem: "dev.androidbroadcast.Onset",
         category: "VideoEncoder"
@@ -217,15 +218,21 @@ actor VideoEncoder {
     // MARK: - Test / observation accessors
 
     /// Normalizer-owned duplicate-slot drop count (`DropReason.cfrNormalizationDrops`).
-    var cfrNormalizationDropCount: Int { self.normalizer.cfrNormalizationDrops }
+    var cfrNormalizationDropCount: Int {
+        self.normalizer.cfrNormalizationDrops
+    }
 
     /// Encoder-backpressure drop count (`DropReason.encoderBackpressureDrops`). Separate
     /// from `cfrNormalizationDropCount`.
-    var backpressureDropCount: Int { self.encoderBackpressureDrops }
+    var backpressureDropCount: Int {
+        self.encoderBackpressureDrops
+    }
 
     /// Whether the active session uses a hardware encoder (false when not started).
     /// Drives the L5 HW assertion.
-    var isUsingHardwareEncoder: Bool { self.session?.usingHardwareEncoder() ?? false }
+    var isUsingHardwareEncoder: Bool {
+        self.session?.usingHardwareEncoder() ?? false
+    }
 
     // MARK: - Lifecycle
 
