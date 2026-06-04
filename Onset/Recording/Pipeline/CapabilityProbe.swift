@@ -56,23 +56,6 @@ extension ProbeResult: Equatable {
     }
 }
 
-// MARK: - HEVCProfileLevel + VideoToolbox mapping
-
-/// Maps the pure-Swift `HEVCProfileLevel` to the VideoToolbox `CFString` constant.
-///
-/// Declared in the impure encoder layer (CapabilityProbe.swift) rather than
-/// RecordingPolicyTypes.swift, which deliberately defers the VT-constant mapping to
-/// here (see "Known Unknown" in the spec Open Questions).
-extension HEVCProfileLevel {
-    /// The corresponding `kVTProfileLevel_HEVC_*` constant for `VTSessionSetProperty`.
-    nonisolated fileprivate var vtProfileLevel: CFString {
-        switch self {
-        case .mainAutoLevel:
-            kVTProfileLevel_HEVC_Main_AutoLevel
-        }
-    }
-}
-
 // MARK: - CapabilityProbe
 
 /// Impure pre-flight probe: verifies hardware HEVC availability and budget fitness.
