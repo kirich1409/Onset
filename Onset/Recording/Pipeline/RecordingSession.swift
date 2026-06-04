@@ -84,7 +84,6 @@ actor RecordingSession {
     private var dropMonitor: DropMonitor?
 
     private var hasStarted = false
-    private var hasStopped = false
     private var cachedStopResult: RecordingResult?
 
     // MARK: - Init
@@ -476,7 +475,6 @@ actor RecordingSession {
     func stop() async -> RecordingResult {
         // Idempotency guard: a second call returns the result from the first (AC-9).
         if let cached = self.cachedStopResult { return cached }
-        self.hasStopped = true
 
         // Stop both video pipelines in the correct order (sources → encoders → routing joined).
         for kind in [RecordingPipelineKind.screen, .camera] {

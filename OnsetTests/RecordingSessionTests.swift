@@ -356,6 +356,70 @@ private enum SessionFixtures {
         guard status == noErr, let buffer else { throw SessionTestError.failed(status) }
         return EncodedSample(sampleBuffer: buffer, ptsHostTime: pts, isKeyframe: true)
     }
+
+    /// Builds a minimal PCM AudioSample (4 silent frames, 48 kHz, mono).
+    static func audioSample(ptsSeconds: Double) throws -> AudioSample {
+        let pts = CMTime(seconds: ptsSeconds, preferredTimescale: 600)
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: 48000,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 2,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 2,
+            mChannelsPerFrame: 1,
+            mBitsPerChannel: 16,
+            mReserved: 0
+        )
+        var format: CMAudioFormatDescription?
+        let fmtStatus = CMAudioFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            asbd: &asbd,
+            layoutSize: 0,
+            layout: nil,
+            magicCookieSize: 0,
+            magicCookie: nil,
+            extensions: nil,
+            formatDescriptionOut: &format
+        )
+        guard fmtStatus == noErr, let format else { throw SessionTestError.failed(fmtStatus) }
+        let dataLength = 4 * 2 // 4 frames × 2 bytes/frame
+        var blockBuffer: CMBlockBuffer?
+        let blockStatus = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: dataLength,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: dataLength,
+            flags: kCMBlockBufferAssureMemoryNowFlag,
+            blockBufferOut: &blockBuffer
+        )
+        guard blockStatus == kCMBlockBufferNoErr, let blockBuffer else {
+            throw SessionTestError.failed(blockStatus)
+        }
+        CMBlockBufferFillDataBytes(with: 0, blockBuffer: blockBuffer, offsetIntoDestination: 0, dataLength: dataLength)
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: 48000),
+            presentationTimeStamp: pts,
+            decodeTimeStamp: .invalid
+        )
+        var sampleBuffer: CMSampleBuffer?
+        let status = CMSampleBufferCreateReady(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: blockBuffer,
+            formatDescription: format,
+            sampleCount: 4,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleSizeEntryCount: 1,
+            sampleSizeArray: [2],
+            sampleBufferOut: &sampleBuffer
+        )
+        guard status == noErr, let sampleBuffer else { throw SessionTestError.failed(status) }
+        return AudioSample(sampleBuffer: sampleBuffer, ptsHostTime: pts)
+    }
 }
 
 private enum SessionTestError: Error {
@@ -660,6 +724,13 @@ struct RecordingSessionRevokeTests {
         try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
         _ = await eventually { writers.bothWritersCreated }
 
+        // T2 setup: emit mic audio BEFORE disconnect so we can verify the count stops growing.
+        // The audio pipeline routes mic → screen writer; wait until the screen writer sees it.
+        let micAudio = try SessionFixtures.audioSample(ptsSeconds: 1.5)
+        sources.cameraSource.emitAudio(micAudio)
+        _ = await eventually { writers.screenWriter.appendedAudio > 0 }
+        let audioBeforeDisconnect = writers.screenWriter.appendedAudio
+
         // Camera disconnects → camera pipeline finalised; the mic stream (riding the camera) ends.
         sources.cameraSource.emitEvent(.cameraDisconnected)
 
@@ -675,16 +746,14 @@ struct RecordingSessionRevokeTests {
         let screenGotMore = await eventually { writers.screenWriter.appendedVideo > beforeScreenVideo }
         #expect(screenGotMore, "screen writer must still receive video after camera revoke")
 
-        // T2: screen audio must NOT grow after camera disconnect. Settle by waiting for the screen
-        // video frame above to be processed (which proves all pipeline events are ordered past the
-        // disconnect), then assert the audio count is unchanged.
-        let audioCountAfterDisconnect = writers.screenWriter.appendedAudio
-        // Emit one more screen frame and wait for it — this is the settle point.
+        // T2: screen audio must NOT grow after camera disconnect. Settle on a second screen video
+        // frame — this proves all pipeline events including the disconnect are ordered past the
+        // settle point — then assert the audio count is unchanged.
         let beforeSecondFrame = writers.screenWriter.appendedVideo
         try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 3.0))
         _ = await eventually { writers.screenWriter.appendedVideo > beforeSecondFrame }
         #expect(
-            writers.screenWriter.appendedAudio == audioCountAfterDisconnect,
+            writers.screenWriter.appendedAudio == audioBeforeDisconnect,
             "screen writer must not receive audio after camera (mic) disconnect (AC-12)"
         )
 
