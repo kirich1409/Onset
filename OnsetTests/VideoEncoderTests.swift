@@ -92,6 +92,15 @@ private func makePixelBuffer(width: Int = 16, height: Int = 16) -> CVPixelBuffer
 /// Records every `encodeFrame` PTS and pixel-buffer reference; lets a test force a given
 /// `pendingFrameCount` (backpressure) and a `kVTPropertyNotSupportedErr` for a chosen
 /// property key (DataRateLimits fallback).
+///
+/// R1 — `appliedProperties`: every key that `setProperty` actually applied (i.e. was NOT in
+/// `unsupportedKeys`) is stored here, keyed by the CFString as a String. Tests that assert
+/// `configure()` applied its mandatory properties read this dict after `start()`.
+///
+/// R2 — `sink`: when set (by a test's inline factory), every successful `encodeFrame` call
+/// echoes a minimal `CMSampleBuffer` carrying the passed PTS back through the sink so that
+/// `encodedSamples` subscribers receive `EncodedSample` values. Existing tests leave `sink`
+/// nil (the factory `{ _, _, _ in mock }` discards the sink param) — behaviour unchanged.
 private final class MockCompressionSession: CompressionSession, @unchecked Sendable {
     /// PTS values handed to `encodeFrame`, in call order.
     private(set) var encodedPTS: [CMTime] = []
@@ -99,6 +108,9 @@ private final class MockCompressionSession: CompressionSession, @unchecked Senda
     private(set) var encodedBuffers: [CVPixelBuffer] = []
     /// Property keys whose `setProperty` should return `kVTPropertyNotSupportedErr`.
     var unsupportedKeys: Set<String> = []
+    /// Properties that `setProperty` actually applied — keyed by the CFString cast to String.
+    /// Populated only for keys that were NOT rejected via `unsupportedKeys`.
+    private(set) var appliedProperties: [String: CFTypeRef] = [:]
     /// Fixed pending-frame count reported to the backpressure gate.
     var pending = 0
     /// Status returned by `encodeFrame`. Default `noErr`; set to a failure status to exercise
@@ -108,6 +120,10 @@ private final class MockCompressionSession: CompressionSession, @unchecked Senda
     /// HW-encoder readback reported to the F6 start() guard. Default `true` so the routine L2
     /// tests start successfully; set `false` to exercise the HW-unavailable hard fail.
     var usingHardware = true
+    /// Optional sink for the R2 PTS end-to-end assertion. When non-nil, a successful
+    /// `encodeFrame` yields a minimal `CMSampleBuffer` (carrying `pts`) through the sink.
+    /// Nil by default so the 15 existing tests are unaffected.
+    var sink: EncodedSampleSink?
 
     nonisolated init() {}
 
@@ -115,6 +131,8 @@ private final class MockCompressionSession: CompressionSession, @unchecked Senda
         if self.unsupportedKeys.contains(key as String) {
             return kVTPropertyNotSupportedErr
         }
+        // R1: record every property that was successfully applied.
+        self.appliedProperties[key as String] = value
         return noErr
     }
 
@@ -124,6 +142,13 @@ private final class MockCompressionSession: CompressionSession, @unchecked Senda
         guard self.encodeStatus == noErr else { return self.encodeStatus }
         self.encodedPTS.append(pts)
         self.encodedBuffers.append(pixelBuffer)
+        // R2: if a sink was wired, echo the PTS back via a minimal CMSampleBuffer so the
+        // encoder's AsyncStream subscriber receives an EncodedSample with the anchored PTS.
+        if let sink {
+            if let buffer = makeSampleBuffer(pts: pts) {
+                sink.yield(sampleBuffer: buffer)
+            }
+        }
         return noErr
     }
 
@@ -131,6 +156,44 @@ private final class MockCompressionSession: CompressionSession, @unchecked Senda
     nonisolated func completeFrames() {}
     nonisolated func invalidate() {}
     nonisolated func usingHardwareEncoder() -> Bool { self.usingHardware }
+}
+
+/// Builds a minimal `CMSampleBuffer` carrying `pts` for the R2 PTS echo.
+///
+/// Uses a 16×16 HEVC format description and empty data so the buffer is valid without
+/// requiring real compressed bytes. `CMSampleBufferGetPresentationTimeStamp` returns the
+/// supplied `pts` unchanged — which is the only value the R2 assertion inspects.
+private func makeSampleBuffer(pts: CMTime) -> CMSampleBuffer? {
+    var formatDesc: CMVideoFormatDescription?
+    let descStatus = CMVideoFormatDescriptionCreate(
+        allocator: nil,
+        codecType: kCMVideoCodecType_HEVC,
+        width: 16,
+        height: 16,
+        extensions: nil,
+        formatDescriptionOut: &formatDesc
+    )
+    guard descStatus == noErr, let formatDesc else { return nil }
+
+    var timing = CMSampleTimingInfo(
+        duration: .invalid,
+        presentationTimeStamp: pts,
+        decodeTimeStamp: .invalid
+    )
+    var sample: CMSampleBuffer?
+    let status = CMSampleBufferCreateReady(
+        allocator: nil,
+        dataBuffer: nil,
+        formatDescription: formatDesc,
+        sampleCount: 1,
+        sampleTimingEntryCount: 1,
+        sampleTimingArray: &timing,
+        sampleSizeEntryCount: 0,
+        sampleSizeArray: nil,
+        sampleBufferOut: &sample
+    )
+    guard status == noErr else { return nil }
+    return sample
 }
 
 /// Convenience: build a `VideoEncoder` wired to a provided mock session.
@@ -532,6 +595,94 @@ struct VideoEncoderTests {
         #expect(mock.encodedPTS.isEmpty)
         #expect(await encoder.cfrNormalizationDropCount == 0)
         #expect(await encoder.backpressureDropCount == 0)
+    }
+
+    // MARK: - R1: configure() applies mandatory HEVC properties to the session
+
+    @Test("configure() applies RealTime / AllowFrameReordering / ProfileLevel / AverageBitRate / MaxKeyFrameIntervalDuration to the session")
+    func configure_appliesMandatoryHEVCProperties() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        try await encoder.start()
+
+        // All five mandatory properties must have been applied to the session.
+        // CFEqual avoids CFBoolean / CFNumber cast requirements; it is type-safe at CFTypeRef.
+        let props = mock.appliedProperties
+
+        let realTime = try #require(props[kVTCompressionPropertyKey_RealTime as String],
+            "RealTime must be applied to the session")
+        #expect(CFEqual(realTime, kCFBooleanTrue), "RealTime must be true (real-time encode)")
+
+        let allowReorder = try #require(props[kVTCompressionPropertyKey_AllowFrameReordering as String],
+            "AllowFrameReordering must be applied to the session")
+        #expect(CFEqual(allowReorder, kCFBooleanTrue), "AllowFrameReordering must be true (B-frames)")
+
+        let profileLevel = try #require(props[kVTCompressionPropertyKey_ProfileLevel as String],
+            "ProfileLevel must be applied to the session")
+        // Assert the literal VT constant so a change in settings default is caught early.
+        #expect(CFEqual(profileLevel, kVTProfileLevel_HEVC_Main_AutoLevel),
+            "ProfileLevel must be HEVC Main AutoLevel")
+
+        let settings = makeSettings()
+
+        let averageBitRate = try #require(props[kVTCompressionPropertyKey_AverageBitRate as String],
+            "AverageBitRate must be applied to the session")
+        #expect(CFEqual(averageBitRate, settings.averageBitRate as CFNumber),
+            "AverageBitRate must match the resolved settings value")
+
+        let maxKFI = try #require(props[kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration as String],
+            "MaxKeyFrameIntervalDuration must be applied to the session")
+        #expect(CFEqual(maxKFI, settings.maxKeyFrameIntervalDurationSeconds as CFNumber),
+            "MaxKeyFrameIntervalDuration must match the resolved settings value")
+    }
+
+    // MARK: - R2: emitted EncodedSample carries the anchored PTS end-to-end
+
+    @Test("EncodedSample.ptsHostTime carries the anchored PTS from encodeFrame to the subscriber")
+    func emittedSample_ptsHostTimeAnchored() async throws {
+        // L2 deterministic path: the mock echoes the PTS through the sink so the production
+        // EncodedSampleSink.yield → CMSampleBufferGetPresentationTimeStamp → continuation chain
+        // is exercised without hardware. Pins that configure+submit sets the PTS on the sample
+        // the consumer sees, not just on the buffer handed to encodeFrame.
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+
+        // Inline factory: captures `mock` AND wires the sink so the mock can echo samples.
+        let encoder = await VideoEncoder(
+            settings: makeSettings(),
+            width: testWidth,
+            height: testHeight,
+            fps: testFps,
+            anchor: anchor,
+            selfClocked: false
+        ) { _, _, sink in
+            mock.sink = sink
+            return mock
+        }
+
+        try await encoder.start()
+
+        // Subscribe before ingesting — the sample arrives asynchronously through the continuation.
+        let collector = Task { () -> EncodedSample? in
+            for await sample in await encoder.encodedSamples {
+                return sample // bounded: return on first sample
+            }
+            return nil
+        }
+
+        // Ingest slot 0: anchored PTS == anchor.anchorTime (slot 0 offset is zero).
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+        // stop() drains pending frames and finishes the stream so the collector terminates.
+        await encoder.stop()
+
+        let sample = try #require(await collector.value, "expected at least one EncodedSample")
+        // Slot 0: CMTimeAdd(anchor, 0/fps) == anchor.
+        let expectedPTS = anchor.anchorTime
+        #expect(
+            CMTimeCompare(sample.ptsHostTime, expectedPTS) == 0,
+            "EncodedSample.ptsHostTime must equal the anchored slot-0 PTS"
+        )
     }
 }
 
