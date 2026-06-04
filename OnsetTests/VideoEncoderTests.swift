@@ -1,0 +1,474 @@
+// VideoEncoderTests.swift
+// OnsetTests
+//
+// U3 of #31 — VideoEncoder actor tests.
+//
+// L2 (always run): drive the encoder through an injected MOCK CompressionSession (no
+// hardware). Covers CFR integration (snap / hold / duplicate-drop), backpressure, the
+// DataRateLimits fallback, the HW-unavailable hard fail, and the anchored-PTS math.
+//
+// L5 (opt-in, env-gated): drive a REAL hardware VTCompressionSession with a synthetic
+// IOSurface-backed gradient buffer (NO camera → no device contention). Gated behind
+// ONSET_RUN_L5_ENCODE=1 so the routine `xcodebuild test` does not exercise it.
+//
+// To run the L5 HW path deliberately:
+//   ONSET_RUN_L5_ENCODE=1 xcodebuild test -scheme Onset -project Onset.xcodeproj \
+//     -destination 'platform=macOS' -only-testing:OnsetTests/VideoEncoderLiveTests
+
+import CoreMedia
+import CoreVideo
+@testable import Onset
+import Testing
+import VideoToolbox
+
+// no_magic_numbers is disabled file-wide: these are Swift Testing structs (no XCTest
+// parent class), so the rule's `test_parent_classes` exclusion in .swiftlint.yml does
+// not apply; the numeric literals here are expected-value test data, not magic numbers.
+// file_length is disabled: this single-concern test file covers L2 (mock) + L5 (live HW)
+// encode paths plus their fixtures; splitting would scatter shared fixtures.
+// swiftlint:disable no_magic_numbers
+// swiftlint:disable file_length
+
+// MARK: - Test fixtures
+
+private let testFps = 30
+private let testWidth: Int32 = 1280
+private let testHeight: Int32 = 720
+
+/// A fixed anchor so anchored-PTS assertions are deterministic.
+/// Anchor at 100s on a 600-timescale host clock (typical CMClock timescale).
+private func makeFixedAnchor() -> HostTimeAnchor {
+    HostTimeAnchor(anchorTime: CMTime(value: 60_000, timescale: 600))
+}
+
+/// Default settings used by the mock-session tests.
+private func makeSettings() -> VTEncoderSettings {
+    EncoderConfigBuilder.build(
+        config: .mvpDefault,
+        width: Int(testWidth),
+        height: Int(testHeight),
+        fps: testFps
+    )
+}
+
+/// Builds a `VideoFrame` whose host-time PTS lands exactly on grid slot `slotIndex`
+/// relative to `anchor` at `testFps`.
+private func makeFrame(slotIndex: Int, anchor: HostTimeAnchor) -> VideoFrame {
+    let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+    let slotSeconds = anchorSeconds + Double(slotIndex) / Double(testFps)
+    let pts = CMTime(seconds: slotSeconds, preferredTimescale: 600)
+    return VideoFrame(pixelBuffer: makePixelBuffer(), ptsHostTime: pts, isHoldRepeat: false)
+}
+
+/// Allocates a single IOSurface-backed pixel buffer (420v) for mock-path tests.
+/// The mock never reads pixels; only the reference identity matters (hold assertion).
+private func makePixelBuffer(width: Int = 16, height: Int = 16) -> CVPixelBuffer {
+    var buffer: CVPixelBuffer?
+    let attrs: [CFString: Any] = [
+        kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+    ]
+    let status = CVPixelBufferCreate(
+        kCFAllocatorDefault,
+        width,
+        height,
+        kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+        attrs as CFDictionary,
+        &buffer
+    )
+    guard status == kCVReturnSuccess, let buffer else {
+        preconditionFailure("pixel buffer alloc failed: \(status)")
+    }
+    return buffer
+}
+
+// MARK: - MockCompressionSession
+
+/// A controllable `CompressionSession` for L2 tests.
+///
+/// Records every `encodeFrame` PTS and pixel-buffer reference; lets a test force a given
+/// `pendingFrameCount` (backpressure) and a `kVTPropertyNotSupportedErr` for a chosen
+/// property key (DataRateLimits fallback).
+private final class MockCompressionSession: CompressionSession, @unchecked Sendable {
+    /// PTS values handed to `encodeFrame`, in call order.
+    private(set) var encodedPTS: [CMTime] = []
+    /// Pixel-buffer references handed to `encodeFrame`, in call order (identity matters).
+    private(set) var encodedBuffers: [CVPixelBuffer] = []
+    /// Property keys whose `setProperty` should return `kVTPropertyNotSupportedErr`.
+    var unsupportedKeys: Set<String> = []
+    /// Fixed pending-frame count reported to the backpressure gate.
+    var pending = 0
+
+    nonisolated init() {}
+
+    nonisolated func setProperty(key: CFString, value: CFTypeRef) -> OSStatus {
+        if self.unsupportedKeys.contains(key as String) {
+            return kVTPropertyNotSupportedErr
+        }
+        return noErr
+    }
+
+    nonisolated func encodeFrame(pixelBuffer: CVPixelBuffer, pts: CMTime, duration: CMTime) -> OSStatus {
+        self.encodedPTS.append(pts)
+        self.encodedBuffers.append(pixelBuffer)
+        return noErr
+    }
+
+    nonisolated func pendingFrameCount() -> Int { self.pending }
+    nonisolated func completeFrames() {}
+    nonisolated func invalidate() {}
+    nonisolated func usingHardwareEncoder() -> Bool { false }
+}
+
+/// Convenience: build a `VideoEncoder` wired to a provided mock session.
+@MainActor
+private func makeEncoder(
+    mock: MockCompressionSession,
+    anchor: HostTimeAnchor,
+    maxPendingFrames: Int = 4
+) -> VideoEncoder {
+    VideoEncoder(
+        settings: makeSettings(),
+        width: testWidth,
+        height: testHeight,
+        fps: testFps,
+        anchor: anchor,
+        maxPendingFrames: maxPendingFrames,
+        // selfClocked: false — L2 drives tick/clockTick/ingest synchronously; no wall-clock loop.
+        selfClocked: false
+    ) { _, _, _ in mock }
+}
+
+// MARK: - VideoEncoderTests (L2, mock session)
+
+@Suite("VideoEncoder — L2 (mock session)")
+struct VideoEncoderTests {
+    // MARK: - CFR: snapped PTS on even cadence
+
+    @Test("Even cadence frames → anchored PTS snapped on the grid for each slot")
+    func evenCadence_snapsAnchoredPTS() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        try await encoder.start()
+
+        for slot in 0 ..< 4 {
+            await encoder.ingest(makeFrame(slotIndex: slot, anchor: anchor))
+        }
+
+        #expect(mock.encodedPTS.count == 4)
+        for slot in 0 ..< 4 {
+            let expected = CMTimeAdd(anchor.anchorTime, CMTimeMake(value: CMTimeValue(slot), timescale: Int32(testFps)))
+            #expect(CMTimeCompare(mock.encodedPTS[slot], expected) == 0)
+        }
+    }
+
+    // MARK: - Anchored-PTS math pin
+
+    @Test("Anchored PTS equals CMTimeAdd(anchor, slot/fps) exactly for several slots")
+    func anchoredPTS_exactInteger() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        try await encoder.start()
+
+        let slots = [0, 1, 5, 29, 30, 91]
+        for slot in slots {
+            await encoder.ingest(makeFrame(slotIndex: slot, anchor: anchor))
+        }
+
+        #expect(mock.encodedPTS.count == slots.count)
+        for (index, slot) in slots.enumerated() {
+            let expected = CMTimeAdd(
+                anchor.anchorTime,
+                CMTimeMake(value: CMTimeValue(slot), timescale: Int32(testFps))
+            )
+            // Exact equality: integer rational CMTime math, no Double round-trip.
+            #expect(CMTimeCompare(mock.encodedPTS[index], expected) == 0)
+            // And the anchor is preserved (not bare-relative): the PTS is strictly after T0.
+            #expect(CMTimeCompare(mock.encodedPTS[index], anchor.anchorTime) >= 0)
+        }
+    }
+
+    // MARK: - CFR: hold re-submits last buffer
+
+    @Test("Skipped slot tick → hold re-submits the LAST pixel buffer at the held slot PTS")
+    func skippedSlot_holdReSubmitsLastBuffer() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        try await encoder.start()
+
+        // Ingest slot 0 (a real frame), then tick slot 1 (no frame → hold).
+        let frame0 = makeFrame(slotIndex: 0, anchor: anchor)
+        await encoder.ingest(frame0)
+        await encoder.tick(slotIndex: 1)
+
+        #expect(mock.encodedBuffers.count == 2)
+        // Hold re-submits the same pixel buffer reference as slot 0.
+        #expect(mock.encodedBuffers[0] === mock.encodedBuffers[1])
+        // The held PTS is the anchored PTS for slot 1.
+        let expectedHoldPTS = CMTimeAdd(anchor.anchorTime, CMTimeMake(value: 1, timescale: Int32(testFps)))
+        #expect(CMTimeCompare(mock.encodedPTS[1], expectedHoldPTS) == 0)
+    }
+
+    @Test("Hold does NOT increment cfrNormalizationDrops")
+    func hold_doesNotCountAsDrop() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        try await encoder.start()
+
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+        await encoder.tick(slotIndex: 1)
+
+        #expect(await encoder.cfrNormalizationDropCount == 0)
+        #expect(await encoder.backpressureDropCount == 0)
+    }
+
+    // MARK: - Wall-clock clockTick()
+
+    @Test("clockTick fires a hold of the last buffer when the current slot is ahead")
+    func clockTick_holdsWhenSlotAhead() async throws {
+        // Anchor is fixed ~100s in the past; PipelineClock.currentHostTime() is real mach time,
+        // so the computed current slot is far ahead of slot 0 → clockTick fires a hold. This
+        // also exercises the counter-corruption guard: an ahead slot must NOT increment
+        // cfrNormalizationDrops (only a slot ≤ lastEmittedSlot would, via processTick).
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        try await encoder.start()
+
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+        await encoder.clockTick()
+
+        #expect(mock.encodedBuffers.count == 2)
+        // The hold re-submits the same buffer reference as the real slot-0 frame.
+        #expect(mock.encodedBuffers[0] === mock.encodedBuffers[1])
+        #expect(await encoder.cfrNormalizationDropCount == 0)
+        #expect(await encoder.backpressureDropCount == 0)
+    }
+
+    @Test("clockTick is a no-op before any frame has been ingested")
+    func clockTick_noOpBeforeFirstFrame() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        try await encoder.start()
+
+        await encoder.clockTick()
+
+        #expect(mock.encodedBuffers.isEmpty)
+        #expect(await encoder.cfrNormalizationDropCount == 0)
+    }
+
+    // MARK: - CFR: duplicate frame into a filled slot
+
+    @Test("Duplicate frame into a filled slot → cfrNormalizationDrops==1, backpressure untouched")
+    func duplicateFrame_countsCfrDropOnly() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        try await encoder.start()
+
+        // Two frames mapping to the SAME slot (0): first encodes, second is a duplicate.
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+
+        #expect(mock.encodedPTS.count == 1)
+        #expect(await encoder.cfrNormalizationDropCount == 1)
+        #expect(await encoder.backpressureDropCount == 0)
+    }
+
+    // MARK: - Backpressure
+
+    @Test("Session not ready (pending ≥ max) → encoderBackpressureDrops + DropEvent emitted")
+    func backpressure_dropsAndEmitsEvent() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        mock.pending = 4 // == maxPendingFrames default
+        let encoder = await makeEncoder(mock: mock, anchor: anchor, maxPendingFrames: 4)
+        try await encoder.start()
+
+        // Collect the first drop event.
+        let dropTask = Task { () -> DropEvent? in
+            for await event in await encoder.drops {
+                return event
+            }
+            return nil
+        }
+
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+        await encoder.stop() // finishes the drops stream so the collector terminates
+
+        #expect(mock.encodedPTS.isEmpty) // nothing reached the encoder
+        #expect(await encoder.backpressureDropCount == 1)
+        #expect(await encoder.cfrNormalizationDropCount == 0)
+
+        let event = try #require(await dropTask.value)
+        // Compare via switch rather than `==`: the InferIsolatedConformances trap makes
+        // DropReason's Equatable conformance unusable from the nonisolated #expect context.
+        if case .encoderBackpressureDrops = event.reason {} else {
+            Issue.record("expected .encoderBackpressureDrops, got \(event.reason)")
+        }
+        #expect(event.count == 1)
+    }
+
+    // MARK: - DataRateLimits fallback
+
+    @Test("DataRateLimits unsupported → start() proceeds AverageBitRate-only (no throw)")
+    func dataRateLimitsUnsupported_fallsBack() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        mock.unsupportedKeys = [kVTCompressionPropertyKey_DataRateLimits as String]
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+
+        // Must NOT throw — DataRateLimits failure is the documented graceful fallback.
+        try await encoder.start()
+
+        // The encoder is usable afterwards: a frame still encodes.
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+        #expect(mock.encodedPTS.count == 1)
+    }
+
+    // MARK: - HW-unavailable hard fail (AC-6 / OpAC-4.1)
+
+    @Test("Session factory throws → start() throws RecordingError.noHardwareEncoder")
+    func hardwareUnavailable_throwsNoHardwareEncoder() async {
+        let anchor = makeFixedAnchor()
+        let encoder = VideoEncoder(
+            settings: makeSettings(),
+            width: testWidth,
+            height: testHeight,
+            fps: testFps,
+            anchor: anchor,
+            selfClocked: false
+        ) { _, _, _ in throw VideoEncoderError.hardwareEncoderUnavailable }
+
+        // Catch + switch rather than `#expect(throws: RecordingError.noHardwareEncoder)`
+        // (value form): the InferIsolatedConformances trap makes RecordingError's Equatable
+        // conformance unusable as the macro's `E: Equatable & Sendable` requirement.
+        do {
+            try await encoder.start()
+            Issue.record("expected start() to throw .noHardwareEncoder")
+        } catch let error as RecordingError {
+            if case .noHardwareEncoder = error {} else {
+                Issue.record("expected .noHardwareEncoder, got \(error)")
+            }
+        } catch {
+            Issue.record("expected RecordingError, got \(error)")
+        }
+    }
+
+    // MARK: - Mandatory property failure → encoderSetupFailed
+
+    @Test("Mandatory property set failure → start() throws RecordingError.encoderSetupFailed")
+    func mandatoryPropertyFailure_throwsEncoderSetupFailed() async {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        // ProfileLevel is mandatory (not the DataRateLimits fallback key).
+        mock.unsupportedKeys = [kVTCompressionPropertyKey_ProfileLevel as String]
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+
+        await #expect(throws: RecordingError.self) {
+            try await encoder.start()
+        }
+    }
+}
+
+// MARK: - L5 opt-in condition
+
+/// Returns `true` when the L5 live-encode test should run.
+///
+/// Gated on `ONSET_RUN_L5_ENCODE=1` (explicit opt-in). Unlike the camera L5 path there is
+/// no TCC requirement — encoding a synthetic buffer needs no device permission. Used as the
+/// `.enabled(if:)` trait so a non-opted-in run reports as a genuine SKIP, not a false PASS.
+private func l5EncodeEnabled() -> Bool {
+    ProcessInfo.processInfo.environment["ONSET_RUN_L5_ENCODE"] == "1"
+}
+
+/// Fills a fresh IOSurface-backed 420v pixel buffer with a deterministic gradient.
+private func makeGradientPixelBuffer(width: Int, height: Int) -> CVPixelBuffer {
+    let buffer = makePixelBuffer(width: width, height: height)
+    CVPixelBufferLockBaseAddress(buffer, [])
+    defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+
+    // Luma plane (0): horizontal gradient. Chroma plane (1): mid-grey.
+    if let lumaBase = CVPixelBufferGetBaseAddressOfPlane(buffer, 0) {
+        let bytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
+        let lumaHeight = CVPixelBufferGetHeightOfPlane(buffer, 0)
+        let lumaWidth = CVPixelBufferGetWidthOfPlane(buffer, 0)
+        let ptr = lumaBase.assumingMemoryBound(to: UInt8.self)
+        for row in 0 ..< lumaHeight {
+            for col in 0 ..< lumaWidth {
+                ptr[row * bytesPerRow + col] = UInt8((col * 255) / max(lumaWidth, 1))
+            }
+        }
+    }
+    if let chromaBase = CVPixelBufferGetBaseAddressOfPlane(buffer, 1) {
+        let bytesPerRow = CVPixelBufferGetBytesPerRowOfPlane(buffer, 1)
+        let chromaHeight = CVPixelBufferGetHeightOfPlane(buffer, 1)
+        let ptr = chromaBase.assumingMemoryBound(to: UInt8.self)
+        for row in 0 ..< chromaHeight {
+            for col in 0 ..< bytesPerRow {
+                ptr[row * bytesPerRow + col] = 128
+            }
+        }
+    }
+    return buffer
+}
+
+// MARK: - VideoEncoderLiveTests (L5, real VTCompressionSession)
+
+@Suite("VideoEncoder — L5 live hardware encode", .serialized, .timeLimit(.minutes(1)))
+struct VideoEncoderLiveTests {
+    @Test(
+        "real HW HEVC session encodes a synthetic gradient → first sample is a keyframe",
+        .enabled(if: l5EncodeEnabled())
+    )
+    func liveEncode_producesKeyframeFirst() async throws {
+        let anchor = makeFixedAnchor()
+        // Default factory → real LiveCompressionSession (HW-required HEVC).
+        // selfClocked: false — drive ingest manually; the wall-clock loop would add
+        // nondeterministic huge-slot holds with the fixed past anchor.
+        let encoder = VideoEncoder(
+            settings: makeSettings(),
+            width: testWidth,
+            height: testHeight,
+            fps: testFps,
+            anchor: anchor,
+            selfClocked: false
+        )
+        try await encoder.start()
+
+        // Collect the first emitted encoded sample.
+        let collector = Task { () -> EncodedSample? in
+            for await sample in await encoder.encodedSamples {
+                return sample
+            }
+            return nil
+        }
+
+        // Feed a handful of synthetic gradient frames on the grid.
+        for slot in 0 ..< 10 {
+            let slotOffset = CMTimeMake(value: CMTimeValue(slot), timescale: Int32(testFps))
+            let frame = VideoFrame(
+                pixelBuffer: makeGradientPixelBuffer(width: Int(testWidth), height: Int(testHeight)),
+                ptsHostTime: CMTimeAdd(anchor.anchorTime, slotOffset),
+                isHoldRepeat: false
+            )
+            await encoder.ingest(frame)
+        }
+
+        // Assert the live session used the hardware encoder.
+        #expect(await encoder.isUsingHardwareEncoder == true)
+
+        await encoder.stop() // drains pending frames, then finishes the stream
+
+        let first = await collector.value
+        let sample = try #require(first, "expected at least one encoded HEVC sample")
+        #expect(sample.isKeyframe == true)
+    }
+}
+
+// swiftlint:enable no_magic_numbers
+// swiftlint:enable file_length
