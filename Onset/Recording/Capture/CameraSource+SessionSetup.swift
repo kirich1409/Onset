@@ -116,9 +116,28 @@ extension CameraSource {
             throw RecordingError.captureSetupFailed(error)
         }
         device.activeFormat = liveFormat
-        let frameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
-        device.activeVideoMinFrameDuration = frameDuration
-        device.activeVideoMaxFrameDuration = frameDuration
+
+        // Use the frame duration from the matching AVFrameRateRange rather than
+        // constructing a CMTime from the target fps. AVFoundation rejects a duration
+        // (e.g. 1/30) that does not exactly equal the rational stored in the range
+        // (e.g. 1000000/30000030 on Tundra / Continuity cameras), throwing
+        // NSInvalidArgumentException from setActiveVideoMinFrameDuration.
+        // Picking the range whose maxFrameRate best satisfies minFps gives us the
+        // exact CMTime representation the device expects.
+        let qualifiedRanges = liveFormat.videoSupportedFrameRateRanges.filter { $0.maxFrameRate >= fps }
+        let bestRange = qualifiedRanges.min { abs($0.maxFrameRate - fps) < abs($1.maxFrameRate - fps) }
+        if let bestRange {
+            device.activeVideoMinFrameDuration = bestRange.minFrameDuration
+            device.activeVideoMaxFrameDuration = bestRange.minFrameDuration
+        } else {
+            // No range satisfies the fps target — this should never happen because
+            // findMatchingFormat already filtered by maxFrameRate ≥ targetFps. Fall
+            // back to the constructed duration to preserve the pre-existing behaviour
+            // rather than silently skipping the configuration step.
+            let frameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
+            device.activeVideoMinFrameDuration = frameDuration
+            device.activeVideoMaxFrameDuration = frameDuration
+        }
         device.unlockForConfiguration()
     }
 
