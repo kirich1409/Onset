@@ -29,7 +29,6 @@
 // and RecordingConfiguration.
 
 import Foundation
-import os.log
 
 // MARK: - CFRDropReason
 

@@ -196,6 +196,7 @@ actor VideoEncoder {
     ) {
         precondition(fps > 0, "fps must be positive")
         precondition(width > 0 && height > 0, "dimensions must be positive")
+        precondition(maxPendingFrames > 0, "maxPendingFrames must be positive")
 
         self.settings = settings
         self.width = width

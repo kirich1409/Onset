@@ -184,17 +184,16 @@ struct CFRNormalizerJitterTests {
         }
     }
 
-    @Test("frame exactly halfway between two slots snaps to the later slot (round half to even)")
+    @Test("frame exactly halfway between two slots snaps to the later slot (round-half-away-from-zero)")
     func frameMidwayBetweenSlots() {
         var norm = CFRNormalizer()
         // Midpoint between slot 0 and slot 1 = 0.5/fps.
-        // Swift's `rounded()` uses .toNearestOrAwayFromZero; 0.5 → 1.
+        // Swift's `rounded()` uses .toNearestOrAwayFromZero; a positive midpoint (0.5)
+        // deterministically rounds up to slot 1, not "either 0 or 1".
         let pts = self.anchor + 0.5 / Double(self.fps)
         let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: self.anchor, fps: self.fps)
         if case let .encode(slotIndex, _, _) = decision {
-            // Either 0 or 1 is acceptable depending on rounding mode;
-            // verify it is one of the two adjacent slots.
-            #expect(slotIndex == 0 || slotIndex == 1)
+            #expect(slotIndex == 1)
         } else {
             Issue.record("Expected encode, got \(decision)")
         }
