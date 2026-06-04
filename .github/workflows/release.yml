@@ -5,9 +5,7 @@ on:
     tags:
       - 'v*'
 
-# Notarization secrets are in the "release" GitHub Environment (environment-scoped,
-# not repo-wide). This limits exposure: only this workflow on tag pushes can access
-# them. The environment adds a required-reviewers protection layer for public repos.
+# Least-privilege default. contents: write is scoped to the create-release job only.
 #
 # Required secrets (Human sets these up in repo Settings > Environments > release):
 #   DEVELOPER_ID_APPLICATION_P12_BASE64  — Developer ID Application cert (.p12, base64)
@@ -17,18 +15,29 @@ on:
 #   NOTARYTOOL_TEAM_ID                   — 10-char Apple Developer Team ID
 
 permissions:
-  contents: write  # Needed to create a GitHub Release and upload artifacts.
+  contents: read
 
 env:
   DEVELOPER_DIR: /Applications/Xcode_26.5.app
   KEYCHAIN_NAME: onset-release-${{ github.run_id }}
 
 jobs:
-  release:
-    name: Archive, Notarize, Release
+  # ─────────────────────────────────────────────────────────────────────────
+  # build-notarize
+  # Archive (Release/WMO), sign with Developer ID, notarize, staple, create DMG.
+  # Secrets are accessed here via the "release" environment (environment-scoped,
+  # not repo-wide). contents: read — no GitHub Release writes in this job.
+  # ─────────────────────────────────────────────────────────────────────────
+  build-notarize:
+    name: Archive, Sign, Notarize
     runs-on: macos-26
     environment: release  # Enforces environment protection rules + scoped secrets.
     timeout-minutes: 60
+    permissions:
+      contents: read  # Only reads source; GitHub Release is created in create-release.
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - name: Checkout
@@ -37,24 +46,31 @@ jobs:
       - name: Confirm Xcode version
         run: xcodebuild -version
 
-      # Temporary keychain for the signing identity.
-      # The trap ensures cleanup even if subsequent steps fail — prevents the
-      # keychain from persisting across runs (security hygiene on shared runner).
-      - name: Create temporary keychain
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION"
+
+      # Combine keychain creation and certificate import in a single shell so
+      # the trap fires when this step's process exits — guaranteeing cleanup
+      # even if the script aborts mid-way (bash-level guarantee).
+      # The if: always() step below adds an outer job-level safety net.
+      - name: Create keychain and import signing certificate
+        env:
+          DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.DEVELOPER_ID_APPLICATION_P12_BASE64 }}
+          DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
         run: |
           KEYCHAIN_PASSWORD=$(uuidgen)
           echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME.keychain-db"
+          trap "security delete-keychain '$KEYCHAIN_NAME.keychain-db' 2>/dev/null || true" EXIT
           security set-keychain-settings -lut 21600 "$KEYCHAIN_NAME.keychain-db"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME.keychain-db"
           # Prepend to keychain search list so code signing finds the identity.
           security list-keychains -d user -s "$KEYCHAIN_NAME.keychain-db" $(security list-keychains -d user | tr -d '"')
 
-      - name: Import signing certificate
-        env:
-          DEVELOPER_ID_APPLICATION_P12_BASE64: ${{ secrets.DEVELOPER_ID_APPLICATION_P12_BASE64 }}
-          DEVELOPER_ID_APPLICATION_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_APPLICATION_P12_PASSWORD }}
-        run: |
           # TODO: Human must set DEVELOPER_ID_APPLICATION_P12_BASE64 and
           # DEVELOPER_ID_APPLICATION_P12_PASSWORD in GitHub Environment "release".
           echo "$DEVELOPER_ID_APPLICATION_P12_BASE64" | base64 --decode > /tmp/onset-signing.p12
@@ -73,14 +89,7 @@ jobs:
           # Scrub the p12 from disk immediately
           rm -f /tmp/onset-signing.p12
 
-      - name: Extract version from tag
-        id: version
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Building version: $VERSION"
-
-      - name: Archive (Release)
+      - name: Archive (Release/WMO)
         run: |
           xcodebuild archive \
             -scheme Onset \
@@ -90,7 +99,7 @@ jobs:
             CURRENT_PROJECT_VERSION="${{ steps.version.outputs.version }}" \
             MARKETING_VERSION="${{ steps.version.outputs.version }}"
 
-      - name: Export archive
+      - name: Export archive (Developer ID)
         run: |
           # TODO: create ExportOptions.plist for Developer ID distribution.
           # Requires DEVELOPMENT_TEAM and signing identity configured.
@@ -137,7 +146,6 @@ jobs:
 
       - name: Create DMG
         run: |
-          # Create a simple DMG for distribution.
           hdiutil create \
             -volname "Onset ${{ steps.version.outputs.version }}" \
             -srcfolder "$RUNNER_TEMP/export/Onset.app" \
@@ -145,21 +153,54 @@ jobs:
             -format UDZO \
             "$RUNNER_TEMP/Onset-${{ steps.version.outputs.version }}.dmg"
 
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "Onset ${{ steps.version.outputs.version }}" \
-            --generate-notes \
-            --draft \
-            "$RUNNER_TEMP/Onset-${{ steps.version.outputs.version }}.dmg"
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-artifacts-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/Onset-${{ steps.version.outputs.version }}.dmg
+            ${{ runner.temp }}/Onset-${{ steps.version.outputs.version }}.zip
+          if-no-files-found: error
+          retention-days: 1
 
-      # Keychain cleanup — runs after all steps regardless of success/failure.
-      # GitHub Actions does not have a native finally block; we use a conditional
-      # always() step as the closest equivalent.
+      # Belt-and-suspenders: covers failures in steps after the keychain/cert step
+      # where the trap cannot reach (each run: block is a separate shell process).
       - name: Delete temporary keychain
         if: always()
         run: |
           security delete-keychain "$KEYCHAIN_NAME.keychain-db" 2>/dev/null || true
           echo "Keychain cleanup complete"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # create-release
+  # Creates the GitHub Release and uploads the notarized .dmg and .zip.
+  # This is the only job that needs contents: write; all other jobs use read.
+  # Runs on ubuntu-latest — only needs gh CLI, no macOS toolchain.
+  # ─────────────────────────────────────────────────────────────────────────
+  create-release:
+    name: Create GitHub Release
+    needs: build-notarize
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write  # Required to create a GitHub Release and upload artifacts.
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-artifacts-${{ github.run_id }}
+          path: ./artifacts
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ needs.build-notarize.outputs.version }}"
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Onset ${VERSION}" \
+            --generate-notes \
+            --draft \
+            "./artifacts/Onset-${VERSION}.dmg" \
+            "./artifacts/Onset-${VERSION}.zip"
