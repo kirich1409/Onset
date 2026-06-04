@@ -89,7 +89,12 @@ struct ScreenStreamConfigurationBuilderTests {
             keyFrameIntervalSeconds: self.config.keyFrameIntervalSeconds,
             allowFrameReordering: self.config.allowFrameReordering,
             pixelFormatPreference: [.biPlanar420f, .biPlanar420v],
+            audioSampleRate: self.config.audioSampleRate,
+            audioChannelCount: self.config.audioChannelCount,
+            audioBitrate: self.config.audioBitrate,
             movieFragmentInterval: self.config.movieFragmentInterval,
+            degradedBackpressureThreshold: self.config.degradedBackpressureThreshold,
+            degradedWindowSeconds: self.config.degradedWindowSeconds,
             budgetCap: self.config.budgetCap,
             outputDirectory: self.config.outputDirectory
         )
@@ -117,7 +122,12 @@ struct ScreenStreamConfigurationBuilderTests {
             keyFrameIntervalSeconds: self.config.keyFrameIntervalSeconds,
             allowFrameReordering: self.config.allowFrameReordering,
             pixelFormatPreference: [],
+            audioSampleRate: self.config.audioSampleRate,
+            audioChannelCount: self.config.audioChannelCount,
+            audioBitrate: self.config.audioBitrate,
             movieFragmentInterval: self.config.movieFragmentInterval,
+            degradedBackpressureThreshold: self.config.degradedBackpressureThreshold,
+            degradedWindowSeconds: self.config.degradedWindowSeconds,
             budgetCap: self.config.budgetCap,
             outputDirectory: self.config.outputDirectory
         )

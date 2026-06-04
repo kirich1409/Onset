@@ -1,6 +1,12 @@
 import CoreMedia
 import CoreVideo
 
+// file_length is disabled: this file is the shared pipeline value-type vocabulary (HostTimeAnchor,
+// VideoFrame, AudioSample, RecordingState, SourceEvent, …). Each type carries the non-obvious
+// `InferIsolatedConformances` / `@MainActor`-isolation rationale that `code-policies.md` requires
+// preserved; the manual nonisolated Equatable/Hashable witnesses cannot be split into sibling
+// files without duplicating that documentation. swiftlint:disable file_length
+
 // MARK: - HostTimeAnchor
 
 /// The single shared timeline origin for one recording session.
@@ -120,8 +126,9 @@ nonisolated struct VideoFrame: @unchecked Sendable {
     /// This is an ABSOLUTE host-clock time as delivered by the capture source
     /// (SCStreamOutput / AVCaptureVideoDataOutput). The source converts foreign-clock
     /// timestamps to host time at ingest using `CMSyncConvertTime`; nothing downstream
-    /// re-converts. Use `PipelineClock.convert(hostTime:anchoredTo:)` to obtain the
-    /// anchored-timeline pts when writing to an AVAssetWriter.
+    /// re-converts. `FileWriter` calls `startSession(atSourceTime:)` with the first
+    /// sample's `ptsHostTime` to set the timeline origin and appends all subsequent
+    /// sample buffers raw — no per-sample `PipelineClock.convert()` is applied.
     let ptsHostTime: CMTime
 
     /// When `true`, this frame is a CFR hold-repeat: the source generated no new sample
@@ -186,8 +193,10 @@ nonisolated struct EncodedSample: @unchecked Sendable {
     /// Presentation timestamp of this encoded frame on the host clock.
     ///
     /// Matches the `ptsHostTime` of the source `VideoFrame` that produced this sample.
-    /// `FileWriter` uses `PipelineClock.convert(hostTime:anchoredTo:)` to obtain the
-    /// anchored-timeline pts before appending to AVAssetWriter.
+    /// `FileWriter` (#34) calls `startSession(atSourceTime:)` with the first sample's
+    /// `ptsHostTime` to set the timeline origin and appends all subsequent sample buffers
+    /// raw — no per-sample `PipelineClock.convert()` is applied. Calling `convert()` AND
+    /// `startSession` would double-subtract and push frames before the session origin.
     let ptsHostTime: CMTime
 
     /// Whether this encoded sample is an HEVC IDR/CRA key frame.
@@ -297,6 +306,66 @@ nonisolated struct DropEvent {
 }
 
 extension DropEvent: Equatable {}
+
+// MARK: - RecordingState
+
+/// The pipeline's backpressure-health state, surfaced by `DropMonitor` (#35) to the UI (#37).
+///
+/// Policy (user decision — "Degraded = Live with recovery"): the session is `.degraded` while the
+/// count of `encoderBackpressureDrops` within a sliding window exceeds a threshold, and recovers
+/// to `.normal` once the window clears. Only encoder-backpressure drops drive this state; capture
+/// and CFR-normalization drops are tracked as cumulative counters but never change `RecordingState`.
+///
+/// `Equatable` / `Hashable` are declared ON THE PRIMARY definition (not a bare extension) so the
+/// conformances themselves are `nonisolated` — required so `RecordingState` is comparable from
+/// inside `actor DropMonitor`. A bare `extension RecordingState: Equatable` would leave the
+/// conformance `@MainActor`-isolated under `InferIsolatedConformances` even with a nonisolated
+/// witness, and `==` would then be unusable in actor-isolated code (same pattern as
+/// `VideoEncoder.State`).
+nonisolated enum RecordingState: Equatable, Hashable {
+    /// Backpressure is within budget — the encoder/writer is keeping up.
+    case normal
+
+    /// Backpressure drops within the sliding window exceeded the threshold. Recording continues
+    /// (Live); the monitor recovers to `.normal` automatically when the window clears.
+    case degraded
+}
+
+extension RecordingState {
+    /// Manual `nonisolated` implementation.
+    ///
+    /// Under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, synthesised conformances are inferred
+    /// `@MainActor` (`InferIsolatedConformances`). All value-type enums in this project override
+    /// this via manual nonisolated witnesses — see `DropReason`.
+    nonisolated static func == (lhs: RecordingState, rhs: RecordingState) -> Bool {
+        switch (lhs, rhs) {
+        case (.normal, .normal),
+             (.degraded, .degraded):
+            true
+
+        default:
+            false
+        }
+    }
+}
+
+extension RecordingState {
+    /// Manual `nonisolated` implementation.
+    ///
+    /// A payload-free enum gets an IMPLICIT `Hashable` synthesis even without an explicit
+    /// declaration; under `InferIsolatedConformances` that synthesised `hash(into:)` witness is
+    /// inferred `@MainActor`, which makes `RecordingState` cross into main-actor code from
+    /// `nonisolated` contexts. An explicit manual witness overrides it (same pattern as `DropReason`).
+    nonisolated func hash(into hasher: inout Hasher) {
+        switch self {
+        case .normal:
+            hasher.combine(0)
+
+        case .degraded:
+            hasher.combine(1)
+        }
+    }
+}
 
 // MARK: - SourceEvent
 

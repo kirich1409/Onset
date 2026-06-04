@@ -99,6 +99,25 @@ nonisolated struct RecordingConfiguration {
     /// can deliver without a CPU-copy conversion. See `PixelFormat` doc.
     nonisolated let pixelFormatPreference: [PixelFormat]
 
+    // MARK: - Audio (MVP: mono microphone input)
+
+    /// Microphone sample rate in Hz. AAC encoder target.
+    ///
+    /// 48 kHz is the standard broadcast/recording sample rate and is natively supported
+    /// by every macOS audio device. Placeholder — calibrate post-MVP.
+    nonisolated let audioSampleRate: Double
+
+    /// Microphone channel count. 1 = mono mic MVP.
+    ///
+    /// Single-channel matches the single-microphone MVP scope. Post-MVP: per-file mic
+    /// selection may require stereo (2 channels). Placeholder — calibrate post-MVP.
+    nonisolated let audioChannelCount: Int
+
+    /// AAC target bitrate in bits per second.
+    ///
+    /// 128 kbps is a common high-quality mono AAC target. Placeholder — calibrate post-MVP.
+    nonisolated let audioBitrate: Int
+
     // MARK: - File Durability
 
     /// Movie-fragment interval in seconds.
@@ -107,6 +126,21 @@ nonisolated struct RecordingConfiguration {
     /// finalised in-stream. Shorter = less data lost on crash. Spec: "рекомендуется 2–5 с";
     /// AC-10: file must be valid after a crash. Set to 4 s.
     nonisolated let movieFragmentInterval: Double
+
+    // MARK: - Degraded-State Policy (DropMonitor #35)
+
+    /// Backpressure-drop count within `degradedWindowSeconds` above which the session is
+    /// reported `.degraded`. Strict comparison: `count > threshold` → degraded.
+    ///
+    /// Only `DropReason.encoderBackpressureDrops` feed this window (capture / CFR drops do not).
+    /// **Placeholder** — calibrate post-MVP against real hardware drop rates.
+    nonisolated let degradedBackpressureThreshold: Int
+
+    /// Sliding-window length (seconds) over which backpressure drops are counted for the
+    /// degraded-state decision. Drops older than `now − degradedWindowSeconds` are evicted,
+    /// so when backpressure stops the window empties and the session recovers to `.normal`.
+    /// **Placeholder** — calibrate post-MVP.
+    nonisolated let degradedWindowSeconds: Double
 
     // MARK: - Engine Budget Cap
 
@@ -240,7 +274,14 @@ nonisolated struct RecordingConfiguration {
             keyFrameIntervalSeconds: 2.0,
             allowFrameReordering: true,
             pixelFormatPreference: [.biPlanar420v, .biPlanar420f],
+            // Audio placeholder values — calibrate post-MVP against real hardware.
+            audioSampleRate: 48000,
+            audioChannelCount: 1,
+            audioBitrate: 128_000,
             movieFragmentInterval: 4.0,
+            // Degraded-state policy placeholders — калибруется post-MVP against real drop rates.
+            degradedBackpressureThreshold: 30,
+            degradedWindowSeconds: 2.0,
             budgetCap: budgetCap,
             outputDirectory: outputDirectory
         )
@@ -270,7 +311,12 @@ extension RecordingConfiguration: Equatable {
             && lhs.keyFrameIntervalSeconds == rhs.keyFrameIntervalSeconds
             && lhs.allowFrameReordering == rhs.allowFrameReordering
             && lhs.pixelFormatPreference == rhs.pixelFormatPreference
+            && lhs.audioSampleRate == rhs.audioSampleRate
+            && lhs.audioChannelCount == rhs.audioChannelCount
+            && lhs.audioBitrate == rhs.audioBitrate
             && lhs.movieFragmentInterval == rhs.movieFragmentInterval
+            && lhs.degradedBackpressureThreshold == rhs.degradedBackpressureThreshold
+            && lhs.degradedWindowSeconds == rhs.degradedWindowSeconds
             && lhs.budgetCap == rhs.budgetCap
             && lhs.outputDirectory == rhs.outputDirectory
     }
