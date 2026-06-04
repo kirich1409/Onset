@@ -40,6 +40,28 @@ actor RecordingSession {
         category: "RecordingSession"
     )
 
+    // MARK: - State stream (UI surface — #36/#37)
+
+    /// Backpressure-health transitions for the UI (`RecordingState.normal ↔ .degraded`).
+    ///
+    /// Created at `init` (with the stored `stateContinuation`) so a subscriber can iterate it
+    /// immediately, before `start()` builds the `DropMonitor`. `start()` spins a forwarding task
+    /// that pipes the monitor's own `state` stream into this continuation; `performStop()` /
+    /// `teardownAfterFailedStart()` finish the continuation, ending the subscriber's loop.
+    ///
+    /// **Single-consumer.** Exactly ONE subscriber (the `RecordingCoordinator`) may iterate this
+    /// stream. `AsyncStream` splits elements across iterators rather than duplicating them, so a
+    /// second consumer would starve the first. Menu bar and recording window read live state from
+    /// the coordinator's `@Observable` properties — they do NOT subscribe here. Emits only on a
+    /// `.normal ↔ .degraded` transition (no initial `.normal`), matching `DropMonitor.state`.
+    nonisolated let recordingStateStream: AsyncStream<RecordingState>
+    private let stateContinuation: AsyncStream<RecordingState>.Continuation
+
+    /// Pipes `dropMonitor.state` → `stateContinuation`. Spun in `start()` (the monitor only exists
+    /// then) and torn down in `performStop()` / `teardownAfterFailedStart()`. Captures the monitor's
+    /// stream value + the continuation — never `self` — so it does not retain the session actor.
+    private var stateForwardingTask: Task<Void, Never>?
+
     // MARK: - Inputs
 
     private var plan: ResolvedRecordingPlan
@@ -117,6 +139,12 @@ actor RecordingSession {
         self.encoderFactory = encoderFactory
         self.sourceFactory = sourceFactory
 
+        // UI state stream + its continuation, created here so a subscriber can iterate before
+        // start() builds the DropMonitor whose transitions are forwarded into this continuation.
+        let (stateStream, stateContinuation) = AsyncStream.makeStream(of: RecordingState.self)
+        self.recordingStateStream = stateStream
+        self.stateContinuation = stateContinuation
+
         // Default live probe: classify against the resolved display + camera format.
         self.probe = probe ?? { CapabilityProbe.probe(display: display, cameraFormat: cameraFormat, config: config) }
 
@@ -154,6 +182,7 @@ actor RecordingSession {
         // 3. The single T0 epoch (AC-7). Captured ONCE, here, before anything else runs.
         let anchor = HostTimeAnchor.now()
         let stage = self.makeStage(startPlan: startPlan, sessionT0: anchor.anchorTime) // 4.
+        self.startStateForwarding() // forward dropMonitor.state → recordingStateStream (UI).
 
         // 5-7. Build pipelines, wire the event loop, start the sources. Any throw tears down.
         do {
@@ -265,6 +294,30 @@ actor RecordingSession {
         if let camera = self.cameraPipeline {
             try await camera.source.start(anchoredTo: anchor)
         }
+    }
+
+    /// Spins the forwarding task that pipes `dropMonitor.state` → `recordingStateStream`. Captures
+    /// the monitor's stream value + the stored continuation only (never `self`), so the task does
+    /// not retain the session actor. The loop ends when the monitor finishes its `state` stream
+    /// (in `DropMonitor.stop()`) or when `performStop()` cancels this task — whichever comes first.
+    private func startStateForwarding() {
+        guard let monitorState = self.dropMonitor?.state else { return }
+        let continuation = self.stateContinuation
+        self.stateForwardingTask = Task {
+            for await state in monitorState {
+                continuation.yield(state)
+            }
+        }
+    }
+
+    // MARK: - UI state surface (#36/#37)
+
+    /// The session's cumulative drop counters, polled by the UI (`RecordingCoordinator`) for the
+    /// recording-window drop pill. Returns a zero-counter snapshot before `start()` builds the
+    /// monitor or after `performStop()` tears it down.
+    func currentDrops() async -> DropCounters {
+        await self.dropMonitor?.snapshot()
+            ?? DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0)
     }
 
     // MARK: - Pipeline construction
@@ -528,6 +581,14 @@ actor RecordingSession {
             ?? DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0)
         self.dropMonitor = nil
 
+        // End the UI state forwarding: dropMonitor.stop() already finished the monitor's state
+        // stream (so the loop ends on its own), but cancel + finish the continuation explicitly so
+        // the coordinator's `for await` over `recordingStateStream` terminates deterministically.
+        self.stateForwardingTask?.cancel()
+        await self.stateForwardingTask?.value
+        self.stateForwardingTask = nil
+        self.stateContinuation.finish()
+
         let result = RecordingResult(
             screen: finishResults[.screen],
             camera: finishResults[.camera],
@@ -558,6 +619,11 @@ actor RecordingSession {
         self.audioTask = nil
         self.eventLoopTask?.cancel()
         self.eventLoopTask = nil
+        // Tear down UI state forwarding spun in start() before the throw (it may have started as
+        // early as makeStage()'s monitor). Finish the continuation so a subscriber's loop ends.
+        self.stateForwardingTask?.cancel()
+        self.stateForwardingTask = nil
+        self.stateContinuation.finish()
         await self.dropMonitor?.stop()
         self.dropMonitor = nil
         self.stage = nil

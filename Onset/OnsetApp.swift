@@ -24,6 +24,38 @@ nonisolated private let appLogger = Logger(
 nonisolated private let isRunningUnderXCTest =
     ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
+// MARK: - Window IDs
+
+/// Stable scene identifiers used by `openWindow` / `dismissWindow`.
+private enum WindowID {
+    static let main = "onboarding"
+    static let recording = "recording"
+}
+
+// MARK: - AppActivationDelegate
+
+/// Brings the app and its launch window to the front under `LSUIElement = YES`.
+///
+/// `LSUIElement` makes the app a menu-bar accessory (no Dock icon). Such apps are NOT auto-activated
+/// at launch — their windows can open behind other apps or without key focus. Onboarding (Epic 2)
+/// must still present AND take focus on first run, so the delegate `activate()`s at launch. The main
+/// window is forced to present via `.defaultLaunchBehavior(.presented)` on its scene (accessory apps
+/// otherwise leave the `Window` scene unopened). The menu-bar item remains in either case.
+///
+/// Skipped under XCTest: test hosts must not steal focus while the L5 capture suite runs (mirrors
+/// the scene-suppression guard below).
+@MainActor
+final class AppActivationDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !isRunningUnderXCTest else { return }
+        // LSUIElement apps are not auto-activated at launch; bring the app + its launch window
+        // (onboarding) to the front so onboarding presents and takes focus (Epic 2 parity).
+        // `activate()` is the macOS 14+ form of the deprecated `activate(ignoringOtherApps:)`.
+        NSApp.activate()
+        appLogger.info("App launched — activated for onboarding focus under LSUIElement")
+    }
+}
+
 // MARK: - OnsetApp
 
 @main
@@ -33,7 +65,13 @@ struct OnsetApp: App {
     private enum WindowDefaults {
         static let width: CGFloat = 460
         static let height: CGFloat = 560
+        static let recordingWidth: CGFloat = 370
+        static let recordingHeight: CGFloat = 420
     }
+
+    // MARK: - App delegate (activation policy under LSUIElement)
+
+    @NSApplicationDelegateAdaptor(AppActivationDelegate.self) private var appDelegate
 
     // MARK: - Composition root
 
@@ -51,8 +89,12 @@ struct OnsetApp: App {
         relauncher: AppRelauncher()
     )
 
+    /// The single recording-lifecycle owner, shared by all recording-aware surfaces (#36/#37/#38).
+    /// Window actions are wired into it from `WindowActionsBridge` once the env actions exist.
+    @State private var coordinator = RecordingCoordinator()
+
     var body: some Scene {
-        Window("Onset", id: "onboarding") {
+        Window("Onset", id: WindowID.main) {
             // Under XCTest the window is empty (no RootView, no onboarding flow, no
             // PermissionsService UI lifecycle). This prevents multiple app instances from
             // accumulating across test runs and popping competing onboarding windows that
@@ -69,11 +111,159 @@ struct OnsetApp: App {
                     permissionsService: self.permissionsService,
                     hasPostScreenGrantArg: CommandLine.arguments.contains(AppRelauncher.postScreenGrantArg)
                 )
+                // Capture the env window actions into the coordinator (a plain class cannot read
+                // @Environment(\.openWindow) itself).
+                .background(WindowActionsBridge(coordinator: self.coordinator))
             }
         }
         // Fixed-size window that wraps the content — prevents user resizing.
         .windowResizability(.contentSize)
         .defaultSize(width: WindowDefaults.width, height: WindowDefaults.height)
+        // Force the launch window to present under LSUIElement: an accessory-at-launch app does NOT
+        // auto-open its `Window` scene, which would regress onboarding (Epic 2). `.presented` opens
+        // it at launch; the delegate's `activate()` brings it to the front.
+        .defaultLaunchBehavior(.presented)
+
+        // The recording window (#37). Phase 0 renders a minimal placeholder; the real RecordingView
+        // lands in Phase 2. Suppressed under XCTest for the same reason as the main window.
+        Window("Onset — запись", id: WindowID.recording) {
+            if isRunningUnderXCTest {
+                EmptyView()
+            } else {
+                RecordingWindowPlaceholder(coordinator: self.coordinator)
+            }
+        }
+        .windowResizability(.contentSize)
+        .defaultSize(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
+        // Do NOT auto-open at launch — only the main window presents on launch; the recording window
+        // opens on Record (AC-3). Without this the second Window scene would also pop at startup.
+        .defaultLaunchBehavior(.suppressed)
+
+        // Menu bar item (#38 foundation). Phase 0 ships a minimal but functional menu so the app is
+        // usable as a menu-bar app; the full Idle / Recording / Degraded states land in #38.
+        // Suppressed under XCTest so test hosts do not accumulate competing status items.
+        MenuBarExtra(isInserted: .constant(!isRunningUnderXCTest)) {
+            MenuBarContent(coordinator: self.coordinator)
+        } label: {
+            // Minimal reactive label: ● while recording, ○ at rest.
+            Image(systemName: self.coordinator.phase == .recording ? "record.circle.fill" : "circle")
+        }
+    }
+}
+
+// MARK: - WindowActionsBridge
+
+/// Invisible helper that reads the SwiftUI environment window actions and installs them as closures
+/// on the coordinator. A plain `@Observable` class cannot read `@Environment(\.openWindow)`; this
+/// bridge runs inside a `View` where the actions exist and forwards them once on appear.
+private struct WindowActionsBridge: View {
+    let coordinator: RecordingCoordinator
+
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+            .onAppear {
+                self.coordinator.bindWindowActions(
+                    openRecordingWindow: {
+                        self.openWindow(id: WindowID.recording)
+                        AppActivation.bringToFront()
+                    },
+                    dismissMainWindow: { self.dismissWindow(id: WindowID.main) },
+                    dismissRecordingWindow: { self.dismissWindow(id: WindowID.recording) },
+                    openMainWindow: {
+                        self.openWindow(id: WindowID.main)
+                        AppActivation.bringToFront()
+                    }
+                )
+                self.coordinator.enterMain()
+            }
+    }
+}
+
+// MARK: - RecordingWindowPlaceholder
+
+/// **Phase-2 placeholder.** A minimal stand-in for the real `RecordingView` (#37), wired only to
+/// read the coordinator's live `phase` / `elapsed` so the scene + window choreography can be
+/// verified in Phase 0. Replace entirely when landing #37.
+private struct RecordingWindowPlaceholder: View {
+    private enum Metrics {
+        static let spacing: CGFloat = 12
+        static let padding: CGFloat = 24
+    }
+
+    let coordinator: RecordingCoordinator
+
+    var body: some View {
+        VStack(spacing: Metrics.spacing) {
+            Text(self.coordinator.phase == .recording ? "● ИДЁТ ЗАПИСЬ" : "Запись не идёт")
+                .font(.headline)
+            Text(ElapsedFormatter.string(from: self.coordinator.elapsed))
+                .font(.system(.largeTitle, design: .monospaced))
+            Text("Заглушка окна записи — реализация в #37")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(Metrics.padding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - ElapsedFormatter
+
+/// Formats whole seconds as `mm:ss`.
+///
+/// Avoids `String(format:)`, whose variadic initializer trips `SWIFT_STRICT_MEMORY_SAFETY` (the
+/// project enables strict memory safety). Pads each component to two digits manually.
+private enum ElapsedFormatter {
+    private static let secondsPerMinute = 60
+    private static let twoDigitThreshold = 10
+
+    static func string(from seconds: Int) -> String {
+        let minutes = seconds / self.secondsPerMinute
+        let remainder = seconds % self.secondsPerMinute
+        return "\(self.padded(minutes)):\(self.padded(remainder))"
+    }
+
+    private static func padded(_ value: Int) -> String {
+        value < self.twoDigitThreshold ? "0\(value)" : "\(value)"
+    }
+}
+
+// MARK: - MenuBarContent
+
+/// **Minimal menu (#38 foundation).** A functional menu so the app is usable as a menu-bar app:
+/// open the main window, and quit. The full Idle / Recording / Degraded menus land in #38.
+private struct MenuBarContent: View {
+    let coordinator: RecordingCoordinator
+
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Открыть Onset") {
+            self.openWindow(id: WindowID.main)
+            AppActivation.bringToFront()
+        }
+        Divider()
+        Button("Выход") {
+            NSApplication.shared.terminate(nil)
+        }
+    }
+}
+
+// MARK: - AppActivation
+
+/// Brings the (menu-bar accessory) app to the front when opening a window from the menu bar.
+///
+/// Under `LSUIElement`, the app does not auto-activate, so a window opened from the status menu can
+/// appear behind the frontmost app. `activate()` brings Onset (and the just-opened window) forward.
+private enum AppActivation {
+    static func bringToFront() {
+        guard !isRunningUnderXCTest else { return }
+        NSApp.activate()
     }
 }
 
