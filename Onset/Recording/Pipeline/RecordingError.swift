@@ -34,6 +34,19 @@ nonisolated enum RecordingError: Error {
     /// effective permissions allow neither (AC-2, AC-3).
     case noVideoSource
 
+    // MARK: - Camera format errors
+
+    /// No camera format satisfies the minimum fps requirement (AC-5: fps ≥ 30).
+    ///
+    /// Emitted by `CameraFormatSelector.pickBestFormat(from:minFps:)` when every
+    /// advertised format for the selected camera has `maxFps < minFps`. Recording
+    /// must NOT silently start at a lower frame rate — this violates the ≥30fps
+    /// invariant that downstream encoders and the ResolvedRecordingPlan depend on.
+    ///
+    /// Callers should surface a "Camera does not support 30fps" message and exclude
+    /// the device, rather than downgrading the frame rate target.
+    case noSuitableCameraFormat
+
     // MARK: - Discovery errors
 
     /// `SCShareableContent.current` failed during display enumeration.
@@ -89,7 +102,8 @@ extension RecordingError: Equatable {
         switch (lhs, rhs) {
         case (.noHardwareEncoder, .noHardwareEncoder),
              (.budgetExceeded, .budgetExceeded),
-             (.noVideoSource, .noVideoSource):
+             (.noVideoSource, .noVideoSource),
+             (.noSuitableCameraFormat, .noSuitableCameraFormat):
             true
 
         case let (.captureSetupFailed(lErr), .captureSetupFailed(rErr)),

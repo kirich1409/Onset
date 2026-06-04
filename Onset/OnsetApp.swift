@@ -9,6 +9,21 @@ nonisolated private let appLogger = Logger(
     category: "OnsetApp"
 )
 
+// MARK: - Test-mode detection
+
+/// `true` when the process is launched as a test host by XCTest.
+///
+/// XCTest sets `XCTestConfigurationFilePath` in the environment before executing any test
+/// bundle. Detecting it here prevents multiple app instances — each with an onboarding
+/// window and live `PermissionsService` UI — from accumulating across test runs and
+/// interfering with the L5 live-capture tests that fight over screen/camera permissions.
+///
+/// Note: screen-recording and camera TCC grants are held by the **process** (bundle ID),
+/// not by individual windows. Suppressing the UI scene here does NOT remove those grants
+/// from the test-host process, so L5 hardware-capture tests continue to pass.
+nonisolated private let isRunningUnderXCTest =
+    ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+
 // MARK: - OnsetApp
 
 @main
@@ -26,6 +41,10 @@ struct OnsetApp: App {
     ///
     /// Created at app-init time so statuses are snapshotted immediately and routing
     /// decisions on the first render are based on real data.
+    ///
+    /// `PermissionsService.init` only performs non-prompting TCC status reads
+    /// (`CGPreflightScreenCaptureAccess`, `AVCaptureDevice.authorizationStatus`) — no
+    /// observers, timers, or async work — so it is safe to construct under test as well.
     @State private var permissionsService = PermissionsService(
         screenPermission: ScreenRecordingPermission(),
         capturePermission: CaptureDevicePermission(),
@@ -34,10 +53,23 @@ struct OnsetApp: App {
 
     var body: some Scene {
         Window("Onset", id: "onboarding") {
-            RootView(
-                permissionsService: self.permissionsService,
-                hasPostScreenGrantArg: CommandLine.arguments.contains(AppRelauncher.postScreenGrantArg)
-            )
+            // Under XCTest the window is empty (no RootView, no onboarding flow, no
+            // PermissionsService UI lifecycle). This prevents multiple app instances from
+            // accumulating across test runs and popping competing onboarding windows that
+            // fight over screen/camera TCC permissions with the L5 live-capture tests.
+            //
+            // TCC grants are held at the process / bundle-ID level, not by individual
+            // windows, so suppressing the view here does NOT remove screen-recording or
+            // camera permission from the test-host process — L5 hardware-capture tests
+            // continue to receive their grants unchanged.
+            if isRunningUnderXCTest {
+                EmptyView()
+            } else {
+                RootView(
+                    permissionsService: self.permissionsService,
+                    hasPostScreenGrantArg: CommandLine.arguments.contains(AppRelauncher.postScreenGrantArg)
+                )
+            }
         }
         // Fixed-size window that wraps the content — prevents user resizing.
         .windowResizability(.contentSize)
