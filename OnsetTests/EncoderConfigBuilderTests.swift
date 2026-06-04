@@ -134,4 +134,30 @@ struct EncoderConfigBuilderTests {
         let b = EncoderConfigBuilder.build(config: config, width: 1920, height: 1080, fps: 30)
         #expect(a != b)
     }
+
+    // MARK: - F5: VTEncoderSettings invariant init
+
+    /// Valid numeric invariants construct successfully. The negative cases (averageBitRate ≤ 0,
+    /// peakDataRate < averageBitRate, GOP ≤ 0) trip `precondition`, which aborts the process —
+    /// untestable under Swift Testing — so only the positive path is asserted here.
+    @Test("VTEncoderSettings direct construction succeeds for valid numeric invariants")
+    func directConstruction_validInvariantsSucceeds() {
+        let settings = VTEncoderSettings(
+            averageBitRate: 12_000_000,
+            peakDataRate: 24_000_000,
+            maxKeyFrameIntervalDurationSeconds: 2.0,
+            profileLevel: .mainAutoLevel,
+            allowFrameReordering: true,
+            realTime: true,
+            bitDepth: 8,
+            colorPrimaries: .rec709,
+            transferFunction: .rec709,
+            yCbCrMatrix: .rec709
+        )
+
+        #expect(settings.averageBitRate == 12_000_000)
+        #expect(settings.peakDataRate == 24_000_000)
+        // peakDataRate >= averageBitRate invariant holds for this construction.
+        #expect(settings.peakDataRate >= settings.averageBitRate)
+    }
 }

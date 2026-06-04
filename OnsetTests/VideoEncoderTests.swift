@@ -26,8 +26,12 @@ import VideoToolbox
 // not apply; the numeric literals here are expected-value test data, not magic numbers.
 // file_length is disabled: this single-concern test file covers L2 (mock) + L5 (live HW)
 // encode paths plus their fixtures; splitting would scatter shared fixtures.
+// type_body_length is disabled: the L2 suite intentionally collects every mock-path scenario
+// (CFR, backpressure, lifecycle, fallback, anchored-PTS) in one struct so shared fixtures and
+// the mock session live beside the cases that exercise them; splitting would scatter them.
 // swiftlint:disable no_magic_numbers
 // swiftlint:disable file_length
+// swiftlint:disable type_body_length
 
 // MARK: - Test fixtures
 
@@ -97,6 +101,13 @@ private final class MockCompressionSession: CompressionSession, @unchecked Senda
     var unsupportedKeys: Set<String> = []
     /// Fixed pending-frame count reported to the backpressure gate.
     var pending = 0
+    /// Status returned by `encodeFrame`. Default `noErr`; set to a failure status to exercise
+    /// the F2 encode-failure path (the frame is NOT recorded — mirrors a real session that
+    /// emits no output for a rejected frame).
+    var encodeStatus: OSStatus = noErr
+    /// HW-encoder readback reported to the F6 start() guard. Default `true` so the routine L2
+    /// tests start successfully; set `false` to exercise the HW-unavailable hard fail.
+    var usingHardware = true
 
     nonisolated init() {}
 
@@ -108,6 +119,9 @@ private final class MockCompressionSession: CompressionSession, @unchecked Senda
     }
 
     nonisolated func encodeFrame(pixelBuffer: CVPixelBuffer, pts: CMTime, duration: CMTime) -> OSStatus {
+        // Record only what a real session would surface: on a non-noErr status the frame is
+        // rejected and produces no output, so it must not appear in the recorded arrays.
+        guard self.encodeStatus == noErr else { return self.encodeStatus }
         self.encodedPTS.append(pts)
         self.encodedBuffers.append(pixelBuffer)
         return noErr
@@ -116,7 +130,7 @@ private final class MockCompressionSession: CompressionSession, @unchecked Senda
     nonisolated func pendingFrameCount() -> Int { self.pending }
     nonisolated func completeFrames() {}
     nonisolated func invalidate() {}
-    nonisolated func usingHardwareEncoder() -> Bool { false }
+    nonisolated func usingHardwareEncoder() -> Bool { self.usingHardware }
 }
 
 /// Convenience: build a `VideoEncoder` wired to a provided mock session.
@@ -373,6 +387,152 @@ struct VideoEncoderTests {
             try await encoder.start()
         }
     }
+
+    // MARK: - F6: HW readback false → start() throws noHardwareEncoder
+
+    @Test("Encoder reports Using==false → start() throws RecordingError.noHardwareEncoder")
+    func usingHardwareFalse_throwsNoHardwareEncoder() async {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        mock.usingHardware = false // session created + configured, but NOT hardware-backed
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+
+        do {
+            try await encoder.start()
+            Issue.record("expected start() to throw .noHardwareEncoder on Using==false")
+        } catch let error as RecordingError {
+            if case .noHardwareEncoder = error {} else {
+                Issue.record("expected .noHardwareEncoder, got \(error)")
+            }
+        } catch {
+            Issue.record("expected RecordingError, got \(error)")
+        }
+    }
+
+    // MARK: - F1: failed start() finishes both streams (no hang)
+
+    @Test("Failed start() finishes encodedSamples AND drops — a pre-start subscriber does not hang")
+    func failedStart_finishesStreamsNoHang() async throws {
+        let anchor = makeFixedAnchor()
+        let encoder = VideoEncoder(
+            settings: makeSettings(),
+            width: testWidth,
+            height: testHeight,
+            fps: testFps,
+            anchor: anchor,
+            selfClocked: false
+        ) { _, _, _ in throw VideoEncoderError.hardwareEncoderUnavailable }
+
+        // Subscribe BEFORE start() — the hang would occur here if start() did not finish().
+        let samplesDone = Task { () -> Bool in
+            for await _ in await encoder.encodedSamples {}
+            return true // stream terminated
+        }
+        let dropsDone = Task { () -> Bool in
+            for await _ in await encoder.drops {}
+            return true
+        }
+
+        // Force the HW-unavailable hard fail.
+        do {
+            try await encoder.start()
+            Issue.record("expected start() to throw")
+        } catch {
+            // expected
+        }
+
+        // Both iterations must complete; bound the wait so a regression fails fast, not forever.
+        try await withThrowingTaskGroup(of: Bool.self) { group in
+            group.addTask { await samplesDone.value }
+            group.addTask { await dropsDone.value }
+            group.addTask {
+                try await Task.sleep(nanoseconds: 5_000_000_000) // 5s deadline
+                throw CancellationError()
+            }
+            // Two stream-drain results must arrive before the deadline task.
+            _ = try await group.next()
+            _ = try await group.next()
+            group.cancelAll()
+        }
+    }
+
+    // MARK: - F1: second start() throws (terminal)
+
+    @Test("start() after a successful start()+stop() throws invalidLifecycleState")
+    func secondStartAfterStop_throws() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+
+        try await encoder.start()
+        await encoder.stop()
+
+        await #expect(throws: VideoEncoderError.self) {
+            try await encoder.start()
+        }
+    }
+
+    @Test("start() after a successful start() throws invalidLifecycleState (already running)")
+    func secondStartWhileRunning_throws() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+
+        try await encoder.start()
+
+        await #expect(throws: VideoEncoderError.self) {
+            try await encoder.start()
+        }
+        // The first session is still intact: ingest still encodes.
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+        #expect(mock.encodedPTS.count == 1)
+    }
+
+    @Test("start() after a FAILED start() throws invalidLifecycleState (terminal)")
+    func startAfterFailedStart_throws() async {
+        let anchor = makeFixedAnchor()
+        let encoder = VideoEncoder(
+            settings: makeSettings(),
+            width: testWidth,
+            height: testHeight,
+            fps: testFps,
+            anchor: anchor,
+            selfClocked: false
+        ) { _, _, _ in throw VideoEncoderError.hardwareEncoderUnavailable }
+
+        do {
+            try await encoder.start()
+            Issue.record("expected first start() to throw")
+        } catch {
+            // expected — first start fails
+        }
+
+        // A failed start is terminal: the second start() reports the lifecycle error, NOT
+        // another factory attempt.
+        await #expect(throws: VideoEncoderError.self) {
+            try await encoder.start()
+        }
+    }
+
+    // MARK: - F2: encodeFrame failure → logged, no counter bump, gap reflected
+
+    @Test("encodeFrame failure → no drop counters bumped, encoded count reflects the missing frame")
+    func encodeFrameFailure_documentedCurrentBehavior() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        mock.encodeStatus = kVTParameterErr // a non-noErr encode status
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        try await encoder.start()
+
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+
+        // Documented current behavior (F2): logged only. The frame is an invisible gap —
+        // it never reaches the encoded arrays, and NEITHER drop counter moves (OpAC-4.3/4.4
+        // separation intact).
+        #expect(mock.encodedPTS.isEmpty)
+        #expect(await encoder.cfrNormalizationDropCount == 0)
+        #expect(await encoder.backpressureDropCount == 0)
+    }
 }
 
 // MARK: - L5 opt-in condition
@@ -471,4 +631,6 @@ struct VideoEncoderLiveTests {
 }
 
 // swiftlint:enable no_magic_numbers
-// swiftlint:enable file_length
+// swiftlint:enable type_body_length
+// file_length stays disabled through EOF: it is a whole-file rule, so re-enabling it before the
+// last line would re-trigger on the total count. The file intentionally collects L2 + L5 paths.

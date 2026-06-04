@@ -30,6 +30,13 @@ import Foundation
 import os
 import VideoToolbox
 
+// file_length is disabled: the actor's length is driven by the lifecycle-contract,
+// KNOWN-LIMITATION, and DEFER documentation required on the one-shot lifecycle and drop paths.
+// The lifecycle state and continuations are genuinely `private` (file-scoped), so the start/stop
+// logic cannot move to a sibling extension file without widening encapsulation — the existing
+// +Configuration / +LiveSession splits work only because they touch `internal` surface.
+// swiftlint:disable file_length
+
 // MARK: - VideoEncoder
 
 /// A single-stream hardware HEVC encoder.
@@ -46,8 +53,35 @@ import VideoToolbox
 /// ### Anchored PTS (Decision #3 — critical)
 /// The PTS handed to `encodeFrame` is the ABSOLUTE host-time value built with exact integer
 /// CMTime math from the normalizer's integer `slotIndex` — see `anchoredPTS(slotIndex:)`.
+///
+/// ### One-shot lifecycle contract (for #34's author)
+/// The encoder is ONE-SHOT: `init → start() → (ingest / clockTick / tick)* → stop() → discard`.
+/// - `start()` succeeds exactly once. A second `start()` — after a successful start, after
+///   `stop()`, or after a failed (throwing) `start()` — throws `VideoEncoderError.invalidLifecycleState`.
+///   A thrown `start()` is TERMINAL: the encoder cannot be revived; create a fresh instance.
+/// - On any throwing exit from `start()` BOTH output streams (`encodedSamples`, `drops`) are
+///   finished, so a consumer that subscribed before `start()` is never left hanging on the
+///   HW-hard-fail path.
+/// - `stop()` is an unconditional, idempotent terminator: it always finishes both streams even
+///   if the session was never created.
+/// Because no restart is possible, the internal `CFRNormalizer` is never reused across sessions —
+/// the one-shot guarantee structurally removes the stale-normalizer class of bug.
 actor VideoEncoder {
     // MARK: - Types
+
+    /// The encoder's one-shot lifecycle state. See the type-level lifecycle contract.
+    ///
+    /// `nonisolated` so the synthesised `Equatable` witness (used by `state == .idle` inside the
+    /// actor) is not inferred `@MainActor` under `InferIsolatedConformances` and stays callable
+    /// from the actor's isolation.
+    nonisolated private enum State: Equatable {
+        /// Constructed, `start()` not yet called.
+        case idle
+        /// `start()` succeeded; ingest / ticks accepted.
+        case running
+        /// `stop()` ran OR `start()` threw. Terminal — no further `start()` permitted.
+        case stopped
+    }
 
     /// Builds a configured `CompressionSession` for `width × height` with `settings`,
     /// wiring the output to `sink`. Throws `VideoEncoderError.hardwareEncoderUnavailable`
@@ -92,6 +126,9 @@ actor VideoEncoder {
     /// rather than queued unbounded (OpAC-4.4).
     private let maxPendingFrames: Int
 
+    /// One-shot lifecycle state. Gates `start()` (idle-only) and `ingest()` (running-only).
+    private var state: State = .idle
+
     private var session: (any CompressionSession)?
     private var sink: EncodedSampleSink?
     private var normalizer = CFRNormalizer()
@@ -112,10 +149,17 @@ actor VideoEncoder {
     // MARK: - Output streams
 
     /// Encoded HEVC samples, in decode order, fed by the C output callback via the sink.
+    ///
+    /// The output stream is `.unbounded` by design for MVP: #32 (FileWriter, local-disk) is
+    /// expected to keep up, and a bounded policy would risk dropping a mid-GOP / keyframe sample
+    /// and corrupting the bitstream. Sustained-overflow handling (a bounded policy vs. surfacing
+    /// a recording failure) is deferred to #32 integration; do NOT add buffering policy here.
     nonisolated let encodedSamples: AsyncStream<EncodedSample>
     private let encodedSamplesContinuation: AsyncStream<EncodedSample>.Continuation
 
     /// Drop events for `DropMonitor` (#35). One `DropEvent` per backpressure drop.
+    ///
+    /// Unbounded until #35 (DropMonitor) attaches a consumer; bounding is deferred to #35.
     nonisolated let drops: AsyncStream<DropEvent>
     private let dropsContinuation: AsyncStream<DropEvent>.Continuation
 
@@ -187,39 +231,81 @@ actor VideoEncoder {
 
     /// Creates and configures the compression session.
     ///
-    /// - Throws: `RecordingError.noHardwareEncoder` when no HW HEVC encoder is available
-    ///   (the factory threw); `RecordingError.encoderSetupFailed` when a mandatory property
-    ///   could not be set.
+    /// One-shot: succeeds exactly once. See the type-level lifecycle contract.
+    ///
+    /// - Throws: `VideoEncoderError.invalidLifecycleState` when called on a non-`idle` encoder
+    ///   (already started, stopped, or after a failed start); `RecordingError.noHardwareEncoder`
+    ///   when no HW HEVC encoder is available (the factory threw, or VT reports
+    ///   `UsingHardwareAcceleratedVideoEncoder == false`); `RecordingError.encoderSetupFailed`
+    ///   when a mandatory property could not be set.
+    ///
+    /// Every throwing exit AFTER the lifecycle guard finishes both output streams and marks the
+    /// encoder `.stopped` (terminal) — so a pre-`start()` subscriber never hangs and no live HW
+    /// session can be created twice. The lifecycle guard itself throws BARE (does not finish
+    /// streams or touch the session) so a stray `start()` while `.running` leaves the live
+    /// encoder intact.
     func start() throws {
-        guard self.session == nil else { return }
+        guard self.state == .idle else {
+            self.logger.error("start() called in state \(String(describing: self.state)) — one-shot encoder")
+            throw VideoEncoderError.invalidLifecycleState
+        }
 
         let sink = EncodedSampleSink(continuation: self.encodedSamplesContinuation)
         let session: any CompressionSession
         do {
             session = try self.sessionFactory(self.width, self.height, sink)
         } catch {
-            // No software fallback (AC-6 / OpAC-4.1).
-            self.logger.error("Hardware HEVC session creation failed — no software fallback")
-            throw RecordingError.noHardwareEncoder
+            // No software fallback (AC-6 / OpAC-4.1). Capture the underlying cause (F9) before
+            // collapsing to the hard-fail contract error.
+            self.logger.error("Hardware HEVC session creation failed: \(error) — no software fallback")
+            throw self.failStart(RecordingError.noHardwareEncoder)
         }
 
         do {
             try self.configure(session: session)
         } catch {
             session.invalidate()
-            throw error
+            throw self.failStart(error)
+        }
+
+        // F6: enforce the documented mandatory-HW guarantee (AC-6 / OpAC-4.1). Query ONCE here
+        // (not per-frame); query the LOCAL `session` since `self.session` is still nil.
+        guard session.usingHardwareEncoder() else {
+            self.logger.error("Encoder reported UsingHardwareAcceleratedVideoEncoder == false — no software fallback")
+            session.invalidate()
+            throw self.failStart(RecordingError.noHardwareEncoder)
         }
 
         self.session = session
         self.sink = sink
+        self.state = .running
         if self.selfClocked {
             self.startClock()
         }
         self.logger.info("VideoEncoder started — \(self.width)×\(self.height)@\(self.fps)fps")
     }
 
+    /// Common teardown for a throwing `start()` exit: finish BOTH continuations, mark the
+    /// encoder terminal, and return the error to rethrow.
+    ///
+    /// Finishing here guarantees a consumer that subscribed before `start()` is released on the
+    /// hard-fail path instead of hanging forever (`Continuation.finish()` is idempotent). The
+    /// `.stopped` state makes the failed start terminal — a subsequent `start()` throws.
+    private func failStart(_ error: any Error) -> any Error {
+        self.state = .stopped
+        self.encodedSamplesContinuation.finish()
+        self.dropsContinuation.finish()
+        return error
+    }
+
     /// Stops the encoder: cancels the CFR clock, drains in-flight frames, tears down the
     /// session, then finishes the output streams.
+    ///
+    /// Unconditional, idempotent terminator: it ALWAYS finishes both continuations and marks the
+    /// encoder `.stopped`, even if the session was never created (e.g. `stop()` before `start()`
+    /// or after a failed `start()`) — `finish()` is idempotent. Session teardown is gated on a
+    /// live `session`, but stream termination is decoupled from it so `stop()` is always a
+    /// reliable terminator.
     ///
     /// Teardown order is load-bearing: the clock task is cancelled AND awaited first so no
     /// tick races teardown; then `completeFrames()` blocks until all in-flight output
@@ -227,15 +313,17 @@ actor VideoEncoder {
     /// THEN are the continuations finished — so no callback ever yields into a finished
     /// continuation.
     func stop() async {
-        guard let session = self.session else { return }
-        self.clockTickTask?.cancel()
-        await self.clockTickTask?.value
-        self.clockTickTask = nil
-        session.completeFrames()
-        session.invalidate()
-        self.session = nil
-        self.sink = nil
-        self.lastPixelBuffer = nil
+        if let session = self.session {
+            self.clockTickTask?.cancel()
+            await self.clockTickTask?.value
+            self.clockTickTask = nil
+            session.completeFrames()
+            session.invalidate()
+            self.session = nil
+            self.sink = nil
+            self.lastPixelBuffer = nil
+        }
+        self.state = .stopped
         self.encodedSamplesContinuation.finish()
         self.dropsContinuation.finish()
     }
@@ -296,6 +384,12 @@ actor VideoEncoder {
     /// Input frames always arrive with `isHoldRepeat == false`; this encoder owns the hold
     /// decision via the normalizer.
     func ingest(_ frame: VideoFrame) {
+        // F7: not-running guard. Frames arriving before start() or after stop() are dropped;
+        // log it rather than swallow silently. No DropEvent (that taxonomy is #35 scope).
+        guard self.state == .running else {
+            self.logger.warning("ingest called while encoder not running — frame dropped")
+            return
+        }
         let ptsSeconds = CMTimeGetSeconds(frame.ptsHostTime)
         let anchorSeconds = CMTimeGetSeconds(self.anchor.anchorTime)
         let decision = self.normalizer.processFrame(
@@ -367,7 +461,14 @@ actor VideoEncoder {
         let duration = CMTimeMake(value: 1, timescale: Int32(self.fps))
         let status = session.encodeFrame(pixelBuffer: pixelBuffer, pts: pts, duration: duration)
         if status != noErr {
-            self.logger.error("VTCompressionSessionEncodeFrame failed: \(status) at slot \(slotIndex)")
+            // F2 / KNOWN LIMITATION: the normalizer already advanced `lastEmittedSlot`, so a
+            // non-noErr encode is a permanent invisible gap in the CFR grid. For MVP this is
+            // LOGGED ONLY — surfacing encode-failure to DropMonitor is deferred to #35, which
+            // owns the drop-reason taxonomy. It is deliberately NOT counted on
+            // `encoderBackpressureDrops` (that would corrupt the OpAC-4.3/4.4 counter separation)
+            // and NOT on `cfrNormalizationDrops` (normalizer-owned). A conscious decision, not an
+            // unmarked swallow.
+            self.logger.error("VTCompressionSessionEncodeFrame failed: \(status) at slot \(slotIndex) — frame dropped")
         }
     }
 
@@ -382,3 +483,5 @@ actor VideoEncoder {
         return CMTimeAdd(self.anchor.anchorTime, slotOffset)
     }
 }
+
+// swiftlint:enable file_length

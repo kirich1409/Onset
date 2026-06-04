@@ -55,7 +55,11 @@ extension VideoEncoder {
         let status = session.setProperty(key: key, value: value)
         guard status == noErr else {
             self.logger.error("Failed to set encoder property \(key) — status \(status)")
-            throw RecordingError.encoderSetupFailed(VideoEncoderError.hardwareEncoderUnavailable)
+            // A property-set failure is NOT hardware unavailability — surface the specific key
+            // and status (F8) rather than mislabelling it `hardwareEncoderUnavailable`.
+            throw RecordingError.encoderSetupFailed(
+                VideoEncoderError.propertySetFailed(key: key as String, status: status)
+            )
         }
     }
 

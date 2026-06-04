@@ -56,11 +56,20 @@ nonisolated final class LiveCompressionSession: CompressionSession, @unchecked S
         guard let refcon = unsafe refcon else { return }
         // Recover the sink WITHOUT consuming a retain (passUnretained on the create side).
         let sink = unsafe Unmanaged<EncodedSampleSink>.fromOpaque(refcon).takeUnretainedValue()
-        guard
-            status == noErr,
-            !infoFlags.contains(.frameDropped),
-            let sampleBuffer
-        else {
+        // F3: each failure branch is logged distinctly rather than a single silent `return`.
+        // Logging only — surfacing these to a drop channel is #35 scope.
+        // `LiveCompressionSession.logger` (not `Self.`): a covariant `Self` cannot be referenced
+        // from a static stored-property initializer.
+        guard status == noErr else {
+            LiveCompressionSession.logger.error("Encode output callback failed: status \(status) — sample dropped")
+            return
+        }
+        guard !infoFlags.contains(.frameDropped) else {
+            LiveCompressionSession.logger.warning("Encode output callback reported .frameDropped — sample dropped")
+            return
+        }
+        guard let sampleBuffer else {
+            LiveCompressionSession.logger.error("Encode output callback: noErr but nil sampleBuffer — sample dropped")
             return
         }
         sink.yield(sampleBuffer: sampleBuffer)
@@ -130,6 +139,11 @@ nonisolated final class LiveCompressionSession: CompressionSession, @unchecked S
             )
         }
         guard status == noErr, let value, CFGetTypeID(value) == CFNumberGetTypeID() else {
+            // F4: DELIBERATE fail-open. A RealTime encoder should keep the pipeline flowing on a
+            // transient property-query glitch rather than stall by failing closed — returning 0
+            // lets submission proceed (the backpressure gate is skipped this frame). Logged so a
+            // persistent failure is visible.
+            Self.logger.warning("NumberOfPendingFrames query failed: status \(status) — assuming 0 (fail-open)")
             return 0
         }
         let number = unsafe unsafeDowncast(value, to: CFNumber.self)

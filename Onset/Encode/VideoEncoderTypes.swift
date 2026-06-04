@@ -127,4 +127,20 @@ nonisolated enum VideoEncoderError: Error {
     /// VideoToolbox could not create a HW-required HEVC session, or reported
     /// `UsingHardwareAcceleratedVideoEncoder == false`.
     case hardwareEncoderUnavailable
+
+    /// A mandatory `VTSessionSetProperty` call failed for `key` with `status`.
+    ///
+    /// Distinguishes a property-set failure from genuine HW unavailability: the actor wraps
+    /// this in `RecordingError.encoderSetupFailed` rather than mislabelling it as
+    /// `hardwareEncoderUnavailable`. `key` is the VT property key string; `status` is the raw
+    /// `OSStatus` returned by VideoToolbox.
+    case propertySetFailed(key: String, status: OSStatus)
+
+    /// `start()` was called on an encoder that is not in the `idle` state.
+    ///
+    /// The encoder is one-shot: `init → start() → (ingest/clockTick)* → stop() → discard`. A
+    /// second `start()` after a successful start, after `stop()`, or after a failed (throwing)
+    /// `start()` is a programmer error — it must NOT silently no-op or create a dead encoder
+    /// that yields into already-finished continuations. See `VideoEncoder`'s lifecycle contract.
+    case invalidLifecycleState
 }

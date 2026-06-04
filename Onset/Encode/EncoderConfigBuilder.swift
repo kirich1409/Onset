@@ -83,6 +83,51 @@ nonisolated struct VTEncoderSettings: Equatable {
 
     /// YCbCr colour matrix.
     nonisolated let yCbCrMatrix: YCbCrMatrix
+
+    // MARK: - Init
+
+    /// Creates a validated encoder-settings snapshot.
+    ///
+    /// Defined in the struct body (not an extension) so it SUPPRESSES the synthesised
+    /// memberwise initializer — there must be no precondition-free backdoor to a semantically
+    /// invalid VT config (F5). `EncoderConfigBuilder.build` is the normal construction path,
+    /// but direct construction must also hold these numeric invariants:
+    /// - `averageBitRate > 0` — VT rejects a non-positive target bitrate.
+    /// - `peakDataRate >= averageBitRate` — the peak cap must not sit below the average.
+    /// - `maxKeyFrameIntervalDurationSeconds > 0` — a non-positive GOP duration is meaningless.
+    ///
+    /// `nonisolated` is required under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` so the type
+    /// stays constructible from any isolation context.
+    nonisolated init(
+        averageBitRate: Int,
+        peakDataRate: Int,
+        maxKeyFrameIntervalDurationSeconds: Double,
+        profileLevel: HEVCProfileLevel,
+        allowFrameReordering: Bool,
+        realTime: Bool,
+        bitDepth: Int,
+        colorPrimaries: ColorPrimaries,
+        transferFunction: TransferFunction,
+        yCbCrMatrix: YCbCrMatrix
+    ) {
+        precondition(averageBitRate > 0, "averageBitRate must be positive")
+        precondition(peakDataRate >= averageBitRate, "peakDataRate must be >= averageBitRate")
+        precondition(
+            maxKeyFrameIntervalDurationSeconds > 0,
+            "maxKeyFrameIntervalDurationSeconds must be positive"
+        )
+
+        self.averageBitRate = averageBitRate
+        self.peakDataRate = peakDataRate
+        self.maxKeyFrameIntervalDurationSeconds = maxKeyFrameIntervalDurationSeconds
+        self.profileLevel = profileLevel
+        self.allowFrameReordering = allowFrameReordering
+        self.realTime = realTime
+        self.bitDepth = bitDepth
+        self.colorPrimaries = colorPrimaries
+        self.transferFunction = transferFunction
+        self.yCbCrMatrix = yCbCrMatrix
+    }
 }
 
 // MARK: - Equatable
