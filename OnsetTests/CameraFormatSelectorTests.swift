@@ -133,4 +133,3 @@ struct CameraFormatSelectorTests {
     }
 }
 
-// swiftlint:enable no_magic_numbers

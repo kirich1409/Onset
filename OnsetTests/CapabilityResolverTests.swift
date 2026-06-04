@@ -304,4 +304,3 @@ struct CapabilityResolverTests {
     }
 }
 
-// swiftlint:enable no_magic_numbers

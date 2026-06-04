@@ -412,4 +412,3 @@ nonisolated private let screenSourceTestLogger = Logger(
     category: "ScreenSourceTests"
 )
 
-// swiftlint:enable no_magic_numbers

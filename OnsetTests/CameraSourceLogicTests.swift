@@ -540,7 +540,7 @@ nonisolated private func collectFrames(
             return LiveCaptureResult(frames: frames, samples: samples)
         }
         group.addTask {
-            try await Task.sleep(for: .seconds(15))
+            try await Task.sleep(for: .seconds(15)) // swiftlint:disable:this no_magic_numbers
             throw L5TimeoutError()
         }
         guard let result = try await group.next() else { throw L5TimeoutError() }
@@ -605,4 +605,4 @@ nonisolated private func assertAudioSamples(_ samples: [AudioSample], anchor: Ho
     }
 }
 
-// swiftlint:enable no_magic_numbers
+

@@ -324,5 +324,4 @@ struct CapabilityProbeTests {
     }
 }
 
-// swiftlint:enable no_magic_numbers
 // swiftlint:enable type_body_length
