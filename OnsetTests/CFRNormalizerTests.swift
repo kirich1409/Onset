@@ -6,12 +6,6 @@
 // Time values are passed as Double seconds — no CoreMedia types needed.
 // Synthetic sequences are constructed by arithmetic on a base anchor.
 //
-// swiftlint:disable no_magic_numbers
-// no_magic_numbers is disabled for the whole file: these are Swift Testing structs
-// (no XCTest parent class), so the rule's `test_parent_classes` exclusion in
-// .swiftlint.yml does not apply; the numeric literals here are expected test data,
-// not magic numbers.
-
 @testable import Onset
 import Testing
 
@@ -340,5 +334,3 @@ struct CFRDecisionEquatableTests {
         #expect(enc != drp)
     }
 }
-
-// swiftlint:enable no_magic_numbers

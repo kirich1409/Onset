@@ -10,12 +10,6 @@
 @testable import Onset
 import Testing
 
-// swiftlint:disable no_magic_numbers
-// no_magic_numbers is disabled for the whole file: these are Swift Testing structs
-// (no XCTest parent class), so the rule's `test_parent_classes` exclusion in
-// .swiftlint.yml does not apply; the numeric literals here are expected test data,
-// not magic numbers.
-
 // MARK: - EncoderConfigBuilderTests
 
 @Suite("EncoderConfigBuilder")
@@ -167,5 +161,3 @@ struct EncoderConfigBuilderTests {
         #expect(settings.peakDataRate >= settings.averageBitRate)
     }
 }
-
-// swiftlint:enable no_magic_numbers

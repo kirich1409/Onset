@@ -4,10 +4,6 @@ import CoreVideo
 @testable import Onset
 import Testing
 
-// no_magic_numbers is disabled file-wide: these are Swift Testing structs (no XCTest
-// parent class), so the rule's `test_parent_classes` exclusion in .swiftlint.yml does
-// not apply; the numeric literals here are expected-value test data, not magic numbers.
-// swiftlint:disable no_magic_numbers
 // file_length is disabled: this single-concern test file covers all pure helpers from
 // CameraSource; it naturally grows alongside the helpers it tests.
 // swiftlint:disable file_length
@@ -544,7 +540,7 @@ nonisolated private func collectFrames(
             return LiveCaptureResult(frames: frames, samples: samples)
         }
         group.addTask {
-            try await Task.sleep(for: .seconds(15))
+            try await Task.sleep(for: .seconds(15)) // swiftlint:disable:this no_magic_numbers
             throw L5TimeoutError()
         }
         guard let result = try await group.next() else { throw L5TimeoutError() }
@@ -608,5 +604,3 @@ nonisolated private func assertAudioSamples(_ samples: [AudioSample], anchor: Ho
         #expect(CMTimeCompare(sample.ptsHostTime, anchor.anchorTime) >= 0)
     }
 }
-
-// swiftlint:enable no_magic_numbers
