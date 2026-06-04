@@ -2,11 +2,6 @@ import CoreGraphics
 @testable import Onset
 import Testing
 
-// no_magic_numbers is disabled file-wide: these are Swift Testing structs (no XCTest
-// parent class), so the rule's `test_parent_classes` exclusion in .swiftlint.yml does
-// not apply; the numeric literals here are expected-value test data, not magic numbers.
-// swiftlint:disable no_magic_numbers
-
 // MARK: - Helpers
 
 private func makeDisplay(
