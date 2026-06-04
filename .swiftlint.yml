@@ -114,21 +114,6 @@ cyclomatic_complexity:
   warning: 10
   error: 20
 
-modifier_order:
-  preferred_modifier_order:
-    - override
-    - acl
-    - setterACL
-    - actorIsolation
-    - dynamic
-    - mutating
-    - lazy
-    - final
-    - required
-    - convenience
-    - typeMethods
-    - owned
-
 no_magic_numbers:
   test_parent_classes:
     - XCTestCase
