@@ -7,9 +7,10 @@
 // Synthetic sequences are constructed by arithmetic on a base anchor.
 //
 // swiftlint:disable no_magic_numbers
-// no_magic_numbers is disabled file-wide: these are Swift Testing structs (no XCTest
-// parent class), so the rule's `test_parent_classes` exclusion in .swiftlint.yml does
-// not apply; the numeric literals here are expected test data, not magic numbers.
+// no_magic_numbers is disabled for the whole file: these are Swift Testing structs
+// (no XCTest parent class), so the rule's `test_parent_classes` exclusion in
+// .swiftlint.yml does not apply; the numeric literals here are expected test data,
+// not magic numbers.
 
 @testable import Onset
 import Testing
@@ -35,10 +36,10 @@ struct CFRNormalizerEvenCadenceTests {
     @Test("frames on consecutive grid points each produce encode, no drops")
     func consecutiveGridFrames_noDrops() {
         var norm = CFRNormalizer()
-        for i in 0 ..< 5 {
-            let pts = anchor + Double(i) / Double(fps)
+        for idx in 0 ..< 5 {
+            let pts = anchor + Double(idx) / Double(fps)
             let decision = norm.processFrame(ptsSeconds: pts, anchorSeconds: anchor, fps: fps)
-            let expected = CFRDecision.encode(slotIndex: i, snappedPTS: Double(i) / Double(fps), isHold: false)
+            let expected = CFRDecision.encode(slotIndex: idx, snappedPTS: Double(idx) / Double(fps), isHold: false)
             #expect(decision == expected)
         }
         #expect(norm.cfrNormalizationDrops == 0)
@@ -307,30 +308,30 @@ struct CFRNormalizerMonotonicityTests {
 struct CFRDecisionEquatableTests {
     @Test("encode with same parameters is equal")
     func encode_sameParams_isEqual() {
-        let a = CFRDecision.encode(slotIndex: 3, snappedPTS: 0.1, isHold: false)
-        let b = CFRDecision.encode(slotIndex: 3, snappedPTS: 0.1, isHold: false)
-        #expect(a == b)
+        let lhs = CFRDecision.encode(slotIndex: 3, snappedPTS: 0.1, isHold: false)
+        let rhs = CFRDecision.encode(slotIndex: 3, snappedPTS: 0.1, isHold: false)
+        #expect(lhs == rhs)
     }
 
     @Test("encode with different isHold is not equal")
     func encode_differentIsHold_notEqual() {
-        let a = CFRDecision.encode(slotIndex: 3, snappedPTS: 0.1, isHold: false)
-        let b = CFRDecision.encode(slotIndex: 3, snappedPTS: 0.1, isHold: true)
-        #expect(a != b)
+        let lhs = CFRDecision.encode(slotIndex: 3, snappedPTS: 0.1, isHold: false)
+        let rhs = CFRDecision.encode(slotIndex: 3, snappedPTS: 0.1, isHold: true)
+        #expect(lhs != rhs)
     }
 
     @Test("drop with same reason is equal")
     func drop_sameReason_isEqual() {
-        let a = CFRDecision.drop(reason: .cfrNormalizationDrops)
-        let b = CFRDecision.drop(reason: .cfrNormalizationDrops)
-        #expect(a == b)
+        let lhs = CFRDecision.drop(reason: .cfrNormalizationDrops)
+        let rhs = CFRDecision.drop(reason: .cfrNormalizationDrops)
+        #expect(lhs == rhs)
     }
 
     @Test("drop with different reasons is not equal")
     func drop_differentReasons_notEqual() {
-        let a = CFRDecision.drop(reason: .preAnchor)
-        let b = CFRDecision.drop(reason: .cfrNormalizationDrops)
-        #expect(a != b)
+        let lhs = CFRDecision.drop(reason: .preAnchor)
+        let rhs = CFRDecision.drop(reason: .cfrNormalizationDrops)
+        #expect(lhs != rhs)
     }
 
     @Test("encode and drop are not equal")
@@ -340,3 +341,5 @@ struct CFRDecisionEquatableTests {
         #expect(enc != drp)
     }
 }
+
+// swiftlint:enable no_magic_numbers

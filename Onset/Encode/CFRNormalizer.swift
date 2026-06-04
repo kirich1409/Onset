@@ -75,6 +75,7 @@ extension CFRDropReason {
         case (.preAnchor, .preAnchor),
              (.cfrNormalizationDrops, .cfrNormalizationDrops):
             true
+
         default:
             false
         }
@@ -117,10 +118,12 @@ extension CFRDecision {
     /// synthesised as `@MainActor`, unusable from `nonisolated` contexts.
     nonisolated static func == (lhs: CFRDecision, rhs: CFRDecision) -> Bool {
         switch (lhs, rhs) {
-        case let (.encode(li, ls, lh), .encode(ri, rs, rh)):
-            li == ri && ls == rs && lh == rh
-        case let (.drop(lr), .drop(rr)):
-            lr == rr
+        case let (.encode(leftSlot, leftPTS, leftHold), .encode(rightSlot, rightPTS, rightHold)):
+            leftSlot == rightSlot && leftPTS == rightPTS && leftHold == rightHold
+
+        case let (.drop(leftReason), .drop(rightReason)):
+            leftReason == rightReason
+
         default:
             false
         }
@@ -181,10 +184,6 @@ nonisolated struct CFRNormalizer: Sendable {
     /// `DropReason.cfrNormalizationDrops`. Must remain observably separate from any
     /// encoder-backpressure counter.
     private(set) nonisolated var cfrNormalizationDrops: Int = 0
-
-    // MARK: - Init
-
-    nonisolated init() {}
 
     // MARK: - Frame processing
 

@@ -10,6 +10,12 @@
 @testable import Onset
 import Testing
 
+// swiftlint:disable no_magic_numbers
+// no_magic_numbers is disabled for the whole file: these are Swift Testing structs
+// (no XCTest parent class), so the rule's `test_parent_classes` exclusion in
+// .swiftlint.yml does not apply; the numeric literals here are expected test data,
+// not magic numbers.
+
 // MARK: - EncoderConfigBuilderTests
 
 @Suite("EncoderConfigBuilder")
@@ -123,16 +129,16 @@ struct EncoderConfigBuilderTests {
 
     @Test("VTEncoderSettings Equatable — same inputs produce equal outputs")
     func equatable_sameInputsAreEqual() {
-        let a = EncoderConfigBuilder.build(config: config, width: 3840, height: 2160, fps: 60)
-        let b = EncoderConfigBuilder.build(config: config, width: 3840, height: 2160, fps: 60)
-        #expect(a == b)
+        let lhs = EncoderConfigBuilder.build(config: config, width: 3840, height: 2160, fps: 60)
+        let rhs = EncoderConfigBuilder.build(config: config, width: 3840, height: 2160, fps: 60)
+        #expect(lhs == rhs)
     }
 
     @Test("VTEncoderSettings Equatable — different resolutions are not equal")
     func equatable_differentResolutionsAreNotEqual() {
-        let a = EncoderConfigBuilder.build(config: config, width: 3840, height: 2160, fps: 60)
-        let b = EncoderConfigBuilder.build(config: config, width: 1920, height: 1080, fps: 30)
-        #expect(a != b)
+        let lhs = EncoderConfigBuilder.build(config: config, width: 3840, height: 2160, fps: 60)
+        let rhs = EncoderConfigBuilder.build(config: config, width: 1920, height: 1080, fps: 30)
+        #expect(lhs != rhs)
     }
 
     // MARK: - F5: VTEncoderSettings invariant init
@@ -161,3 +167,5 @@ struct EncoderConfigBuilderTests {
         #expect(settings.peakDataRate >= settings.averageBitRate)
     }
 }
+
+// swiftlint:enable no_magic_numbers

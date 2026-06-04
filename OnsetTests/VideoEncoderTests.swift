@@ -599,7 +599,7 @@ struct VideoEncoderTests {
 
     // MARK: - R1: configure() applies mandatory HEVC properties to the session
 
-    @Test("configure() applies RealTime / AllowFrameReordering / ProfileLevel / AverageBitRate / MaxKeyFrameIntervalDuration to the session")
+    @Test("configure() applies mandatory HEVC properties to the session")
     func configure_appliesMandatoryHEVCProperties() async throws {
         let anchor = makeFixedAnchor()
         let mock = MockCompressionSession()
