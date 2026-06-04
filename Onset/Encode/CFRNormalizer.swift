@@ -174,7 +174,7 @@ nonisolated struct CFRNormalizer {
 
     /// The last slot index that was emitted via `encode`. Initialised to `-1` so the
     /// first slot (index 0) is always considered a new slot.
-    nonisolated private(set) var lastEmittedSlot: Int = -1
+    private(set) nonisolated var lastEmittedSlot: Int = -1
 
     /// Running count of frames dropped because their computed slot was already emitted.
     ///
@@ -182,7 +182,7 @@ nonisolated struct CFRNormalizer {
     /// or pre-T0 drops. U3 reads this to populate `DropMonitor`'s counter for
     /// `DropReason.cfrNormalizationDrops`. Must remain observably separate from any
     /// encoder-backpressure counter.
-    nonisolated private(set) var cfrNormalizationDrops = 0
+    private(set) nonisolated var cfrNormalizationDrops = 0
 
     // MARK: - Frame processing
 
