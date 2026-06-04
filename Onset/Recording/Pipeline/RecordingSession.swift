@@ -84,7 +84,7 @@ actor RecordingSession {
     private var dropMonitor: DropMonitor?
 
     private var hasStarted = false
-    private var cachedStopResult: RecordingResult?
+    private var stopTask: Task<RecordingResult, Never>?
 
     // MARK: - Init
 
@@ -468,14 +468,25 @@ actor RecordingSession {
 
     /// Stops the session gracefully and returns the assembled result (AC-9).
     ///
+    /// Concurrent callers (button / hotkey / menu bar — AC-9) all await the same in-flight Task;
+    /// the teardown body runs exactly once regardless of how many callers arrive.
+    func stop() async -> RecordingResult {
+        // Memoized-task idempotency guard (AC-9). `self.stopTask = task` is assigned synchronously
+        // on the actor before the first suspension point, so a concurrent second caller entering
+        // stop() always sees the non-nil task and awaits its result — no double teardown.
+        if let stopTask { return await stopTask.value }
+        let task = Task { await self.performStop() }
+        self.stopTask = task
+        return await task.value
+    }
+
+    /// Full teardown body — called exactly once via the memoized `stopTask`.
+    ///
     /// Stop order is load-bearing (per pipeline, mirrored in `stopAndFinalizePipeline`):
     /// `source.stop()` → join frames→ingest task → `encoder.stop()` (flush) → join encoded→routeVideo
     /// task → (camera) drain audio task → `markFinished()` → parallel `finish()` (one `.failed` must
     /// not fail the other) → assemble `RecordingResult`.
-    func stop() async -> RecordingResult {
-        // Idempotency guard: a second call returns the result from the first (AC-9).
-        if let cached = self.cachedStopResult { return cached }
-
+    private func performStop() async -> RecordingResult {
         // Stop both video pipelines in the correct order (sources → encoders → routing joined).
         for kind in [RecordingPipelineKind.screen, .camera] {
             guard let pipeline = self.takePipeline(kind) else { continue }
@@ -524,7 +535,6 @@ actor RecordingSession {
             degradedWarning: counters.encoderBackpressureDrops > 0
         )
         self.logger.info("RecordingSession stopped — files=\(result.outputURLs.count) warn=\(result.degradedWarning)")
-        self.cachedStopResult = result
         return result
     }
 

@@ -674,6 +674,49 @@ struct RecordingSessionStopTests {
             "drop counter must be non-zero (ensures non-vacuous comparison)"
         )
     }
+
+    @Test("concurrent stop() calls run teardown once — same result, finishCallCount == 1")
+    func stop_concurrent_runsOnce() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.bothWritersCreated }
+
+        // Emit a real drop so the counters are non-zero — vacuous equality would pass even without
+        // the memoized-task fix (both returns of zeroed counters look "equal").
+        let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
+        encoders.screenEncoder.emitDrop(DropEvent(reason: .encoderBackpressureDrops, count: 1, detectedAt: dropPts))
+
+        // Fire two concurrent stop() calls. Actor serialization guarantees the first to arrive
+        // assigns stopTask before the second runs, so both observe the same Task and the teardown
+        // body executes exactly once.
+        async let stop1 = session.stop()
+        async let stop2 = session.stop()
+        let (first, second) = await (stop1, stop2)
+
+        // Both results must be identical (same URLs, same drop counters, same warning flag).
+        #expect(first.outputURLs == second.outputURLs, "concurrent stop() must return identical URLs")
+        #expect(
+            first.drops.encoderBackpressureDrops == second.drops.encoderBackpressureDrops,
+            "concurrent stop() must return identical drop counters"
+        )
+        #expect(
+            first.degradedWarning == second.degradedWarning,
+            "concurrent stop() must return identical degradedWarning"
+        )
+        // Non-vacuous: the first result must carry the emitted drop.
+        #expect(first.drops.encoderBackpressureDrops > 0, "drop counter must be non-zero")
+
+        // Teardown ran exactly once — each writer's finish() was called once, not twice.
+        #expect(writers.screenWriter.finishCallCount == 1, "screen writer finish() must be called exactly once")
+        #expect(writers.cameraWriter.finishCallCount == 1, "camera writer finish() must be called exactly once")
+    }
 }
 
 // MARK: - AC-12 — revoke asymmetry
