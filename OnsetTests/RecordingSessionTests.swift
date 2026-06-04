@@ -21,6 +21,7 @@
 import AVFoundation
 import CoreMedia
 @testable import Onset
+import os
 import Testing
 
 // MARK: - Fakes (encoder / source)
@@ -841,6 +842,17 @@ private func l5RecordingEnabled() -> Bool {
     ProcessInfo.processInfo.environment["ONSET_RUN_L5_CAPTURE"] == "1"
 }
 
+/// Returns `true` when the L5 test should preserve its output files after the run.
+/// Set `ONSET_L5_KEEP_OUTPUT=1` in the scheme environment before running.
+private func l5KeepOutput() -> Bool {
+    ProcessInfo.processInfo.environment["ONSET_L5_KEEP_OUTPUT"] == "1"
+}
+
+nonisolated private let l5Logger = Logger(
+    subsystem: "dev.androidbroadcast.Onset",
+    category: "RecordingSessionL5Tests"
+)
+
 @Suite("RecordingSession — L5 live recording", .serialized, .timeLimit(.minutes(2)))
 struct RecordingSessionLiveTests {
     @Test(
@@ -870,10 +882,22 @@ struct RecordingSessionLiveTests {
         )
 
         // Write to a temp dir, NOT ~/Movies.
-        let tempDir = FileManager.default.temporaryDirectory
-            .appending(path: "RecordingSessionL5-\(UUID().uuidString)", directoryHint: .isDirectory)
+        // When ONSET_L5_KEEP_OUTPUT=1 use a stable path so files survive the test run for inspection.
+        let keepOutput = l5KeepOutput()
+        let tempDir: URL
+        if keepOutput {
+            tempDir = FileManager.default.temporaryDirectory
+                .appending(path: "OnsetL5Acceptance", directoryHint: .isDirectory)
+            // Remove any leftover from a previous run then create clean.
+            try? FileManager.default.removeItem(at: tempDir)
+        } else {
+            tempDir = FileManager.default.temporaryDirectory
+                .appending(path: "RecordingSessionL5-\(UUID().uuidString)", directoryHint: .isDirectory)
+        }
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            if !keepOutput { try? FileManager.default.removeItem(at: tempDir) }
+        }
 
         let writerFactory = LiveWriterFactory(configuration: config) { kind in
             let suffix = kind == .screen ? "screen" : "camera"
@@ -895,6 +919,12 @@ struct RecordingSessionLiveTests {
         ))
         try await Task.sleep(nanoseconds: 5_000_000_000) // 5 s
         let result = await session.stop()
+
+        if keepOutput, result.outputURLs.count >= 2 {
+            let screen = result.outputURLs[0].path
+            let camera = result.outputURLs[1].path
+            l5Logger.info("L5_KEEP_OUTPUT screen=\(screen) camera=\(camera)")
+        }
 
         #expect(result.outputURLs.count == 2, "both files should be produced")
         for url in result.outputURLs {
