@@ -186,4 +186,3 @@ struct ScreenStreamConfigurationBuilderTests {
         #expect(streamConfig.height == 2160)
     }
 }
-

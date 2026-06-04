@@ -303,4 +303,3 @@ struct CapabilityResolverTests {
         #expect(plan.displayID == 42)
     }
 }
-

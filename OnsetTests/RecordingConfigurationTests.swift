@@ -170,4 +170,3 @@ struct RecordingConfigurationTests {
         #expect(!fits)
     }
 }
-

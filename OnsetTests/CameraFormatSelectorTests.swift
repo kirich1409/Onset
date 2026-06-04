@@ -132,4 +132,3 @@ struct CameraFormatSelectorTests {
         #expect(best.maxFps == 30)
     }
 }
-

@@ -232,4 +232,3 @@ struct MicrophoneDeviceTests {
         #expect(first.uniqueID != second.uniqueID)
     }
 }
-

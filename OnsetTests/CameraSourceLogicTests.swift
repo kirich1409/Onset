@@ -604,5 +604,3 @@ nonisolated private func assertAudioSamples(_ samples: [AudioSample], anchor: Ho
         #expect(CMTimeCompare(sample.ptsHostTime, anchor.anchorTime) >= 0)
     }
 }
-
-

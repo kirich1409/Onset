@@ -411,4 +411,3 @@ nonisolated private let screenSourceTestLogger = Logger(
     subsystem: "dev.androidbroadcast.Onset",
     category: "ScreenSourceTests"
 )
-

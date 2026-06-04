@@ -144,4 +144,3 @@ struct EffectivePermissionsTests {
         #expect(sut.authorizedCount == 3)
     }
 }
-

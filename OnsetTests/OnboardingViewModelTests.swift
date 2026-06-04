@@ -286,4 +286,3 @@ struct OnboardingViewModelTests {
         #expect(fake.openMicrophoneSettingsCallCount == 1)
     }
 }
-
