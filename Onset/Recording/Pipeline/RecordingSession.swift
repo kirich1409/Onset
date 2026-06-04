@@ -42,7 +42,7 @@ actor RecordingSession {
 
     // MARK: - Inputs
 
-    private let plan: ResolvedRecordingPlan
+    private var plan: ResolvedRecordingPlan
     private let display: Display
     private let cameraDevice: CameraDevice?
     private let cameraFormat: CameraFormat?
@@ -84,6 +84,8 @@ actor RecordingSession {
     private var dropMonitor: DropMonitor?
 
     private var hasStarted = false
+    private var hasStopped = false
+    private var cachedStopResult: RecordingResult?
 
     // MARK: - Init
 
@@ -130,7 +132,8 @@ actor RecordingSession {
     /// Starts the recording session.
     ///
     /// Sequence (see type doc + spec §"Единая эпоха старта"):
-    /// 1. `CapabilityProbe` (AC-6): `.noHardwareEncoder` / `.budgetExceeded` → throw, no start.
+    /// 1. `CapabilityProbe` (AC-6): `.noHardwareEncoder` → throw, no start.
+    ///    `.budgetExceeded(suggested:)` → adopt the reduced profile and continue (AC-5).
     /// 2. Resolve the start plan from permissions + device presence (AC-11) → throw on no video.
     /// 3. Capture the single anchor / T0.
     /// 4. Build `DualFileOutputStage` (writers created lazily on first sample).
@@ -140,8 +143,8 @@ actor RecordingSession {
     /// 7. Start the sources (anchored to the shared anchor).
     ///
     /// - Parameter permissions: The effective permissions at start time (AC-11 gating).
-    /// - Throws: `RecordingError` (`.noHardwareEncoder`, `.budgetExceeded`, `.noVideoSource`, or an
-    ///   encoder/setup error). On any throw nothing is left running and no writers are created.
+    /// - Throws: `RecordingError` (`.noHardwareEncoder`, `.noVideoSource`, or an encoder/setup
+    ///   error). On any throw nothing is left running and no writers are created.
     func start(permissions: EffectivePermissions) async throws {
         precondition(!self.hasStarted, "RecordingSession.start() is one-shot")
         self.hasStarted = true
@@ -171,7 +174,8 @@ actor RecordingSession {
 
     // MARK: - Start helpers
 
-    /// Capability pre-flight (AC-6): throws on the no-HW / budget paths, no silent fallback.
+    /// Capability pre-flight (AC-6/AC-5): throws on the no-HW path; adopts the reduced profile
+    /// on `.budgetExceeded` (AC-5: start with the suggested plan rather than aborting).
     private func runCapabilityPreflight() throws {
         switch self.probe() {
         case .ok:
@@ -181,9 +185,12 @@ actor RecordingSession {
             self.logger.error("CapabilityProbe: no hardware HEVC encoder — start blocked (AC-6)")
             throw RecordingError.noHardwareEncoder
 
-        case .budgetExceeded:
-            self.logger.error("CapabilityProbe: budget exceeded — start blocked (AC-6/AC-5)")
-            throw RecordingError.budgetExceeded
+        case let .budgetExceeded(suggested):
+            // AC-5: budget was exceeded; the probe resolved a reduced profile that fits within the
+            // budget. Adopt it and continue — do NOT abort. The caller observes the reduced
+            // dimensions via the session's output files.
+            self.logger.warning("CapabilityProbe: budget exceeded — starting with reduced profile (AC-5)")
+            self.plan = suggested
         }
     }
 
@@ -467,6 +474,10 @@ actor RecordingSession {
     /// task → (camera) drain audio task → `markFinished()` → parallel `finish()` (one `.failed` must
     /// not fail the other) → assemble `RecordingResult`.
     func stop() async -> RecordingResult {
+        // Idempotency guard: a second call returns the result from the first (AC-9).
+        if let cached = self.cachedStopResult { return cached }
+        self.hasStopped = true
+
         // Stop both video pipelines in the correct order (sources → encoders → routing joined).
         for kind in [RecordingPipelineKind.screen, .camera] {
             guard let pipeline = self.takePipeline(kind) else { continue }
@@ -491,10 +502,21 @@ actor RecordingSession {
         // markFinished + parallel finish on every remaining writer (AC-9 independence).
         let finishResults = await self.stage?.finishAll() ?? [:]
 
-        // DropMonitor snapshot for the warning flag + counters.
+        // Log any writer failures so they are never silently dropped.
+        for (kind, finishResult) in finishResults {
+            if case let .failed(url, error) = finishResult {
+                self.logger.error(
+                    "Writer \(String(describing: kind)) failed — url=\(url.lastPathComponent) error=\(error)"
+                )
+            }
+        }
+
+        // Stop the monitor first so its observe tasks fully drain before snapshot().
+        // encoder.stop() finished the drop streams; dropMonitor.stop() awaits those tasks, ensuring
+        // every in-flight DropEvent is ingested before the counters are read.
+        await self.dropMonitor?.stop()
         let counters = await self.dropMonitor?.snapshot()
             ?? DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0)
-        await self.dropMonitor?.stop()
         self.dropMonitor = nil
 
         let result = RecordingResult(
@@ -504,6 +526,7 @@ actor RecordingSession {
             degradedWarning: counters.encoderBackpressureDrops > 0
         )
         self.logger.info("RecordingSession stopped — files=\(result.outputURLs.count) warn=\(result.degradedWarning)")
+        self.cachedStopResult = result
         return result
     }
 

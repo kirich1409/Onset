@@ -68,11 +68,19 @@ private final class FakeEncoder: EncoderControlling, @unchecked Sendable {
     func emit(_ sample: EncodedSample) {
         self.samplesContinuation.yield(sample)
     }
+
+    /// Test hook: emit a DropEvent on the drops stream (e.g. a backpressure drop for T1/Gap B).
+    func emitDrop(_ event: DropEvent) {
+        self.dropsContinuation.yield(event)
+    }
 }
 
 private final class FakeEncoderFactory: EncoderFactory, @unchecked Sendable {
     let screenEncoder = FakeEncoder()
     let cameraEncoder = FakeEncoder()
+
+    /// Captures the plan passed to the most-recent `makeEncoder` call (Gap A: verify AC-5 adoption).
+    private(set) var lastPlan: ResolvedRecordingPlan?
 
     func makeEncoder(
         kind: RecordingPipelineKind,
@@ -81,12 +89,13 @@ private final class FakeEncoderFactory: EncoderFactory, @unchecked Sendable {
         anchor: HostTimeAnchor
     )
     -> any EncoderControlling {
+        self.lastPlan = plan
         switch kind {
         case .screen:
-            self.screenEncoder
+            return self.screenEncoder
 
         case .camera:
-            self.cameraEncoder
+            return self.cameraEncoder
         }
     }
 }
@@ -211,6 +220,7 @@ private final class SessionFakeWriter: WriterControlling, @unchecked Sendable {
     private(set) var appendedAudio = 0
     private(set) var markFinishedCalled = false
     private(set) var finishCalled = false
+    private(set) var finishCallCount = 0
     var finishResult: FinishResult
 
     nonisolated let drops: AsyncStream<DropEvent>
@@ -243,6 +253,7 @@ private final class SessionFakeWriter: WriterControlling, @unchecked Sendable {
 
     func finish() async -> FinishResult {
         self.finishCalled = true
+        self.finishCallCount += 1
         return self.finishResult
     }
 }
@@ -418,6 +429,44 @@ struct RecordingSessionProbeTests {
         #expect(!encoders.screenEncoder.startCalled)
         #expect(!sources.screenSource.startCalled)
     }
+
+    @Test("probe .budgetExceeded → start() continues with reduced plan, writers created (AC-5)")
+    func budgetExceeded_startsWithReducedPlan() async throws {
+        // Reduced plan: lower resolution so the pixel budget is within limits.
+        let reducedPlan = ResolvedRecordingPlan(
+            displayID: 1,
+            screenWidth: 854,
+            screenHeight: 480,
+            screenFps: 30,
+            cameraPlan: nil
+        )
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let probe: @Sendable () -> ProbeResult = { .budgetExceeded(suggested: reducedPlan) }
+        // Session init uses SessionFixtures.plan() (1280×720) — the probe overrides it to reducedPlan.
+        let session = makeSession(
+            encoders: encoders,
+            writers: writers,
+            sources: sources,
+            probe: probe,
+            includeCamera: false // reducedPlan has no camera; disable camera device too
+        )
+
+        // Must NOT throw — AC-5 requires starting with the reduced profile.
+        try await session.start(permissions: EffectivePermissions(
+            screenAvailable: true,
+            cameraAvailable: false,
+            microphoneAvailable: false
+        ))
+
+        // The encoder was created using the reduced plan's dimensions, not the session's original.
+        let lastPlan = try #require(encoders.lastPlan, "encoder must have been created")
+        #expect(lastPlan == reducedPlan, "encoder must receive the budget-reduced plan (AC-5)")
+        #expect(encoders.screenEncoder.startCalled, "screen encoder must have started")
+
+        _ = await session.stop()
+    }
 }
 
 // MARK: - AC-7 — shared T0
@@ -483,8 +532,8 @@ struct RecordingSessionStopTests {
         #expect(result.outputURLs.count == 2)
     }
 
-    @Test("degradedWarning true only when backpressure drops > 0")
-    func degradedWarning_flag() async throws {
+    @Test("degradedWarning false when no backpressure drops")
+    func degradedWarning_false_whenNoDrops() async throws {
         let probe = SampleProbeOK()
         let encoders = FakeEncoderFactory()
         let writers = SessionFakeWriterFactory()
@@ -492,13 +541,74 @@ struct RecordingSessionStopTests {
         let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
 
         try await session.start(permissions: SessionFixtures.fullPermissions())
-        // Emit a backpressure drop on the screen encoder → DropMonitor counts it.
         try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
         _ = await eventually { writers.screenWriter.startSourceTime != nil }
-        // (No drops emitted → degradedWarning should be false.)
+        // No drops emitted → degradedWarning should be false.
 
         let result = await session.stop()
         #expect(result.degradedWarning == false, "no backpressure drops → no warning (AC-8 policy)")
+    }
+
+    @Test("degradedWarning true when backpressure drops > 0")
+    func degradedWarning_true_whenBackpressureDropped() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        // Emit a video frame to trigger writer creation.
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.bothWritersCreated }
+
+        // Emit a backpressure drop on the screen encoder → DropMonitor must count it.
+        let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
+        encoders.screenEncoder.emitDrop(DropEvent(reason: .encoderBackpressureDrops, count: 1, detectedAt: dropPts))
+
+        let result = await session.stop()
+        #expect(result.degradedWarning == true, "backpressure drop → degradedWarning must be true (AC-8)")
+        #expect(result.drops.encoderBackpressureDrops > 0, "drop counter must reflect the emitted drop")
+    }
+
+    @Test("stop() is idempotent — second call returns the same result (Gap B)")
+    func stop_idempotency_returnsSameResult() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.bothWritersCreated }
+
+        // Emit a real drop so the counters are non-zero — otherwise both calls returning zeroed
+        // counters would pass vacuously even without the idempotency fix.
+        let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
+        encoders.screenEncoder.emitDrop(DropEvent(reason: .encoderBackpressureDrops, count: 1, detectedAt: dropPts))
+
+        let first = await session.stop()
+        let second = await session.stop()
+
+        // Both calls must return the same outcome — field-by-field since FinishResult.failed carries
+        // an existential Error which is not Equatable.
+        #expect(first.outputURLs == second.outputURLs, "stop() must return identical URLs on re-entry")
+        #expect(
+            first.drops.encoderBackpressureDrops == second.drops.encoderBackpressureDrops,
+            "stop() must return identical drop counters on re-entry"
+        )
+        #expect(
+            first.degradedWarning == second.degradedWarning,
+            "stop() must return identical degradedWarning on re-entry"
+        )
+        // The first result must have non-zero drops to confirm the test is non-vacuous.
+        #expect(
+            first.drops.encoderBackpressureDrops > 0,
+            "drop counter must be non-zero (ensures non-vacuous comparison)"
+        )
     }
 }
 
@@ -565,7 +675,43 @@ struct RecordingSessionRevokeTests {
         let screenGotMore = await eventually { writers.screenWriter.appendedVideo > beforeScreenVideo }
         #expect(screenGotMore, "screen writer must still receive video after camera revoke")
 
+        // T2: screen audio must NOT grow after camera disconnect. Settle by waiting for the screen
+        // video frame above to be processed (which proves all pipeline events are ordered past the
+        // disconnect), then assert the audio count is unchanged.
+        let audioCountAfterDisconnect = writers.screenWriter.appendedAudio
+        // Emit one more screen frame and wait for it — this is the settle point.
+        let beforeSecondFrame = writers.screenWriter.appendedVideo
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 3.0))
+        _ = await eventually { writers.screenWriter.appendedVideo > beforeSecondFrame }
+        #expect(
+            writers.screenWriter.appendedAudio == audioCountAfterDisconnect,
+            "screen writer must not receive audio after camera (mic) disconnect (AC-12)"
+        )
+
         _ = await session.stop()
+    }
+
+    @Test("early-finalised writer finish() is called exactly once (AC-12 double-finalize guard)")
+    func earlyFinalize_finishCalledOnce() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.bothWritersCreated }
+
+        // Display disconnects → screen pipeline finalised early (revoke path).
+        sources.screenSource.emitEvent(.displayDisconnected)
+        _ = await eventually { writers.screenWriter.finishCalled }
+
+        // stop() must NOT call finish() on the already-early-finalised screen writer again.
+        _ = await session.stop()
+
+        #expect(writers.screenWriter.finishCallCount == 1, "screen writer finish() must be called exactly once (AC-12)")
     }
 }
 

@@ -79,6 +79,9 @@ actor DualFileOutputStage {
     /// Already-retimed mic buffers awaiting the first writer of each pipeline (drop-oldest cap).
     private var pendingAudio: [RetimedAudioBuffer] = []
 
+    /// Cumulative count of pending-audio buffers dropped on overflow (observability, FIX-2).
+    private(set) var pendingAudioDropped = 0
+
     // MARK: - Init
 
     /// - Parameters:
@@ -313,6 +316,11 @@ actor DualFileOutputStage {
             // Drop-oldest: a static screen produces no frames, so its writer is created late and
             // the cap can be hit before it exists — the earliest mic audio is then sacrificed and
             // the late writer's audio track simply starts later. Documented edge (AC-7 replay).
+            self.pendingAudioDropped += 1
+            let cap = Self.maxPendingAudioBuffers
+            self.logger.warning(
+                "Dropping oldest pending-audio buffer (cap=\(cap), total dropped: \(self.pendingAudioDropped))"
+            )
             self.pendingAudio.removeFirst()
         }
         self.pendingAudio.append(carrier)
@@ -356,7 +364,14 @@ actor DualFileOutputStage {
         let result = await pipelineWriter.writer.finish()
         pipelineWriter.finishResult = result
         self.writers[kind] = pipelineWriter
-        self.logger.info("Finalised \(String(describing: kind)) pipeline early (revoke)")
+        if case let .failed(url, error) = result {
+            let name = url.lastPathComponent
+            self.logger.error(
+                "Finalise \(String(describing: kind)) pipeline (revoke) FAILED — url=\(name) error=\(error)"
+            )
+        } else {
+            self.logger.info("Finalised \(String(describing: kind)) pipeline early (revoke)")
+        }
     }
 
     // MARK: - Stop
@@ -399,6 +414,11 @@ actor DualFileOutputStage {
         var updated = pipelineWriter
         updated.finishResult = result
         self.writers[kind] = updated
+        if case let .failed(url, error) = result {
+            self.logger.error(
+                "Finish \(String(describing: kind)) writer FAILED — url=\(url.lastPathComponent) error=\(error)"
+            )
+        }
         return result
     }
 }
