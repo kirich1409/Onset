@@ -32,19 +32,6 @@ private enum WindowID {
     static let recording = "recording"
 }
 
-// MARK: - AppActivationDelegate
-
-/// Satisfies the `NSApplicationDelegateAdaptor` requirement for the app struct.
-///
-/// Focus on launch is handled by `WindowActionsBridge.onAppear` instead of here.
-/// `applicationDidFinishLaunching` fires before SwiftUI materialises the `Window` scene,
-/// so calling `NSApp.activate()` at that point wins no focus — the window does not yet
-/// exist and the system leaves Finder frontmost. The activation call therefore lives in
-/// `WindowActionsBridge.onAppear`, deferred by one runloop turn via `Task { @MainActor in }`,
-/// guaranteeing the window is on screen before activation is requested.
-@MainActor
-final class AppActivationDelegate: NSObject, NSApplicationDelegate {}
-
 // MARK: - OnsetApp
 
 @main
@@ -57,10 +44,6 @@ struct OnsetApp: App {
         static let recordingWidth: CGFloat = 370
         static let recordingHeight: CGFloat = 420
     }
-
-    // MARK: - App delegate (activation policy under LSUIElement)
-
-    @NSApplicationDelegateAdaptor(AppActivationDelegate.self) private var appDelegate
 
     // MARK: - Composition root
 
@@ -109,9 +92,7 @@ struct OnsetApp: App {
         // Fixed-size window that wraps the content — prevents user resizing.
         .windowResizability(.contentSize)
         .defaultSize(width: WindowDefaults.width, height: WindowDefaults.height)
-        // Force the launch window to present under LSUIElement: an accessory-at-launch app does NOT
-        // auto-open its `Window` scene, which would regress onboarding (Epic 2). `.presented` opens
-        // it at launch; `WindowActionsBridge.onAppear` activates the app once the window exists.
+        // Explicitly open the main window at launch; a regular app focuses it automatically.
         .defaultLaunchBehavior(.presented)
 
         // The recording window (#37). Phase 0 renders a minimal placeholder; the real RecordingView
@@ -170,14 +151,6 @@ private struct WindowActionsBridge: View {
                     }
                 )
                 self.coordinator.enterMain()
-                // Activate the app once the window has materialised. `applicationDidFinishLaunching`
-                // fires before SwiftUI creates the Window scene, so activation there is a no-op for
-                // LSUIElement apps. A one-runloop-turn Task hop guarantees the window is on screen
-                // before NSApp.activate() is called. Skipped under XCTest (AppActivation guard).
-                Task { @MainActor in
-                    AppActivation.bringToFront()
-                    appLogger.info("Main window appeared — activated app for launch focus")
-                }
             }
     }
 }
@@ -254,21 +227,13 @@ private struct MenuBarContent: View {
 
 // MARK: - AppActivation
 
-/// Brings the menu-bar accessory app to the front on every window-show path.
+/// Brings the app to the front when a window is reopened from the menu bar.
 ///
-/// Plain `NSApp.activate()` is a no-op for an `LSUIElement = YES` accessory: the OS keeps the
-/// process in `.accessory` policy and excludes it from normal activation promotion — Finder stays
-/// frontmost. Switching to `.regular` first makes the process activatable (a transient Dock icon
-/// appears while a window is open — accepted behaviour), then `NSApp.activate()` succeeds.
-/// `activate(ignoringOtherApps:)` is deprecated and rejected by `SWIFT_TREAT_WARNINGS_AS_ERRORS`.
-///
-/// Skipped under XCTest: test hosts must not flip activation policy or steal focus.
+/// `NSApp.activate()` suffices for a regular app — no activation-policy switching needed.
+/// Skipped under XCTest: test hosts must not steal focus.
 private enum AppActivation {
     static func bringToFront() {
         guard !isRunningUnderXCTest else { return }
-        // Switch to .regular so NSApp.activate() can promote the process to frontmost.
-        // Without this, NSApp.activate() is a no-op for an LSUIElement accessory process.
-        NSApp.setActivationPolicy(.regular)
         NSApp.activate()
     }
 }
