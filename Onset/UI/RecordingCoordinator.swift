@@ -247,6 +247,14 @@ final class RecordingCoordinator {
         self.phase = .main
     }
 
+    /// Clears the degraded-warning flag after the user has acknowledged the alert (AC-9).
+    ///
+    /// Called by `MainView` on alert dismiss so the flag does not persist across subsequent
+    /// recordings and trigger a stale alert on re-appearance.
+    func acknowledgeDegradedWarning() {
+        self.lastDegradedWarning = false
+    }
+
     // MARK: - Start (AC-3)
 
     /// Starts a recording for the given request. On success: hides the main window, opens the

@@ -46,6 +46,12 @@ struct MainView: View {
     /// Called when the user wants to return to onboarding.
     let onReturnToOnboarding: () -> Void
 
+    // MARK: - State
+
+    /// Drives the AC-9 degraded-warning alert. Set when `coordinator.lastDegradedWarning`
+    /// becomes true (either via `.onChange` or on re-appear after stop).
+    @State private var showDegradedAlert = false
+
     // MARK: - Body
 
     var body: some View {
@@ -59,6 +65,28 @@ struct MainView: View {
         .frame(minWidth: Metrics.windowMinWidth, minHeight: Metrics.windowMinHeight)
         .task {
             await self.model.loadDevices()
+        }
+        // AC-9: surface degraded-recording warning on return to main window.
+        // `.onAppear` covers the case where the flag is already set when the main window
+        // re-mounts (stop() sets the flag before opening the main window). `.onChange`
+        // covers any later asynchronous transition.
+        .onAppear {
+            if self.model.coordinator.lastDegradedWarning {
+                self.showDegradedAlert = true
+            }
+        }
+        .onChange(of: self.model.coordinator.lastDegradedWarning) { _, newValue in
+            if newValue {
+                self.showDegradedAlert = true
+            }
+        }
+        .alert("Запись завершена с ошибками", isPresented: self.$showDegradedAlert) {
+            Button("ОК") {
+                self.model.coordinator.acknowledgeDegradedWarning()
+                self.showDegradedAlert = false
+            }
+        } message: {
+            Text("Во время записи были пропущены кадры из-за перегрузки диска. Видеофайл может содержать пропуски.")
         }
     }
 
