@@ -1,4 +1,3 @@
-import AVFoundation
 import os
 
 // MARK: - MainViewModel — Device loading
@@ -69,13 +68,13 @@ extension MainViewModel {
 extension MainViewModel {
     /// Builds the recording checklist from currently selected devices.
     ///
-    /// Resolves human-readable device names via `AVCaptureDevice(uniqueID:)`.
+    /// Delegates name resolution to `cameraLabel(for:)` / `microphoneLabel(for:)`.
     func buildChecklist(display: Display) -> RecordingChecklist {
         let screenDesc = "\(display.pixelWidth)×\(display.pixelHeight)"
 
         var cameraDesc: String?
         if let camera = self.selectedCamera {
-            let name = AVCaptureDevice(uniqueID: camera.uniqueID)?.localizedName ?? "Камера"
+            let name = self.cameraLabel(for: camera)
             if let fmt = try? CameraFormatSelector.pickBestFormat(
                 from: camera.formats,
                 minFps: Double(RecordingConfiguration.mvpDefault.minCameraFps)
@@ -88,7 +87,7 @@ extension MainViewModel {
 
         var micDesc: String?
         if let mic = self.selectedMic {
-            micDesc = AVCaptureDevice(uniqueID: mic.uniqueID)?.localizedName ?? "Микрофон"
+            micDesc = self.microphoneLabel(for: mic)
         }
 
         return RecordingChecklist(
