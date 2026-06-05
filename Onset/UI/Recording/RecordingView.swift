@@ -90,8 +90,6 @@ struct RecordingContentView: View {
         static let stopButtonIconSpacing: CGFloat = 6
         static let statusDotSize: CGFloat = 8
 
-        static let revokedValueOpacity = 0.5
-
         // Typography
         static let statusFontSize: CGFloat = 13
         static let timerFontSize: CGFloat = 56
@@ -200,7 +198,7 @@ struct RecordingContentView: View {
             Spacer()
             Text(RecordingDisplayMapper.checklistRowValueText(value: value, isLive: isLive))
                 .font(.system(size: Metrics.checklistLabelFontSize))
-                .foregroundStyle(isLive ? Color.secondary : Color.secondary.opacity(Metrics.revokedValueOpacity))
+                .foregroundStyle(RecordingDisplayMapper.checklistRowValueTextColor(isLive: isLive))
             Image(systemName: RecordingDisplayMapper.checklistRowIcon(isLive: isLive))
                 .font(.system(size: Metrics.checklistCheckmarkFontSize, weight: .semibold))
                 .foregroundStyle(RecordingDisplayMapper.checklistRowIconColor(isLive: isLive))
@@ -342,6 +340,11 @@ nonisolated enum RecordingDisplayMapper {
 
     // MARK: Checklist row liveness (#39 / AC-12)
 
+    /// Opacity applied to the value text color when a source is revoked.
+    ///
+    /// Dims `.secondary` to visually distinguish a stopped source from an active one.
+    static let revokedValueTextOpacity = 0.5
+
     /// SF Symbol name for the checklist row status icon.
     ///
     /// - Live: «checkmark» (green, source is recording).
@@ -364,6 +367,14 @@ nonisolated enum RecordingDisplayMapper {
     /// - Revoked: appends «· остановлен» to signal the source stopped mid-recording.
     static func checklistRowValueText(value: String, isLive: Bool) -> String {
         isLive ? value : "\(value) · остановлен"
+    }
+
+    /// Foreground color of the checklist row value text.
+    ///
+    /// - Live: `.secondary` (full opacity).
+    /// - Revoked: `.secondary` dimmed by `revokedValueTextOpacity` (visually de-emphasised).
+    static func checklistRowValueTextColor(isLive: Bool) -> Color {
+        isLive ? .secondary : .secondary.opacity(self.revokedValueTextOpacity)
     }
 }
 

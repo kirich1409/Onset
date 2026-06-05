@@ -204,4 +204,17 @@ struct ChecklistLivenessMapperTests {
         let result = RecordingDisplayMapper.checklistRowValueText(value: "", isLive: false)
         #expect(result == " · остановлен")
     }
+
+    // MARK: Value text color
+
+    @Test("Live source value text color is .secondary")
+    func liveValueTextColor() {
+        #expect(RecordingDisplayMapper.checklistRowValueTextColor(isLive: true) == .secondary)
+    }
+
+    @Test("Revoked source value text color is dimmed .secondary")
+    func revokedValueTextColor() {
+        let expected = Color.secondary.opacity(RecordingDisplayMapper.revokedValueTextOpacity)
+        #expect(RecordingDisplayMapper.checklistRowValueTextColor(isLive: false) == expected)
+    }
 }

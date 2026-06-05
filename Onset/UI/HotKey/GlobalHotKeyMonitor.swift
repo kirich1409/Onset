@@ -69,13 +69,15 @@ final class GlobalHotKeyMonitor {
         // deinit is nonisolated in Swift 6. Carbon cleanup functions accept opaque pointers
         // and are thread-safe to call from any thread. The handles were written on the main
         // thread; nil handles make the calls no-ops (guard-checked below).
-        if let ref = unsafe eventHandlerRef {
-            // `unsafe`: RemoveEventHandler takes EventHandlerRef (OpaquePointer).
-            unsafe RemoveEventHandler(ref)
-        }
+        // Unregister the hotkey before removing the handler so Carbon can't dispatch an
+        // event mid-teardown (Carbon-documented safe teardown order).
         if let ref = unsafe eventHotKeyRef {
             // `unsafe`: UnregisterEventHotKey takes EventHotKeyRef (OpaquePointer).
             unsafe UnregisterEventHotKey(ref)
+        }
+        if let ref = unsafe eventHandlerRef {
+            // `unsafe`: RemoveEventHandler takes EventHandlerRef (OpaquePointer).
+            unsafe RemoveEventHandler(ref)
         }
     }
 
@@ -83,7 +85,7 @@ final class GlobalHotKeyMonitor {
 
     /// Called by the @convention(c) callback closure via `MainActor.assumeIsolated`.
     /// Separated from the literal closure body to keep actor-isolated code in the class.
-    func fireHandler() {
+    private func fireHandler() {
         self.handler?()
     }
 
@@ -108,15 +110,17 @@ final class GlobalHotKeyMonitor {
 
     /// Explicitly unregisters the hotkey and clears the handler. Idempotent.
     func unregister() {
-        if let ref = unsafe self.eventHandlerRef {
-            // `unsafe`: RemoveEventHandler takes EventHandlerRef (OpaquePointer).
-            unsafe RemoveEventHandler(ref)
-            unsafe self.eventHandlerRef = nil
-        }
+        // Unregister the hotkey before removing the handler so Carbon can't dispatch an
+        // event mid-teardown (Carbon-documented safe teardown order).
         if let ref = unsafe self.eventHotKeyRef {
             // `unsafe`: UnregisterEventHotKey takes EventHotKeyRef (OpaquePointer).
             unsafe UnregisterEventHotKey(ref)
             unsafe self.eventHotKeyRef = nil
+        }
+        if let ref = unsafe self.eventHandlerRef {
+            // `unsafe`: RemoveEventHandler takes EventHandlerRef (OpaquePointer).
+            unsafe RemoveEventHandler(ref)
+            unsafe self.eventHandlerRef = nil
         }
         self.handler = nil
         hotKeyLogger.info("GlobalHotKeyMonitor: ⌘⌥⌃R unregistered")
@@ -233,13 +237,15 @@ nonisolated private func hotKeyFourCharCode(_ string: StaticString) -> OSType {
     let byte0Shift: UInt32 = 24
     let byte1Shift: UInt32 = 16
     let byte2Shift: UInt32 = 8
+    let byte0Index = 0
+    let byte1Index = 1
     let byte2Index = 2
     let byte3Index = 3
     // `unsafe` on each subscript: UnsafeBufferPointer<UInt8> element access is unsafe
     // under SWIFT_STRICT_MEMORY_SAFETY = YES. withUTF8Buffer itself is not unsafe.
     return string.withUTF8Buffer { buf in
-        (UInt32(unsafe buf[0]) << byte0Shift)
-            | (UInt32(unsafe buf[1]) << byte1Shift)
+        (UInt32(unsafe buf[byte0Index]) << byte0Shift)
+            | (UInt32(unsafe buf[byte1Index]) << byte1Shift)
             | (UInt32(unsafe buf[byte2Index]) << byte2Shift)
             | UInt32(unsafe buf[byte3Index])
     }
