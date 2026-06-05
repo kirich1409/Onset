@@ -149,3 +149,59 @@ struct RecordingDisplayMapperPillTests {
         #expect(RecordingDisplayMapper.pillDotColor(for: .degraded) == .orange)
     }
 }
+
+// MARK: - RecordingDisplayMapper — Checklist row liveness (#39 / AC-12)
+
+@Suite("RecordingDisplayMapper checklist liveness")
+@MainActor
+struct ChecklistLivenessMapperTests {
+    // MARK: Icon
+
+    @Test("Live source shows checkmark icon")
+    func liveIcon() {
+        #expect(RecordingDisplayMapper.checklistRowIcon(isLive: true) == "checkmark")
+    }
+
+    @Test("Revoked source shows xmark icon")
+    func revokedIcon() {
+        #expect(RecordingDisplayMapper.checklistRowIcon(isLive: false) == "xmark")
+    }
+
+    // MARK: Icon color
+
+    @Test("Live source icon is green")
+    func liveIconColor() {
+        #expect(RecordingDisplayMapper.checklistRowIconColor(isLive: true) == .green)
+    }
+
+    @Test("Revoked source icon is red")
+    func revokedIconColor() {
+        #expect(RecordingDisplayMapper.checklistRowIconColor(isLive: false) == .red)
+    }
+
+    // MARK: Value text
+
+    @Test("Live source value text is unchanged")
+    func liveValueText() {
+        let result = RecordingDisplayMapper.checklistRowValueText(value: "MX Brio · 1920×1080", isLive: true)
+        #expect(result == "MX Brio · 1920×1080")
+    }
+
+    @Test("Revoked source value text appends · остановлен")
+    func revokedValueText() {
+        let result = RecordingDisplayMapper.checklistRowValueText(value: "MX Brio · 1920×1080", isLive: false)
+        #expect(result == "MX Brio · 1920×1080 · остановлен")
+    }
+
+    @Test("Live source with empty value passes through unchanged")
+    func liveEmptyValue() {
+        let result = RecordingDisplayMapper.checklistRowValueText(value: "", isLive: true)
+        #expect(result.isEmpty)
+    }
+
+    @Test("Revoked source with empty value shows only suffix")
+    func revokedEmptyValue() {
+        let result = RecordingDisplayMapper.checklistRowValueText(value: "", isLive: false)
+        #expect(result == " · остановлен")
+    }
+}
