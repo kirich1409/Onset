@@ -119,14 +119,12 @@ struct RecordingConfigurationTests {
 
     // MARK: - Output Directory
 
-    @Test("mvpDefault — outputDirectory path ends with Movies/Onset")
-    func mvpDefault_outputDirectory_endsWithMoviesOnset() {
-        let components = self.sut.outputDirectory.pathComponents
-        // Check the last two path components without binding to the absolute home path.
-        let last = components.last
-        let secondLast = components.count >= 2 ? components[components.count - 2] : nil
-        #expect(last == "Onset")
-        #expect(secondLast == "Movies")
+    // UT-5: outputDirectory must be rooted at the user's home directory, not just end with Movies/Onset.
+    @Test("mvpDefault — outputDirectory is <home>/Movies/Onset/ (UT-5)")
+    func mvpDefault_outputDirectory_isHomeMoviesOnset() {
+        // URL(filePath:directoryHint:.isDirectory) appends a trailing slash.
+        let expected = NSHomeDirectory() + "/Movies/Onset/"
+        #expect(self.sut.outputDirectory.path(percentEncoded: false) == expected)
     }
 
     // MARK: - Budget Cap
