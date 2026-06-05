@@ -345,6 +345,21 @@ struct CFRNormalizerCatchUpMonotonicityTests {
         #expect(allEmitted == expectedSlots, "expected contiguous 0..8, got \(allEmitted)")
     }
 
+    @Test("nextDeadlineSeconds at fps=60 with lastEmittedSlot=600 is exact to 1e-9")
+    func nextDeadlineSeconds_fps60_afterManySlots() {
+        let fps = 60
+        let anchorSeconds = 12.0
+        let grace = 0.005
+        var norm = CFRNormalizer()
+        // Set lastEmittedSlot directly to avoid a 600-frame loop.
+        norm.lastEmittedSlot = 600
+        // nextDeadlineSeconds = anchor + (lastEmittedSlot + 1.5) / fps + grace
+        //                      = 12.0 + 601.5 / 60 + 0.005
+        let deadline = norm.nextDeadlineSeconds(anchorSeconds: anchorSeconds, fps: fps, graceSeconds: grace)
+        let expected = anchorSeconds + 601.5 / Double(fps) + grace
+        #expect(abs(deadline - expected) < 1e-9, "deadline \(deadline) must equal \(expected) within 1e-9")
+    }
+
     @Test("cfrNormalizationDrops unaffected by catchUpThenEncode and catchUpHolds calls")
     func cfrNormalizationDrops_unaffectedByNewAPIs() {
         var norm = CFRNormalizer()

@@ -86,7 +86,6 @@ done
 
 PASS_COUNT=0
 FAIL_COUNT=0
-TOTAL_CHECKS=6  # A×2 (screen+camera), B×2 (screen+camera), C, D
 
 report() {
   local verdict="$1"  # PASS or FAIL
@@ -114,11 +113,19 @@ SCREEN_PTS=$(ffprobe -v error \
   -of csv=p=0 \
   "$SCREEN_FILE" 2>/dev/null) || true
 
+if [ -z "$SCREEN_PTS" ]; then
+  echo "WARNING: ffprobe returned no packets for screen file ($SCREEN_FILE)"
+fi
+
 CAMERA_PTS=$(ffprobe -v error \
   -select_streams v:0 \
   -show_entries packet=pts_time \
   -of csv=p=0 \
   "$CAMERA_FILE" 2>/dev/null) || true
+
+if [ -z "$CAMERA_PTS" ]; then
+  echo "WARNING: ffprobe returned no packets for camera file ($CAMERA_FILE)"
+fi
 
 # ── mpdecimate: single run for checks C and D ─────────────────────────────────
 # mpdecimate on long files is slow — may take ~1 min per 10 min of video.
@@ -130,6 +137,10 @@ MPDECIMATE_OUT=$(ffmpeg -hide_banner \
   -vf mpdecimate \
   -loglevel debug \
   -f null - 2>&1) || true
+
+if [ -z "$MPDECIMATE_OUT" ]; then
+  echo "WARNING: ffmpeg mpdecimate produced no output — camera file may be unreadable"
+fi
 
 # ── A. Packet rate ────────────────────────────────────────────────────────────
 # rate = (count − 1) / (last_pts − first_pts)
@@ -209,6 +220,11 @@ for LABEL_FPS in "screen:$SCREEN_FPS:$SCREEN_PTS" "camera:$CAMERA_FPS:$CAMERA_PT
        n++
      }
      END {
+       if (n < 2) {
+         printf "FAIL max_delta=0.0000 max_allowed=%.4f gap_count=0 max_gap_count=%d (insufficient packets: %d)\n", \
+           max_gap_slots / fps, max_gap_count, n
+         exit
+       }
        slot = 1.0 / fps
        max_allowed = max_gap_slots * slot
        verdict = (max_delta <= max_allowed && gap_count <= max_gap_count) ? "PASS" : "FAIL"
@@ -272,8 +288,9 @@ RESULT=$(echo "$MPDECIMATE_OUT" | awk \
   -v max_run_mode="$MAX_RUN_MODE" \
   -v long_run_len="$LONG_RUN_LEN" \
   -v long_run_max="$LONG_RUN_MAX" \
-  'BEGIN { run=0 }
+  'BEGIN { run=0; total=0 }
    /Parsed_mpdecimate/ && (/ drop /||/ keep /) {
+     total++
      if (/ drop /) {
        run++
      } else {
@@ -285,6 +302,12 @@ RESULT=$(echo "$MPDECIMATE_OUT" | awk \
      }
    }
    END {
+     if (total == 0) {
+       printf "FAIL mode_run=0 max_run_mode=%d long_fail=0 long_run_len=%d long_run_max=%d (no mpdecimate data)\n", \
+         max_run_mode, long_run_len, long_run_max
+       exit
+     }
+
      # flush any trailing run
      if (run > 0) hist[run]++
 
@@ -325,11 +348,12 @@ report "$VERDICT" "camera-run-clusters" \
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
+TOTAL=$((PASS_COUNT + FAIL_COUNT))
 echo "────────────────────────────────────────────────────────────────────────"
 if [ "$FAIL_COUNT" -eq 0 ]; then
-  echo "RESULT: PASS ($PASS_COUNT/$TOTAL_CHECKS)"
+  echo "RESULT: PASS ($PASS_COUNT/$TOTAL)"
   exit 0
 else
-  echo "RESULT: FAIL ($PASS_COUNT/$TOTAL_CHECKS)"
+  echo "RESULT: FAIL ($PASS_COUNT/$TOTAL)"
   exit 1
 fi

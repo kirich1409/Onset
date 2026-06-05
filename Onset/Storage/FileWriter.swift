@@ -189,7 +189,7 @@ actor FileWriter {
 
         self.assetWriter = writer
         self.label = label
-        self.aggregator = StageRateAggregator(lane: label, stage: "writer", nominalFps: nominalFps)
+        self.aggregator = StageRateAggregator(lane: label, stage: .writer, nominalFps: nominalFps)
 
         let (stream, continuation) = AsyncStream.makeStream(of: DropEvent.self)
         self.drops = stream
@@ -342,6 +342,8 @@ actor FileWriter {
     private func flushTelemetry(elapsedSeconds: Double) {
         if let line = self.aggregator.flush(elapsedSeconds: elapsedSeconds) {
             telemetryLogger.notice("\(line, privacy: .public)")
+        } else {
+            self.logger.debug("flushTelemetry: skipped (elapsed ≤ 0)")
         }
     }
 

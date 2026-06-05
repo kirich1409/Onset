@@ -1,5 +1,17 @@
 import os
 
+// MARK: - TelemetryStage
+
+/// The stage within a recording pipeline that owns a `StageRateAggregator`.
+///
+/// `rawValue` is the wire-format token emitted in the `stage=` field of every telemetry line.
+/// Keep these stable — log parsers depend on the exact strings.
+nonisolated enum TelemetryStage: String {
+    case capture
+    case encoder
+    case writer
+}
+
 // MARK: - StageRateAggregator
 
 /// Pure value-type accumulator for per-stage cadence telemetry.
@@ -21,7 +33,7 @@ nonisolated struct StageRateAggregator {
     // MARK: - Identity
 
     let lane: String // "screen" / "camera"
-    let stage: String // "capture" / "encoder" / "writer"
+    let stage: TelemetryStage
     let nominalFps: Int
 
     // MARK: - Cadence counters
@@ -41,8 +53,8 @@ nonisolated struct StageRateAggregator {
 
     private var notReadyEpisodes = 0
     private var notReadyTotalMs = 0.0
-    private var episodeActive = false
-    private var episodeStartSeconds = 0.0
+    /// `nil` when no episode is active; non-nil holds the episode start in wall-clock seconds.
+    private var episodeStart: Double?
 
     // MARK: - Clock-health accumulators (encoder only)
 
@@ -54,15 +66,18 @@ nonisolated struct StageRateAggregator {
     /// Maximum catch-up batch size observed in this window.
     private var catchupMax = 0
 
+    /// Count of catch-up batches that were capped short (real frame deferred) in this window.
+    private var capOverflow = 0
+
     // MARK: - Init
 
     /// Creates an aggregator for one stage of one lane.
     ///
     /// - Parameters:
     ///   - lane: "screen" or "camera" (passed from the owning component).
-    ///   - stage: "capture", "encoder", or "writer".
+    ///   - stage: Which pipeline stage this aggregator represents.
     ///   - nominalFps: The target frame rate for the lane; used as a sanity signal in the line.
-    nonisolated init(lane: String, stage: String, nominalFps: Int) {
+    nonisolated init(lane: String, stage: TelemetryStage, nominalFps: Int) {
         self.lane = lane
         self.stage = stage
         self.nominalFps = nominalFps
@@ -145,21 +160,26 @@ nonisolated struct StageRateAggregator {
         }
     }
 
+    /// Counts a catch-up batch that was capped short — the real frame's slot was not included
+    /// because the hold count reached `holdCapSlots` (encoder only).
+    mutating func recordCapOverflow() {
+        self.capOverflow += 1
+    }
+
     // MARK: - Episode tracking API (writer stage)
 
     /// Opens a not-ready episode at `nowSeconds` if one is not already open.
     mutating func openEpisode(nowSeconds: Double) {
-        guard !self.episodeActive else { return }
-        self.episodeActive = true
-        self.episodeStartSeconds = nowSeconds
+        guard self.episodeStart == nil else { return }
+        self.episodeStart = nowSeconds
     }
 
     /// Closes the active not-ready episode at `nowSeconds`, accumulating its duration.
     mutating func closeEpisode(nowSeconds: Double) {
-        guard self.episodeActive else { return }
-        self.episodeActive = false
+        guard let start = self.episodeStart else { return }
+        self.episodeStart = nil
         // swiftlint:disable:next no_magic_numbers
-        let durationMs = (nowSeconds - self.episodeStartSeconds) * 1000
+        let durationMs = (nowSeconds - start) * 1000
         self.notReadyTotalMs += max(0, durationMs)
         self.notReadyEpisodes += 1
     }
@@ -170,6 +190,12 @@ nonisolated struct StageRateAggregator {
     /// Exposed for L2 tests that verify clock-driven holds are counted.
     var holdsCount: Int {
         self.holds
+    }
+
+    /// The raw cap-overflow count accumulated since the last flush.
+    /// Exposed for L2 tests that verify cappedShort batches are counted.
+    var capOverflowCount: Int {
+        self.capOverflow
     }
 
     // MARK: - Flush
@@ -187,13 +213,13 @@ nonisolated struct StageRateAggregator {
     mutating func flush(elapsedSeconds: Double) -> String? {
         guard elapsedSeconds > 0 else { return nil }
         let line: String = switch self.stage {
-        case "capture":
+        case .capture:
             self.captureFlushLine(elapsedSeconds: elapsedSeconds)
 
-        case "encoder":
+        case .encoder:
             self.encoderFlushLine(elapsedSeconds: elapsedSeconds)
 
-        default:
+        case .writer:
             self.writerFlushLine(elapsedSeconds: elapsedSeconds)
         }
         self.reset()
@@ -204,7 +230,7 @@ nonisolated struct StageRateAggregator {
         let freshRate = self.rate(self.fresh, over: elapsedSeconds)
         let dropRate = self.rate(self.didDrop, over: elapsedSeconds)
         let overflowRate = self.rate(self.overflow, over: elapsedSeconds)
-        let base = "lane=\(self.lane) stage=\(self.stage)"
+        let base = "lane=\(self.lane) stage=\(self.stage.rawValue)"
             + " fresh=\(self.fmt(freshRate))"
             + " didDrop=\(self.fmt(dropRate))"
             + " overflow=\(self.fmt(overflowRate))"
@@ -219,7 +245,7 @@ nonisolated struct StageRateAggregator {
 
     private func encoderFlushLine(elapsedSeconds: Double) -> String {
         let lagAvg = self.tickLagSamples > 0 ? self.tickLagSumMs / Double(self.tickLagSamples) : 0.0
-        return "lane=\(self.lane) stage=\(self.stage)"
+        return "lane=\(self.lane) stage=\(self.stage.rawValue)"
             + " fresh=\(self.fmt(self.rate(self.fresh, over: elapsedSeconds)))"
             + " didDrop=0"
             + " overflow=0"
@@ -233,15 +259,15 @@ nonisolated struct StageRateAggregator {
             + " tick_lag_ms_avg=\(self.fmt(lagAvg))"
             + " tick_lag_ms_max=\(self.fmt(self.tickLagMaxMs))"
             + " catchup_max=\(self.catchupMax)"
+            + " cap_overflow=\(self.capOverflow)"
             + " win_s=\(self.fmt(elapsedSeconds))"
     }
 
     private func writerFlushLine(elapsedSeconds: Double) -> String {
-        "lane=\(self.lane) stage=\(self.stage)"
+        "lane=\(self.lane) stage=\(self.stage.rawValue)"
             + " fresh=\(self.fmt(self.rate(self.fresh, over: elapsedSeconds)))"
             + " not_ready_episodes=\(self.notReadyEpisodes)"
             + " not_ready_total_ms=\(self.fmt(self.notReadyTotalMs))"
-            + " nominal=\(self.nominalFps)"
             + " win_s=\(self.fmt(elapsedSeconds))"
     }
 
@@ -278,12 +304,12 @@ nonisolated struct StageRateAggregator {
         // Closed-episode counters reset; open-episode start time is preserved.
         self.notReadyEpisodes = 0
         self.notReadyTotalMs = 0
-        // episodeActive and episodeStartSeconds intentionally not reset —
-        // an episode that spans a flush window must not lose its start time.
+        // episodeStart intentionally not reset — open episode spans flush windows.
         self.tickLagSumMs = 0
         self.tickLagMaxMs = 0
         self.tickLagSamples = 0
         self.catchupMax = 0
+        self.capOverflow = 0
     }
 }
 

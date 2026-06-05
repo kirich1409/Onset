@@ -973,6 +973,95 @@ struct VideoEncoderTests {
             "EncodedSample.ptsHostTime must equal the anchored slot-0 PTS"
         )
     }
+
+    // MARK: - Backpressure gate during catch-up
+
+    /// Verifies that when the session is already saturated (pending >= maxPendingFrames),
+    /// clock-driven catch-up holds are dropped via the gate and counted as backpressure drops.
+    /// Only the real frame at slot 0 (submitted before the gate fills) must be encoded.
+    @Test("clockTick catch-up: gate closed → backpressure drops counted, only slot-0 real frame encoded")
+    func clockTick_gateClosedDuringCatchUp() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        // maxPendingFrames=1 so the gate closes after the first encode.
+        let encoder = await makeEncoder(mock: mock, anchor: anchor, maxPendingFrames: 1)
+        try await encoder.start()
+
+        // Ingest slot 0 (fills the one pending slot).
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+        #expect(mock.encodedBuffers.count == 1)
+
+        // Saturate: mark pending as already at the limit so the next submits are gated.
+        mock.pending = 1
+
+        // Tick 3 slots ahead — slots 1, 2, 3 are all eligible.
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let grace = 0.005
+        let nowAfterSlot3 = anchorSeconds + 3.5 / Double(testFps) + grace + 0.001
+        await encoder.clockTick(nowSeconds: nowAfterSlot3)
+
+        // All 3 hold slots must have been gated (pending >= maxPendingFrames throughout).
+        #expect(await encoder.backpressureDropCount >= 2)
+        // Only slot-0 real frame was encoded before the gate was set.
+        #expect(mock.encodedBuffers.count == 1)
+        // The aggregator should have counted at least 2 gate drops.
+        #expect(await encoder.aggregatorHoldsCount >= 2)
+    }
+
+    // MARK: - Pre-anchor frame routing
+
+    /// Verifies that a frame with PTS before the anchor is silently discarded —
+    /// it must NOT be encoded and must NOT increment `cfrNormalizationDrops`
+    /// (pre-anchor is not a CFR normalizer drop, only a routing guard).
+    @Test("ingest pre-anchor frame → not encoded, cfrNormalizationDropCount stays 0")
+    func ingest_preAnchor_notEncoded() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        try await encoder.start()
+
+        // Build a frame whose PTS is 0.1 s before the anchor.
+        let preAnchorPTS = CMTimeSubtract(anchor.anchorTime, CMTimeMake(value: 3, timescale: Int32(testFps)))
+        let preAnchorFrame = VideoFrame(
+            pixelBuffer: makePixelBuffer(),
+            ptsHostTime: preAnchorPTS,
+            isHoldRepeat: false
+        )
+        await encoder.ingest(preAnchorFrame)
+
+        // Pre-anchor frame must not produce any encode call.
+        #expect(mock.encodedBuffers.isEmpty)
+        // Pre-anchor does NOT go through the CFR normalizer's drop counter.
+        #expect(await encoder.cfrNormalizationDropCount == 0)
+    }
+
+    // MARK: - Cap-overflow: real frame deferred
+
+    /// Verifies that when the catch-up gap is larger than `holdCapSlots` (fps), the batch
+    /// is capped, the real frame is NOT encoded in that batch, and the cap-overflow counter
+    /// in the aggregator is incremented.
+    @Test("ingest huge gap > holdCapSlots → cap holds emitted, real frame NOT encoded, cap_overflow counted")
+    func ingest_cappedShort_realFrameDeferred() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        try await encoder.start()
+
+        // Slot 0 — opens the grid, encodes one real frame.
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+        #expect(mock.encodedBuffers.count == 1)
+
+        // Slot testFps+5 — gap is testFps+4 holds (> holdCapSlots == testFps), so cappedShort.
+        let bigSlot = testFps + 5
+        await encoder.ingest(makeFrame(slotIndex: bigSlot, anchor: anchor))
+
+        // Exactly `holdCapSlots` holds + 0 real (capped short).
+        #expect(mock.encodedBuffers.count == 1 + testFps)
+        // Real frame at bigSlot was NOT encoded this ingest.
+        #expect(await encoder.cfrNormalizationDropCount == 0)
+        // Aggregator cap-overflow counter must be 1.
+        #expect(await encoder.aggregatorCapOverflowCount == 1)
+    }
 }
 
 // MARK: - L5 opt-in condition

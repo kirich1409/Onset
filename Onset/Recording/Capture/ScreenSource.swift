@@ -173,7 +173,7 @@ actor ScreenSource: VideoFrameSource {
         self.dropsContinuation = capturedDrops
 
         self.captureRateLock = OSAllocatedUnfairLock(
-            initialState: StageRateAggregator(lane: "screen", stage: "capture", nominalFps: plan.screenFps)
+            initialState: StageRateAggregator(lane: "screen", stage: .capture, nominalFps: plan.screenFps)
         )
     }
 
@@ -326,6 +326,8 @@ actor ScreenSource: VideoFrameSource {
                 lastInstant = now
                 if let line = self.captureRateLock.withLock({ $0.flush(elapsedSeconds: elapsedSeconds) }) {
                     telemetryLogger.notice("\(line, privacy: .public)")
+                } else {
+                    screenSourceLogger.debug("flushTelemetry: skipped (elapsed ≤ 0)")
                 }
             }
         }

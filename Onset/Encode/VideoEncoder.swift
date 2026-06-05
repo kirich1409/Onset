@@ -256,7 +256,7 @@ actor VideoEncoder {
         self.graceSeconds = grace
         self.selfClocked = selfClocked
         self.label = label
-        self.aggregator = StageRateAggregator(lane: label, stage: "encoder", nominalFps: fps)
+        self.aggregator = StageRateAggregator(lane: label, stage: .encoder, nominalFps: fps)
         self.sessionFactory = sessionFactory
 
         let (samples, samplesContinuation) = AsyncStream.makeStream(of: EncodedSample.self)
@@ -285,6 +285,12 @@ actor VideoEncoder {
     /// production contract. Used by L2 tests to verify clock-driven holds are counted.
     var aggregatorHoldsCount: Int {
         self.aggregator.holdsCount
+    }
+
+    /// Test-only observation accessor for telemetry accounting; not part of the encoder's
+    /// production contract. Used by L2 tests to verify cappedShort batches are counted.
+    var aggregatorCapOverflowCount: Int {
+        self.aggregator.capOverflowCount
     }
 
     /// Whether the active session uses a hardware encoder (false when not started).
@@ -462,6 +468,8 @@ actor VideoEncoder {
     private func flushTelemetry(elapsedSeconds: Double) {
         if let line = self.aggregator.flush(elapsedSeconds: elapsedSeconds) {
             telemetryLogger.notice("\(line, privacy: .public)")
+        } else {
+            self.logger.debug("flushTelemetry: skipped (elapsed ≤ 0)")
         }
     }
 
@@ -535,7 +543,7 @@ actor VideoEncoder {
         for slot in emission.slots {
             // All slots from catchUpHolds are isHold==true by contract.
             let pts = self.anchoredPTS(slotIndex: slot.slotIndex)
-            self.submit(pixelBuffer: lastPixelBuffer, slotIndex: slot.slotIndex, detectedAt: pts)
+            self.submit(pixelBuffer: lastPixelBuffer, slotIndex: slot.slotIndex, pts: pts, detectedAt: pts)
             self.aggregator.recordHold()
         }
     }
@@ -608,14 +616,20 @@ actor VideoEncoder {
                     continue
                 }
                 let holdPTS = self.anchoredPTS(slotIndex: slot.slotIndex)
-                self.submit(pixelBuffer: holdBuffer, slotIndex: slot.slotIndex, detectedAt: holdPTS)
+                self.submit(pixelBuffer: holdBuffer, slotIndex: slot.slotIndex, pts: holdPTS, detectedAt: holdPTS)
                 self.aggregator.recordHold()
                 holdCount += 1
             } else {
                 // Real frame: update lastPixelBuffer before submitting so subsequent holds
                 // in a future batch (or from the clock) re-use the fresh content.
                 self.lastPixelBuffer = frame.pixelBuffer
-                self.submit(pixelBuffer: frame.pixelBuffer, slotIndex: slot.slotIndex, detectedAt: frame.ptsHostTime)
+                let realPTS = self.anchoredPTS(slotIndex: slot.slotIndex)
+                self.submit(
+                    pixelBuffer: frame.pixelBuffer,
+                    slotIndex: slot.slotIndex,
+                    pts: realPTS,
+                    detectedAt: frame.ptsHostTime
+                )
                 self.aggregator.recordEncodedReal()
             }
         }
@@ -625,18 +639,22 @@ actor VideoEncoder {
         if emission.cappedShort {
             // The hold count exceeded `cap` (fps); the real frame's slot was not included.
             // Its content is consciously deferred — see catchUpThenEncode stage-(a) contract.
-            self.logger.debug("ingest: catch-up capped short at slot \(computedSlot) — real frame deferred")
+            self.logger.warning("ingest: catch-up capped short at slot \(computedSlot) — real frame deferred")
+            self.aggregator.recordCapOverflow()
         }
     }
 
     // MARK: - Submission + backpressure
 
-    /// Submits one pixel buffer to the session at the anchored PTS for `slotIndex`.
+    /// Submits one pixel buffer to the session at the pre-computed `pts` for `slotIndex`.
+    ///
+    /// The caller is responsible for computing `pts` via `anchoredPTS(slotIndex:)` — this
+    /// avoids redundant computation when holds are submitted from `submitEmission`.
     ///
     /// Backpressure gate (OpAC-4.4): if the session already has `maxPendingFrames` in flight,
     /// the frame is dropped as `encoderBackpressureDrops` and a `DropEvent` is emitted. This
     /// counter is SEPARATE from the normalizer's `cfrNormalizationDrops`.
-    private func submit(pixelBuffer: CVPixelBuffer, slotIndex: Int, detectedAt: CMTime) {
+    private func submit(pixelBuffer: CVPixelBuffer, slotIndex: Int, pts: CMTime, detectedAt: CMTime) {
         guard let session = self.session else { return }
 
         if session.pendingFrameCount() >= self.maxPendingFrames {
@@ -645,11 +663,9 @@ actor VideoEncoder {
             self.dropsContinuation.yield(
                 DropEvent(reason: .encoderBackpressureDrops, count: 1, detectedAt: detectedAt)
             )
-            self.logger.warning("Encoder backpressure — dropped frame at slot \(slotIndex)")
             return
         }
 
-        let pts = self.anchoredPTS(slotIndex: slotIndex)
         // Slot duration is exactly one grid step.
         let duration = CMTimeMake(value: 1, timescale: Int32(self.fps))
         let status = session.encodeFrame(pixelBuffer: pixelBuffer, pts: pts, duration: duration)

@@ -271,8 +271,7 @@ private final class SessionFakeWriterFactory: WriterFactory, @unchecked Sendable
     func makeWriter(
         kind: RecordingPipelineKind,
         sourceFormatHint: CMFormatDescription,
-        includeAudio: Bool,
-        nominalFps: Int
+        includeAudio: Bool
     ) throws
     -> any WriterControlling {
         switch kind {

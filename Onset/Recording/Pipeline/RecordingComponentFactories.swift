@@ -178,14 +178,12 @@ nonisolated protocol WriterFactory: Sendable {
     ///   - kind: Which pipeline this writer serves (selects the output URL).
     ///   - sourceFormatHint: The HEVC `CMFormatDescription` from the pipeline's first sample.
     ///   - includeAudio: Whether to mux a microphone audio track.
-    ///   - nominalFps: The pipeline's target frame rate; passed to telemetry. 0 when unknown.
     /// - Throws: `RecordingError.writerSetupFailed` (or the underlying error) if the writer
     ///   cannot be constructed for the output URL.
     func makeWriter(
         kind: RecordingPipelineKind,
         sourceFormatHint: CMFormatDescription,
-        includeAudio: Bool,
-        nominalFps: Int
+        includeAudio: Bool
     ) throws
         -> any WriterControlling
 }
@@ -210,8 +208,7 @@ nonisolated struct LiveWriterFactory: WriterFactory {
     func makeWriter(
         kind: RecordingPipelineKind,
         sourceFormatHint: CMFormatDescription,
-        includeAudio: Bool,
-        nominalFps: Int
+        includeAudio: Bool
     ) throws
     -> any WriterControlling {
         try FileWriter(
@@ -219,8 +216,7 @@ nonisolated struct LiveWriterFactory: WriterFactory {
             configuration: self.configuration,
             includeAudio: includeAudio,
             sourceFormatHint: sourceFormatHint,
-            label: kind == .screen ? "screen" : "camera",
-            nominalFps: nominalFps
+            label: kind == .screen ? "screen" : "camera"
         )
     }
 }
