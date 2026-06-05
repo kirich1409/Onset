@@ -119,18 +119,15 @@ private struct ScreenDeniedRow: View {
 
 // MARK: - ScreenEnabledContent
 
+/// Shows the display picker when screen permission is granted.
+///
+/// The «Запись экрана» toggle was removed: screen is the mandatory video source in MVP
+/// (decision B, issue #61). Camera-only recording is deferred post-MVP.
 private struct ScreenEnabledContent: View {
     @Bindable var model: MainViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: MainView.Metrics.rowSpacing) {
-            Toggle("Запись экрана", isOn: self.$model.screenEnabled)
-                .toggleStyle(.switch)
-
-            if self.model.screenEnabled {
-                DisplayPickerContent(model: self.model)
-            }
-        }
+        DisplayPickerContent(model: self.model)
     }
 }
 

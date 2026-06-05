@@ -6,8 +6,7 @@ extension MainViewModel {
     /// Validates guards, resolves devices, and calls `coordinator.start`.
     ///
     /// AC-2 guards are re-checked defensively even though the button should be disabled.
-    /// Camera-only path (screen=OFF, display=nil): surfaces error — service-layer gap.
-    /// Follow-up for `swift-engineer`: add camera-only recording path to RecordingSession.
+    /// Camera-only (no screen) is deferred post-MVP (decision B, issue #61).
     func record() async {
         guard !self.isStartingRecording else { return }
         self.isStartingRecording = true
@@ -29,9 +28,9 @@ extension MainViewModel {
 
     /// Validates AC-2 guards. Returns `true` when recording may proceed, `false` if an error was set.
     func validateRecordGuards() -> Bool {
-        // AC-2(d): no permissions — should be showing empty state, not calling record()
-        guard self.permissions.effectivePermissions.canRecord else {
-            mainViewModelLogger.warning("record() called with no video permissions — ignoring")
+        // AC-2(d): screen permission required — should be showing empty state, not calling record()
+        guard self.permissions.screenStatus == .authorized else {
+            mainViewModelLogger.warning("record() called without screen permission — ignoring")
             return false
         }
         guard self.canRecord else {
@@ -45,7 +44,7 @@ extension MainViewModel {
 
     /// Resolves and validates the selected display. Returns `nil` if an error was set.
     ///
-    /// `hasVideoSource` already requires `screenEnabled && selectedDisplayID != nil`, so this
+    /// `hasVideoSource` already requires screen permission + `selectedDisplayID != nil`, so this
     /// guard is a defensive backstop — reached only if state mutates between `canRecord` check
     /// and this call.
     func validateDisplaySelection() -> Display? {

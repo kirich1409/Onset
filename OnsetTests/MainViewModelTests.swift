@@ -116,51 +116,29 @@ struct MainViewModelTests {
         #expect(sut.selectedMicID == nil)
     }
 
-    // MARK: - Screen toggle default
-
-    @Test("Screen authorized → screenEnabled defaults to true after loadDevices")
-    func screenAuthorized_screenEnabledTrue() async {
-        let display = Self.makeDisplay()
-        let (sut, _) = self.makeSUT(screen: .authorized, displays: [display])
-
-        await sut.loadDevices()
-
-        #expect(sut.screenEnabled)
-    }
-
-    @Test("Screen not authorized → screenEnabled stays false after loadDevices")
-    func screenNotAuthorized_screenEnabledFalse() async {
-        let (sut, _) = self.makeSUT(screen: .notDetermined)
-
-        await sut.loadDevices()
-
-        #expect(!sut.screenEnabled)
-    }
-
     // MARK: - AC-2(a): Has video source → canRecord true
 
-    @Test("Screen + display selected → canRecord true (AC-2a)")
+    @Test("Screen authorized + display selected → canRecord true (AC-2a)")
     func screenAndDisplaySelected_canRecord() async {
         let display = Self.makeDisplay()
         let (sut, _) = self.makeSUT(microphone: .notDetermined, displays: [display])
         await sut.loadDevices()
-        // screenEnabled=true (authorized), selectedDisplayID auto-set (1 display), no mic
+        // screen authorized, selectedDisplayID auto-set (1 display), no mic
 
-        #expect(sut.screenEnabled)
         #expect(sut.selectedDisplayID != nil)
+        #expect(sut.hasVideoSource)
         #expect(sut.canRecord) // no mic available, so AC-2c applies — can record
     }
 
-    @Test("Camera selected, screen OFF — hasVideoSource false (MVP: display required)")
+    @Test("Camera selected, screen denied — hasVideoSource false (MVP: screen mandatory)")
     func cameraOnly_noVideoSource() async {
         let cam = Self.makeCamera()
-        // screen not authorized → screenEnabled=false; camera auto-selected
+        // screen not authorized → camera auto-selected but no video source (MVP: screen mandatory)
         let (sut, _) = self.makeSUT(screen: .notDetermined, microphone: .notDetermined, cameras: [cam])
         await sut.loadDevices()
 
-        // MVP: RecordingRequest.display is non-optional; camera-only path not yet supported.
-        // hasVideoSource requires screenEnabled + selectedDisplayID != nil.
-        #expect(!sut.screenEnabled)
+        // MVP: screen is mandatory; camera-only deferred post-MVP (decision B, issue #61).
+        // hasVideoSource requires screen permission + selectedDisplayID != nil.
         #expect(sut.selectedCameraID != nil)
         #expect(!sut.hasVideoSource)
         #expect(!sut.canRecord)
@@ -230,11 +208,13 @@ struct MainViewModelTests {
         #expect(!sut.showNoPermissionsState)
     }
 
-    @Test("Camera authorized → showNoPermissionsState false")
-    func cameraAuthorized_noEmptyState() {
+    @Test("Camera authorized but screen denied → showNoPermissionsState true (MVP: screen mandatory)")
+    func cameraAuthorized_screenDenied_emptyState() {
+        // MVP: showNoPermissionsState is screen-anchored (decision B, issue #61).
+        // Camera-only does not unlock the main config screen.
         let (sut, _) = self.makeSUT(screen: .notDetermined, camera: .authorized)
 
-        #expect(!sut.showNoPermissionsState)
+        #expect(sut.showNoPermissionsState)
     }
 
     // MARK: - Screen denied state
@@ -253,17 +233,15 @@ struct MainViewModelTests {
 
     // MARK: - No video source → canRecord false
 
-    @Test("No video source (screen off, no camera) → canRecord false")
-    func noVideoSource_cannotRecord() {
+    @Test("No display selected (screen authorized) → hasVideoSource false, canRecord false")
+    func noDisplaySelected_cannotRecord() {
         let (sut, _) = self.makeSUT(
             screen: .authorized,
             camera: .notDetermined,
             microphone: .notDetermined
         )
-        // screenEnabled is still false until loadDevices — but let's test the property
-        sut.screenEnabled = false
-        sut.selectedCameraID = nil
-
+        // selectedDisplayID is nil (no loadDevices called, no displays provided)
+        #expect(sut.selectedDisplayID == nil)
         #expect(!sut.hasVideoSource)
         #expect(!sut.canRecord)
     }

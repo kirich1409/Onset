@@ -15,10 +15,10 @@ nonisolated let mainViewModelLogger = Logger(
 /// View model for the main recording configuration screen (#36).
 ///
 /// Owns device discovery, camera preview lifecycle, and the AC-2 record-button logic:
-/// - (a) ≥1 video source selected → button active
+/// - (a) screen is the mandatory video source (MVP); display selected → button active; camera is optional
 /// - (b) mic available but NOT selected → button disabled with message
 /// - (c) mic unavailable → record without audio, «без звука» indicator
-/// - (d) no video source by permissions (`!canRecord`) → empty state (keyed on permissions, not UI selections)
+/// - (d) screen permission denied → empty state (return to onboarding)
 ///
 /// ### Preview lifecycle
 /// A generation counter (`previewGeneration`) drives `.id()` on `CameraPreviewRepresentable`
@@ -26,10 +26,9 @@ nonisolated let mainViewModelLogger = Logger(
 /// camera changes. The `CameraSource` actor for preview is started/stopped inside `.task(id: selectedCameraID)`.
 /// Old source MUST be stopped before a new one starts to avoid device contention.
 ///
-/// ### Camera-only recording (screen=OFF)
-/// `RecordingRequest.display` is non-optional and `RecordingSession` has no screen-skip branch
-/// (service-layer gap). When screen capture is OFF but a camera is selected, the record action
-/// surfaces an explicit error. Follow-up for `swift-engineer`: add camera-only recording path.
+/// ### Camera-only recording (no screen)
+/// Deferred post-MVP (decision B, issue #61). `RecordingRequest.display` is non-optional;
+/// `RecordingSession` has no screen-skip branch. Screen capture is mandatory in MVP.
 @Observable
 @MainActor
 final class MainViewModel {
@@ -66,10 +65,6 @@ final class MainViewModel {
     var microphones: [MicrophoneDevice] = []
 
     // MARK: - User selections (ID-typed for Hashable Picker compatibility)
-
-    /// Whether screen recording is enabled. Mirrors the screen toggle.
-    /// Defaults to `true` when screen permission is available.
-    var screenEnabled = false
 
     /// The `CGDirectDisplayID` of the selected display, or `nil` when no selection.
     var selectedDisplayID: CGDirectDisplayID?
@@ -108,9 +103,13 @@ final class MainViewModel {
 
     // MARK: - Computed properties — effective permissions passthrough
 
-    /// Drives the AC-2(d) empty state: keyed on permission capability, NOT UI selections.
+    /// Drives the AC-2(d) empty state: screen permission denied → show return-to-onboarding state.
+    ///
+    /// Keyed on screen permission only (MVP: screen is the mandatory video source, issue #61).
+    /// `EffectivePermissions.canRecord` is intentionally NOT used here — it is screen-OR-camera
+    /// and would show the normal config screen even when screen is denied (misleading in MVP).
     var showNoPermissionsState: Bool {
-        !self.permissions.effectivePermissions.canRecord
+        self.permissions.screenStatus != .authorized
     }
 
     /// Screen permission denied — show disabled row + link back to onboarding.
@@ -152,11 +151,11 @@ final class MainViewModel {
 
     /// True when a valid recordable video source is selected.
     ///
-    /// MVP constraint: `RecordingRequest.display` is non-optional, so screen recording must
-    /// be enabled with a selected display. Camera-only (screen OFF) cannot be recorded yet —
-    /// it does not count as a video source. Follow-up for `swift-engineer`: add camera-only path.
+    /// MVP: screen is the mandatory video source (decision B, issue #61).
+    /// Requires screen permission granted AND a display resolved.
+    /// Camera-only (no screen) is deferred post-MVP.
     var hasVideoSource: Bool {
-        self.screenEnabled && self.selectedDisplayID != nil
+        self.permissions.screenStatus == .authorized && self.selectedDisplayID != nil
     }
 
     /// AC-2(b): mic is available (authorized) but the user has not selected any microphone.

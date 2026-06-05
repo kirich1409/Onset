@@ -35,10 +35,6 @@ extension MainViewModel {
             if found.count == 1 {
                 self.selectedDisplayID = found[0].displayID
             }
-            // Default screen toggle to ON when permission is available
-            if authorized {
-                self.screenEnabled = true
-            }
             mainViewModelLogger.info("Displays loaded — count: \(found.count)")
         } catch {
             mainViewModelLogger.error("Display discovery failed: \(String(describing: error))")
