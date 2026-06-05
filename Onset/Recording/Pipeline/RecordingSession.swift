@@ -57,6 +57,27 @@ actor RecordingSession {
     nonisolated let recordingStateStream: AsyncStream<RecordingState>
     private let stateContinuation: AsyncStream<RecordingState>.Continuation
 
+    // MARK: - Revocation stream (UI surface — #39 / AC-12)
+
+    /// Graceful-revocation notifications for the UI (`RecordingRevocation`).
+    ///
+    /// `handleSourceEvent` already finalises the affected pipeline on `.displayDisconnected` /
+    /// `.cameraDisconnected` (the Epic-3 behaviour, unchanged). AFTER finalising, it yields here so
+    /// the `RecordingCoordinator` can update the recording window's per-source liveness, and — when
+    /// the last video pipeline is gone — receives `.allVideoSourcesLost` and ends the session.
+    ///
+    /// Created at `init` (with the stored `revocationContinuation`) so the coordinator can iterate it
+    /// from `start()`, before any revoke can fire. The session yields DIRECTLY from
+    /// `handleSourceEvent` (already on the actor) — no forwarding task. `performStop()` /
+    /// `teardownAfterFailedStart()` finish the continuation, ending the subscriber's loop (same
+    /// lifecycle as `recordingStateStream`).
+    ///
+    /// **Single-consumer.** Exactly ONE subscriber (the `RecordingCoordinator`) — see
+    /// `RecordingRevocation`. `AsyncStream` splits elements across iterators, so a second consumer
+    /// would starve the first.
+    nonisolated let sourceRevocationStream: AsyncStream<RecordingRevocation>
+    private let revocationContinuation: AsyncStream<RecordingRevocation>.Continuation
+
     /// Pipes `dropMonitor.state` → `stateContinuation`. Spun in `start()` (the monitor only exists
     /// then) and torn down in `performStop()` / `teardownAfterFailedStart()`. Captures the monitor's
     /// stream value + the continuation — never `self` — so it does not retain the session actor.
@@ -144,6 +165,12 @@ actor RecordingSession {
         let (stateStream, stateContinuation) = AsyncStream.makeStream(of: RecordingState.self)
         self.recordingStateStream = stateStream
         self.stateContinuation = stateContinuation
+
+        // Revocation stream + its continuation (AC-12 UI seam), created here so the coordinator can
+        // iterate from start() before any revoke fires. Yielded directly from handleSourceEvent.
+        let (revocationStream, revocationContinuation) = AsyncStream.makeStream(of: RecordingRevocation.self)
+        self.sourceRevocationStream = revocationStream
+        self.revocationContinuation = revocationContinuation
 
         // Default live probe: classify against the resolved display + camera format.
         self.probe = probe ?? { CapabilityProbe.probe(display: display, cameraFormat: cameraFormat, config: config) }
@@ -479,13 +506,27 @@ actor RecordingSession {
         case .displayDisconnected:
             self.logger.notice("AC-12: display disconnected — finalising screen pipeline; camera continues")
             await self.stopAndFinalizePipeline(.screen)
+            self.notifyRevocation(of: .screen)
 
         case .cameraDisconnected:
             self.logger.notice("AC-12: camera disconnected — finalising camera; screen continues, screen audio ends")
             await self.stopAndFinalizePipeline(.camera)
+            self.notifyRevocation(of: .camera)
 
         case let .sourceInterrupted(reason):
             self.logger.warning("Source interrupted (\(String(describing: kind))): \(reason) — continuing")
+        }
+    }
+
+    /// Yields the AC-12 revocation notification (#39 UI seam) AFTER `stopAndFinalizePipeline` has
+    /// niled the finalised pipeline's slot: `.sourceRevoked(kind)`, then `.allVideoSourcesLost` when
+    /// no video pipeline remains. Called only on the AC-12 finalize arms — does NOT alter the
+    /// finalize behaviour itself (Epic-3-verified), only notifies the single-consumer coordinator.
+    private func notifyRevocation(of kind: RecordingPipelineKind) {
+        self.revocationContinuation.yield(.sourceRevoked(kind))
+        if self.screenPipeline == nil, self.cameraPipeline == nil {
+            self.logger.notice("AC-12: last video pipeline finalised — signalling allVideoSourcesLost")
+            self.revocationContinuation.yield(.allVideoSourcesLost)
         }
     }
 
@@ -600,6 +641,10 @@ actor RecordingSession {
         self.stateForwardingTask = nil
         self.stateContinuation.finish()
 
+        // End the revocation stream so the coordinator's `for await` over sourceRevocationStream
+        // terminates. No task to cancel — the session yields directly from handleSourceEvent.
+        self.revocationContinuation.finish()
+
         let result = RecordingResult(
             screen: finishResults[.screen],
             camera: finishResults[.camera],
@@ -635,6 +680,8 @@ actor RecordingSession {
         self.stateForwardingTask?.cancel()
         self.stateForwardingTask = nil
         self.stateContinuation.finish()
+        // Finish the revocation stream too, so a subscriber's loop ends after a failed start.
+        self.revocationContinuation.finish()
         await self.dropMonitor?.stop()
         self.dropMonitor = nil
         self.stage = nil

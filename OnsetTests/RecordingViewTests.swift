@@ -149,3 +149,155 @@ struct RecordingDisplayMapperPillTests {
         #expect(RecordingDisplayMapper.pillDotColor(for: .degraded) == .orange)
     }
 }
+
+// MARK: - RecordingDisplayMapper — Checklist row liveness (#39 / AC-12)
+
+@Suite("RecordingDisplayMapper checklist liveness")
+@MainActor
+struct ChecklistLivenessMapperTests {
+    // MARK: Icon
+
+    @Test("Live source shows checkmark icon")
+    func liveIcon() {
+        #expect(RecordingDisplayMapper.checklistRowIcon(isLive: true) == "checkmark")
+    }
+
+    @Test("Revoked source shows xmark icon")
+    func revokedIcon() {
+        #expect(RecordingDisplayMapper.checklistRowIcon(isLive: false) == "xmark")
+    }
+
+    // MARK: Icon color
+
+    @Test("Live source icon is green")
+    func liveIconColor() {
+        #expect(RecordingDisplayMapper.checklistRowIconColor(isLive: true) == .green)
+    }
+
+    @Test("Revoked source icon is red")
+    func revokedIconColor() {
+        #expect(RecordingDisplayMapper.checklistRowIconColor(isLive: false) == .red)
+    }
+
+    // MARK: State word — gendered Russian forms
+
+    @Test("Live masculine gives активен")
+    func liveWordMasculine() {
+        #expect(RecordingDisplayMapper.stateWord(isLive: true, gender: .masculine) == "активен")
+    }
+
+    @Test("Live feminine gives активна")
+    func liveWordFeminine() {
+        #expect(RecordingDisplayMapper.stateWord(isLive: true, gender: .feminine) == "активна")
+    }
+
+    @Test("Revoked masculine gives остановлен")
+    func revokedWordMasculine() {
+        #expect(RecordingDisplayMapper.stateWord(isLive: false, gender: .masculine) == "остановлен")
+    }
+
+    @Test("Revoked feminine gives остановлена")
+    func revokedWordFeminine() {
+        #expect(RecordingDisplayMapper.stateWord(isLive: false, gender: .feminine) == "остановлена")
+    }
+
+    // MARK: Value text
+
+    @Test("Live masculine source value text is unchanged")
+    func liveValueTextMasculine() {
+        let result = RecordingDisplayMapper.checklistRowValueText(
+            value: "3840×2160",
+            isLive: true,
+            gender: .masculine
+        )
+        #expect(result == "3840×2160")
+    }
+
+    @Test("Live feminine source value text is unchanged")
+    func liveValueTextFeminine() {
+        let result = RecordingDisplayMapper.checklistRowValueText(
+            value: "MX Brio · 1920×1080",
+            isLive: true,
+            gender: .feminine
+        )
+        #expect(result == "MX Brio · 1920×1080")
+    }
+
+    @Test("Revoked masculine source appends · остановлен")
+    func revokedValueTextMasculine() {
+        let result = RecordingDisplayMapper.checklistRowValueText(
+            value: "3840×2160",
+            isLive: false,
+            gender: .masculine
+        )
+        #expect(result == "3840×2160 · остановлен")
+    }
+
+    @Test("Revoked feminine source appends · остановлена")
+    func revokedValueTextFeminine() {
+        let result = RecordingDisplayMapper.checklistRowValueText(
+            value: "MX Brio · 1920×1080",
+            isLive: false,
+            gender: .feminine
+        )
+        #expect(result == "MX Brio · 1920×1080 · остановлена")
+    }
+
+    @Test("Live source with empty value passes through unchanged")
+    func liveEmptyValue() {
+        let result = RecordingDisplayMapper.checklistRowValueText(value: "", isLive: true, gender: .masculine)
+        #expect(result.isEmpty)
+    }
+
+    @Test("Revoked feminine source with empty value shows only suffix")
+    func revokedEmptyValueFeminine() {
+        let result = RecordingDisplayMapper.checklistRowValueText(value: "", isLive: false, gender: .feminine)
+        #expect(result == " · остановлена")
+    }
+
+    // MARK: Accessibility label
+
+    @Test("Live feminine accessibility label includes value and активна")
+    func accessibilityLabelLiveFeminine() {
+        let result = RecordingDisplayMapper.checklistRowAccessibilityLabel(
+            label: "Камера",
+            value: "MX Brio · 1920×1080",
+            isLive: true,
+            gender: .feminine
+        )
+        #expect(result == "Камера — MX Brio · 1920×1080 — активна")
+    }
+
+    @Test("Revoked feminine accessibility label includes value and остановлена")
+    func accessibilityLabelRevokedFeminine() {
+        let result = RecordingDisplayMapper.checklistRowAccessibilityLabel(
+            label: "Камера",
+            value: "MX Brio · 1920×1080",
+            isLive: false,
+            gender: .feminine
+        )
+        #expect(result == "Камера — MX Brio · 1920×1080 — остановлена")
+    }
+
+    @Test("Live masculine accessibility label includes value and активен")
+    func accessibilityLabelLiveMasculine() {
+        let result = RecordingDisplayMapper.checklistRowAccessibilityLabel(
+            label: "Экран",
+            value: "3840×2160",
+            isLive: true,
+            gender: .masculine
+        )
+        #expect(result == "Экран — 3840×2160 — активен")
+    }
+
+    @Test("Revoked masculine accessibility label includes value and остановлен")
+    func accessibilityLabelRevokedMasculine() {
+        let result = RecordingDisplayMapper.checklistRowAccessibilityLabel(
+            label: "Микрофон",
+            value: "MacBook Pro",
+            isLive: false,
+            gender: .masculine
+        )
+        #expect(result == "Микрофон — MacBook Pro — остановлен")
+    }
+}

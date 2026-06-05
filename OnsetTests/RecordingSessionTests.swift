@@ -836,6 +836,160 @@ private struct SampleProbeOK {
     }
 }
 
+// MARK: - Revocation stream (#39 / AC-12 UI seam)
+
+@Suite("RecordingSession — revocation stream (#39 / AC-12 UI seam)")
+struct RecordingSessionRevocationStreamTests {
+    @Test(".displayDisconnected → yields .sourceRevoked(.screen)")
+    func displayDisconnected_yieldsScreenRevoked() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        // Subscribe before start so no event is missed.
+        let received: Task<RecordingRevocation?, Never> = Task {
+            for await revocation in session.sourceRevocationStream {
+                return revocation
+            }
+            return nil
+        }
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        _ = await eventually { writers.bothWritersCreated }
+
+        sources.screenSource.emitEvent(.displayDisconnected)
+
+        let revocation = await received.value
+        #expect(revocation == .sourceRevoked(.screen), "displayDisconnected must yield .sourceRevoked(.screen)")
+
+        _ = await session.stop()
+    }
+
+    @Test(".cameraDisconnected → yields .sourceRevoked(.camera)")
+    func cameraDisconnected_yieldsCameraRevoked() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        let received: Task<RecordingRevocation?, Never> = Task {
+            for await revocation in session.sourceRevocationStream {
+                return revocation
+            }
+            return nil
+        }
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        _ = await eventually { writers.bothWritersCreated }
+
+        sources.cameraSource.emitEvent(.cameraDisconnected)
+
+        let revocation = await received.value
+        #expect(revocation == .sourceRevoked(.camera), "cameraDisconnected must yield .sourceRevoked(.camera)")
+
+        _ = await session.stop()
+    }
+
+    @Test("last pipeline finalised → yields .allVideoSourcesLost after the final .sourceRevoked")
+    func lastPipelineFinalised_yieldsAllVideoSourcesLost() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        // Collect all revocations until the stream closes (session.stop() finishes it).
+        let allRevocations: Task<[RecordingRevocation], Never> = Task {
+            var collected: [RecordingRevocation] = []
+            for await revocation in session.sourceRevocationStream {
+                collected.append(revocation)
+            }
+            return collected
+        }
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        _ = await eventually { writers.bothWritersCreated }
+
+        // Disconnect screen first (one pipeline remains after this).
+        sources.screenSource.emitEvent(.displayDisconnected)
+        _ = await eventually { writers.screenWriter.finishCalled }
+
+        // Then disconnect camera — the last video pipeline gone → .allVideoSourcesLost must follow.
+        sources.cameraSource.emitEvent(.cameraDisconnected)
+        _ = await eventually { writers.cameraWriter.finishCalled }
+
+        _ = await session.stop()
+
+        let revocations = await allRevocations.value
+        #expect(revocations.contains(.sourceRevoked(.screen)), "must include .sourceRevoked(.screen)")
+        #expect(revocations.contains(.sourceRevoked(.camera)), "must include .sourceRevoked(.camera)")
+        #expect(
+            revocations.contains(.allVideoSourcesLost),
+            "must include .allVideoSourcesLost after last pipeline gone"
+        )
+        // F2: .allVideoSourcesLost must arrive AFTER the final .sourceRevoked, not before.
+        #expect(revocations.last == .allVideoSourcesLost, ".allVideoSourcesLost must be the last event yielded")
+    }
+
+    @Test("screen-only session: .displayDisconnected → [.sourceRevoked(.screen), .allVideoSourcesLost] in order")
+    func screenOnlySession_displayDisconnected_yieldsRevocationsInOrder() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        // Screen-only: no camera device, no mic device. cameraDevice/cameraFormat nil → cameraPipeline
+        // never created → cameraPipeline is nil from the start. When screenPipeline goes nil after
+        // disconnect, the notifyRevocation check (screenPipeline==nil && cameraPipeline==nil) fires
+        // immediately, emitting .allVideoSourcesLost as the very next event.
+        let session = makeSession(
+            encoders: encoders,
+            writers: writers,
+            sources: sources,
+            probe: probe.callable(),
+            includeCamera: false,
+            includeMic: false
+        )
+
+        // Collect all revocations until the stream closes (session.stop() finishes it).
+        let allRevocations: Task<[RecordingRevocation], Never> = Task {
+            var collected: [RecordingRevocation] = []
+            for await revocation in session.sourceRevocationStream {
+                collected.append(revocation)
+            }
+            return collected
+        }
+
+        try await session.start(permissions: EffectivePermissions(
+            screenAvailable: true,
+            cameraAvailable: false,
+            microphoneAvailable: false
+        ))
+        // Emit a sample so the screen writer is created (writer is lazy — created on first sample).
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.screenWriter.startSourceTime != nil }
+
+        // Disconnect the sole video source — this is the last pipeline, so .allVideoSourcesLost
+        // must follow immediately after .sourceRevoked(.screen).
+        sources.screenSource.emitEvent(.displayDisconnected)
+        _ = await eventually { writers.screenWriter.finishCalled }
+
+        _ = await session.stop()
+
+        let revocations = await allRevocations.value
+        #expect(
+            revocations == [.sourceRevoked(.screen), .allVideoSourcesLost],
+            "screen-only disconnect must yield exactly [.sourceRevoked(.screen), .allVideoSourcesLost] in that order"
+        )
+    }
+
+    // Camera-only session (screen mandatory per project scope): not constructible via makeSession —
+    // the factory always provides a display and sets screenDevicePresent=true in resolvePlan.
+    // makeSession has no includeScreen parameter to suppress the screen pipeline. Skipped.
+}
+
 // MARK: - UI state surface (#36/#37 — recordingStateStream + currentDrops)
 
 @Suite("RecordingSession — UI state surface (#36/#37)")

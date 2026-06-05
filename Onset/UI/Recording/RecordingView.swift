@@ -1,6 +1,9 @@
 // swiftlint:disable trailing_closure
 // Rationale: `Button(action:label:)` with explicit `label:` reads clearer than trailing-closure
 // syntax here; matches the convention in RecordingCoordinatorTests. Re-enabled at end of file.
+// swiftlint:disable file_length
+// Rationale: view + mapper + 5 previews naturally exceed 400 lines; splitting them across files
+// would obscure the one-to-one relationship between the mapper and the view that uses it.
 
 import os
 import SwiftUI
@@ -32,6 +35,7 @@ struct RecordingView: View {
             elapsed: self.coordinator.elapsed,
             drops: self.coordinator.drops,
             checklist: self.coordinator.checklist,
+            sourceLiveness: self.coordinator.sourceLiveness,
             onStop: {
                 recordingLogger.info("Stop requested via RecordingView button")
                 Task { await self.coordinator.stop() }
@@ -102,6 +106,7 @@ struct RecordingContentView: View {
     let elapsed: Int
     let drops: DropCounters
     let checklist: RecordingChecklist
+    let sourceLiveness: SourceLiveness
     let onStop: () -> Void
 
     var body: some View {
@@ -173,32 +178,61 @@ struct RecordingContentView: View {
     @ViewBuilder
     private var checklistSection: some View {
         if let screenDesc = self.checklist.screenDescription {
-            self.checklistRow(label: "Экран", value: screenDesc)
+            self.checklistRow(
+                label: "Экран",
+                value: screenDesc,
+                isLive: self.sourceLiveness.screen,
+                gender: .masculine
+            )
         }
         if let cameraDesc = self.checklist.cameraDescription {
-            self.checklistRow(label: "Камера", value: cameraDesc)
+            self.checklistRow(
+                label: "Камера",
+                value: cameraDesc,
+                isLive: self.sourceLiveness.camera,
+                gender: .feminine
+            )
         }
         if let micDesc = self.checklist.microphoneDescription {
-            self.checklistRow(label: "Микрофон", value: micDesc)
+            self.checklistRow(
+                label: "Микрофон",
+                value: micDesc,
+                isLive: self.sourceLiveness.microphone,
+                gender: .masculine
+            )
         }
     }
 
     @ViewBuilder
-    private func checklistRow(label: String, value: String) -> some View {
+    private func checklistRow(
+        label: String,
+        value: String,
+        isLive: Bool,
+        gender: SourceGender
+    )
+    -> some View {
+        let rowLabel = RecordingDisplayMapper.checklistRowAccessibilityLabel(
+            label: label,
+            value: value,
+            isLive: isLive,
+            gender: gender
+        )
         HStack {
             Text(label)
                 .font(.system(size: Metrics.checklistLabelFontSize))
                 .foregroundStyle(.primary)
             Spacer()
-            Text(value)
+            Text(RecordingDisplayMapper.checklistRowValueText(value: value, isLive: isLive, gender: gender))
                 .font(.system(size: Metrics.checklistLabelFontSize))
                 .foregroundStyle(.secondary)
-            Image(systemName: "checkmark")
+            Image(systemName: RecordingDisplayMapper.checklistRowIcon(isLive: isLive))
                 .font(.system(size: Metrics.checklistCheckmarkFontSize, weight: .semibold))
-                .foregroundStyle(.green)
+                .foregroundStyle(RecordingDisplayMapper.checklistRowIconColor(isLive: isLive))
         }
         .padding(.horizontal, Metrics.checklistRowHPadding)
         .padding(.vertical, Metrics.checklistRowVPadding)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(rowLabel)
         Divider()
     }
 
@@ -243,6 +277,17 @@ struct RecordingContentView: View {
         .frame(maxWidth: .infinity)
         .multilineTextAlignment(.center)
     }
+}
+
+// MARK: - SourceGender
+
+/// Grammatical gender of a source label used to produce correct Russian state words.
+///
+/// Russian adjectives and short forms agree with the grammatical gender of the noun they modify.
+/// Экран and Микрофон are masculine; Камера is feminine.
+nonisolated enum SourceGender {
+    case masculine
+    case feminine
 }
 
 // MARK: - RecordingDisplayMapper
@@ -329,6 +374,64 @@ nonisolated enum RecordingDisplayMapper {
     ///
     /// A subtle overlay matching the macOS secondary-label color at low opacity.
     static let normalPillOpacity = 0.15
+
+    // MARK: Checklist row liveness (#39 / AC-12)
+
+    /// SF Symbol name for the checklist row status icon.
+    ///
+    /// - Live: «checkmark» (green, source is recording).
+    /// - Revoked: «xmark» (red, source was stopped by a graceful revoke).
+    static func checklistRowIcon(isLive: Bool) -> String {
+        isLive ? "checkmark" : "xmark"
+    }
+
+    /// Color of the checklist row status icon.
+    ///
+    /// - Live: green.
+    /// - Revoked: red (matches the danger/stopped semantic; avoids equality ambiguity of `.secondary`).
+    static func checklistRowIconColor(isLive: Bool) -> Color {
+        isLive ? .green : .red
+    }
+
+    /// The Russian state word for a source, agreeing with its grammatical gender.
+    ///
+    /// - Live masculine: «активен» (Экран, Микрофон).
+    /// - Live feminine: «активна» (Камера).
+    /// - Revoked masculine: «остановлен».
+    /// - Revoked feminine: «остановлена».
+    static func stateWord(isLive: Bool, gender: SourceGender) -> String {
+        switch (isLive, gender) {
+        case (true, .masculine): "активен"
+        case (true, .feminine): "активна"
+        case (false, .masculine): "остановлен"
+        case (false, .feminine): "остановлена"
+        }
+    }
+
+    /// Display text for the checklist row value.
+    ///
+    /// - Live: returns `value` unchanged.
+    /// - Revoked: appends «· <state>» with the correct gendered form to signal the source stopped
+    ///   mid-recording (e.g. «MX Brio · 1920×1080 · остановлена» for a feminine source).
+    static func checklistRowValueText(value: String, isLive: Bool, gender: SourceGender) -> String {
+        isLive ? value : "\(value) · \(self.stateWord(isLive: false, gender: gender))"
+    }
+
+    /// Accessibility label for a checklist row that folds name, device value, and state into one
+    /// announcement so VoiceOver users hear which source is recording and in what state.
+    ///
+    /// Format: «<label> — <value> — <state>», e.g. «Камера — MX Brio · 1920×1080 — активна».
+    ///
+    /// The raw `value` is used (not the visible suffixed text) to avoid duplicating the state word.
+    static func checklistRowAccessibilityLabel(
+        label: String,
+        value: String,
+        isLive: Bool,
+        gender: SourceGender
+    )
+    -> String {
+        "\(label) — \(value) — \(self.stateWord(isLive: isLive, gender: gender))"
+    }
 }
 
 // MARK: - Previews
@@ -343,6 +446,7 @@ nonisolated enum RecordingDisplayMapper {
             cameraDescription: "MX Brio · 1920×1080",
             microphoneDescription: "MacBook Pro"
         ),
+        sourceLiveness: .allLive,
         onStop: {}
     )
     .frame(width: 370, height: 420)
@@ -359,6 +463,7 @@ nonisolated enum RecordingDisplayMapper {
             cameraDescription: "MX Brio · 1920×1080",
             microphoneDescription: "MacBook Pro"
         ),
+        sourceLiveness: .allLive,
         onStop: {}
     )
     .frame(width: 370, height: 420)
@@ -375,6 +480,7 @@ nonisolated enum RecordingDisplayMapper {
             cameraDescription: "MX Brio · 1920×1080",
             microphoneDescription: "MacBook Pro"
         ),
+        sourceLiveness: .allLive,
         onStop: {}
     )
     .frame(width: 370, height: 420)
@@ -391,10 +497,28 @@ nonisolated enum RecordingDisplayMapper {
             cameraDescription: nil,
             microphoneDescription: nil
         ),
+        sourceLiveness: .allLive,
         onStop: {}
     )
     .frame(width: 370, height: 420)
     .preferredColorScheme(.light)
+}
+
+#Preview("Camera revoked — Dark") {
+    RecordingContentView(
+        state: .normal,
+        elapsed: 312,
+        drops: .init(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
+        checklist: .init(
+            screenDescription: "3840×2160",
+            cameraDescription: "MX Brio · 1920×1080",
+            microphoneDescription: "MacBook Pro"
+        ),
+        sourceLiveness: .init(screen: true, camera: false, microphone: false),
+        onStop: {}
+    )
+    .frame(width: 370, height: 420)
+    .preferredColorScheme(.dark)
 }
 
 // swiftlint:enable trailing_closure
