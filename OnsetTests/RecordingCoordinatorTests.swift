@@ -259,6 +259,23 @@ struct RecordingCoordinatorTests {
         #expect(coordinator.phase == .main)
     }
 
+    @Test("concurrent start calls result in exactly one session started")
+    func start_concurrentCallsStartOneSession() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+
+        // Two concurrent start() calls (e.g. double-click on Record button). The synchronous
+        // isStarting guard must let only one through; session.start() must be called exactly once.
+        async let start1: Void = coordinator.start(CoordinatorFixtures.request())
+        async let start2: Void = coordinator.start(CoordinatorFixtures.request())
+        _ = try await (start1, start2)
+
+        #expect(fake.startCount == 1, "concurrent start() calls must start exactly one session")
+        #expect(coordinator.phase == .recording)
+
+        await coordinator.stop()
+    }
+
     @Test("start failure rethrows and leaves phase unchanged")
     func start_failureRethrows() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())

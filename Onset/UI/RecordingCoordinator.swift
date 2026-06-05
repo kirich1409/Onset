@@ -179,6 +179,11 @@ final class RecordingCoordinator {
     @ObservationIgnored
     private var tickTask: Task<Void, Never>?
 
+    /// Re-entrancy guard for `start()`. Flipped synchronously before the first `await` so a concurrent
+    /// call (e.g. double-click on the Record button) is a no-op and cannot leak a second session.
+    @ObservationIgnored
+    private var isStarting = false
+
     /// Re-entrancy guard for `stop()`. Flipped synchronously before the first `await` so a second
     /// stop path entering during the `await session.stop()` suspension is a no-op (the three stop
     /// paths all call `stop()`).
@@ -242,12 +247,6 @@ final class RecordingCoordinator {
         self.phase = .main
     }
 
-    /// Marks that all windows are closed — menu-bar-only (#38).
-    func enterIdle() {
-        guard self.phase == .main else { return }
-        self.phase = .idle
-    }
-
     // MARK: - Start (AC-3)
 
     /// Starts a recording for the given request. On success: hides the main window, opens the
@@ -257,10 +256,12 @@ final class RecordingCoordinator {
     ///
     /// Phase 0 has no Record button; this is exercised by tests via the injected factory.
     func start(_ request: RecordingRequest) async throws {
-        guard self.phase != .recording else {
-            coordinatorLogger.warning("start() ignored — already recording")
+        guard self.phase != .recording, !self.isStarting else {
+            coordinatorLogger.warning("start() ignored — already recording or starting")
             return
         }
+        self.isStarting = true
+        defer { self.isStarting = false }
 
         let session = self.sessionFactory(request)
         do {
@@ -330,11 +331,14 @@ final class RecordingCoordinator {
 
         // Stop the live readouts BEFORE awaiting teardown so they don't tick against a stopping
         // session. The final drops/degraded come from the result, not a post-stop poll (the
-        // session nils its monitor in stop()).
+        // session nils its monitor in stop()). Await the tick task fully (mirrors DropMonitor.stop())
+        // so the poll loop cannot overwrite self.drops after the authoritative result is set below.
+        let tick = self.tickTask
         self.stateTask?.cancel()
         self.tickTask?.cancel()
         self.stateTask = nil
         self.tickTask = nil
+        await tick?.value
 
         let result = await session.stop()
 

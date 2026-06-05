@@ -10,6 +10,8 @@ extension MainViewModel {
     /// Follow-up for `swift-engineer`: add camera-only recording path to RecordingSession.
     func record() async {
         guard !self.isStartingRecording else { return }
+        self.isStartingRecording = true
+        defer { self.isStartingRecording = false }
         self.recordError = nil
 
         guard self.validateRecordGuards() else { return }
@@ -98,7 +100,6 @@ extension MainViewModel {
             origin: .main
         )
 
-        self.isStartingRecording = true
         do {
             try await self.coordinator.start(request)
             mainViewModelLogger.info("Recording started successfully")
@@ -106,6 +107,5 @@ extension MainViewModel {
             self.recordError = "Не удалось начать запись: \(error)"
             mainViewModelLogger.error("Recording start failed: \(String(describing: error))")
         }
-        self.isStartingRecording = false
     }
 }
