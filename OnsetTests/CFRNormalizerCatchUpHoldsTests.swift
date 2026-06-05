@@ -66,6 +66,8 @@ struct CFRNormalizerCatchUpHoldsTests {
             "slot \(slotN) must be eligible at nowAfter"
         )
         #expect(norm.lastEmittedSlot == slotN)
+        // Holds must not increment the drop counter (OpAC-4.2).
+        #expect(norm.cfrNormalizationDrops == 0)
     }
 
     @Test("grace boundary at fps=60: slot N NOT eligible just before window close")

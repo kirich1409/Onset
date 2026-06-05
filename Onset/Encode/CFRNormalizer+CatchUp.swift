@@ -132,25 +132,17 @@ extension CFRNormalizer {
         if holdCount > cap {
             // Cap exceeded: emit exactly `cap` holds and stop. The real frame is not included.
             // Its content is consciously deferred (or lost on pathological lag) on this path.
-            var slots: [CFREmittedSlot] = []
-            slots.reserveCapacity(cap)
-            for idx in holdStart..<holdStart + cap {
-                slots.append(CFREmittedSlot(slotIndex: idx, isHold: true))
-            }
+            let slots = (holdStart..<holdStart + cap).map { CFREmittedSlot(slotIndex: $0, isHold: true) }
             self.lastEmittedSlot = holdStart + cap - 1
             return CFREmission(slots: slots, cappedShort: true)
         }
 
         // Normal path: holds (if any) followed by the real frame.
-        // Emit holds only when the grid was already open (lastEmittedSlot >= 0); when the grid
-        // has never been opened holdCount == 0 and we skip directly to the real frame.
-        var slots: [CFREmittedSlot] = []
-        slots.reserveCapacity(holdCount + 1)
-        if holdCount > 0 {
-            for idx in holdStart..<slotS {
-                slots.append(CFREmittedSlot(slotIndex: idx, isHold: true))
-            }
-        }
+        // Emit holds only when the grid was already open (lastEmittedSlot >= 0, holdCount > 0);
+        // when the grid has never been opened holdCount == 0 and we skip directly to the real frame.
+        var slots = holdCount > 0
+            ? (holdStart..<slotS).map { CFREmittedSlot(slotIndex: $0, isHold: true) }
+            : []
         slots.append(CFREmittedSlot(slotIndex: slotS, isHold: false))
         self.lastEmittedSlot = slotS
         return CFREmission(slots: slots, cappedShort: false)
@@ -219,12 +211,7 @@ extension CFRNormalizer {
         let cappedEnd = min(uncappedEnd, self.lastEmittedSlot + cap) // inclusive, capped
         let wasCapped = cappedEnd < uncappedEnd
 
-        var slots: [CFREmittedSlot] = []
-        let count = cappedEnd - holdStart + 1
-        slots.reserveCapacity(count)
-        for idx in holdStart...cappedEnd {
-            slots.append(CFREmittedSlot(slotIndex: idx, isHold: true))
-        }
+        let slots = (holdStart...cappedEnd).map { CFREmittedSlot(slotIndex: $0, isHold: true) }
         self.lastEmittedSlot = cappedEnd
         return CFREmission(slots: slots, cappedShort: wasCapped)
     }

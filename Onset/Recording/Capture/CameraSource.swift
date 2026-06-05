@@ -235,9 +235,7 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
                 try? await Task.sleep(for: .seconds(1))
                 guard let self, !Task.isCancelled else { return }
                 let now = clock.now
-                let elapsed = (now - lastInstant).components
-                // swiftlint:disable:next no_magic_numbers
-                let elapsedSeconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) * 1e-18
+                let elapsedSeconds = (now - lastInstant).totalSeconds
                 lastInstant = now
                 if let line = self.captureRateLock.withLock({ $0.flush(elapsedSeconds: elapsedSeconds) }) {
                     telemetryLogger.notice("\(line, privacy: .public)")

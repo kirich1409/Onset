@@ -263,7 +263,7 @@ actor FileWriter {
         // and keeps the error logged once (see `isFaulted`).
         guard !self.isFaulted else { return }
 
-        let nowSeconds = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()))
+        let nowSeconds = CMTimeGetSeconds(PipelineClock.currentHostTime())
         guard self.videoSeam.isReadyForMoreMediaData else {
             // Writer/disk backpressure — distinct from encoder backpressure (which originates
             // in VideoEncoder before the sample is compressed). Both map to
@@ -331,9 +331,7 @@ actor FileWriter {
                 try? await Task.sleep(for: .seconds(1))
                 guard let self, !Task.isCancelled else { return }
                 let now = clock.now
-                let elapsed = (now - lastInstant).components
-                // swiftlint:disable:next no_magic_numbers
-                let elapsedSeconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) * 1e-18
+                let elapsedSeconds = (now - lastInstant).totalSeconds
                 lastInstant = now
                 // Hop into the actor's isolation to mutate the aggregator.
                 await self.flushTelemetry(elapsedSeconds: elapsedSeconds)

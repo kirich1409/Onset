@@ -199,7 +199,7 @@ private func makeEncoder(
         fps: testFps,
         anchor: anchor,
         maxPendingFrames: maxPendingFrames,
-        // selfClocked: false — L2 drives tick/clockTick/ingest synchronously; no wall-clock loop.
+        // selfClocked: false — L2 drives clockTick/ingest synchronously; no wall-clock loop.
         selfClocked: false
     ) { _, _, _ in mock }
 }
@@ -267,10 +267,15 @@ struct VideoEncoderTests {
         let encoder = await makeEncoder(mock: mock, anchor: anchor)
         try await encoder.start()
 
-        // Ingest slot 0 (a real frame), then tick slot 1 (no frame → hold).
+        // Ingest slot 0 (a real frame), then drive slot 1 via clockTick (no frame → hold).
         let frame0 = makeFrame(slotIndex: 0, anchor: anchor)
         await encoder.ingest(frame0)
-        await encoder.tick(slotIndex: 1)
+
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let grace = VideoEncoder.defaultGraceSeconds
+        // Slot 1 becomes hold-eligible once now >= anchor + 1.5/fps + grace.
+        let boundary = anchorSeconds + 1.5 / Double(testFps) + grace
+        await encoder.clockTick(nowSeconds: boundary + 0.001)
 
         #expect(mock.encodedBuffers.count == 2)
         // Hold re-submits the same pixel buffer reference as slot 0.
@@ -288,7 +293,11 @@ struct VideoEncoderTests {
         try await encoder.start()
 
         await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
-        await encoder.tick(slotIndex: 1)
+
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let grace = VideoEncoder.defaultGraceSeconds
+        let boundary = anchorSeconds + 1.5 / Double(testFps) + grace
+        await encoder.clockTick(nowSeconds: boundary + 0.001)
 
         #expect(await encoder.cfrNormalizationDropCount == 0)
         #expect(await encoder.backpressureDropCount == 0)

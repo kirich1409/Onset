@@ -227,41 +227,6 @@ nonisolated struct CFRNormalizer {
         return .encode(slotIndex: slotIndex, snappedPTS: snappedPTS, isHold: false)
     }
 
-    // MARK: - Tick processing (hold)
-
-    /// Processes a clock tick for a given slot index when no frame arrived for that slot.
-    ///
-    /// The tick event originates from the CFR clock driver in U3 (the encoder actor) when
-    /// a slot boundary elapses with no frame in the queue. The normalizer emits a hold
-    /// decision so the encoder can re-use the previous compressed output.
-    ///
-    /// A hold does NOT increment `cfrNormalizationDrops` — it is not a drop, it is a
-    /// deliberate repetition to maintain the constant frame-rate contract.
-    ///
-    /// - Parameters:
-    ///   - slotIndex: The slot index for which no frame was received. Must be > `lastEmittedSlot`.
-    ///   - fps: The target frame rate (frames per second). Must be > 0.
-    /// - Returns: An `encode(..., isHold: true)` decision, or `drop(.cfrNormalizationDrops)`
-    ///   if the slot is already behind the current position (defensive guard).
-    nonisolated mutating func processTick(
-        slotIndex: Int,
-        fps: Int
-    )
-    -> CFRDecision {
-        precondition(fps > 0, "fps must be positive")
-
-        if slotIndex <= self.lastEmittedSlot {
-            // Defensive: tick for a past slot — treated as duplicate, not a hold.
-            // This path should not occur under correct U3 driving.
-            self.cfrNormalizationDrops += 1
-            return .drop(reason: .cfrNormalizationDrops)
-        }
-
-        self.lastEmittedSlot = slotIndex
-        let snappedPTS = Double(slotIndex) / Double(fps)
-        return .encode(slotIndex: slotIndex, snappedPTS: snappedPTS, isHold: true)
-    }
-
     // MARK: - Slot mapping (non-mutating)
 
     /// Maps a PTS to a CFR grid slot index using the nearest-integer rounding rule.
