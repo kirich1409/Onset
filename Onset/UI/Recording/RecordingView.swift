@@ -41,6 +41,13 @@ struct RecordingView: View {
         // recording is still in progress, trigger stop(). The coordinator's `isStopping` guard
         // makes this idempotent if the Stop button was also tapped (which dismisses the window,
         // firing this observer as a second call — stop() exits early on the re-entrant path).
+        //
+        // Best-effort: on abrupt Cmd-Q the system may tear down this detached Task before
+        // session.stop() fully finalises the file. This is not a regression — the prior
+        // placeholder had no stop-on-close at all, and any partially-written file remains
+        // recoverable via the movieFragmentInterval fragment headers written mid-recording
+        // (AC-10). Proper applicationShouldTerminate / willTerminate await-stop handling
+        // is deferred to #38.
         .onDisappear {
                 if self.coordinator.phase == .recording {
                     recordingLogger.info("Recording window dismissed while recording — triggering stop")

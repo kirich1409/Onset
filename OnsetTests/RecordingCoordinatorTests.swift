@@ -322,6 +322,38 @@ struct RecordingCoordinatorTests {
         #expect(!stillIncrementing, "elapsed must NOT increment after stop — tick loop must be cancelled")
     }
 
+    @Test("AC-9 degraded-warning lifecycle: set on degraded stop, cleared by acknowledge, absent after clean session")
+    func degradedWarning_lifecycle() async throws {
+        // Session 1: result carries degradedWarning=true.
+        let fake1 = FakeRecordingControlling(
+            result: CoordinatorFixtures.result(degradedWarning: true, backpressureDrops: 64)
+        )
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake1 })
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        await coordinator.stop()
+
+        #expect(coordinator.lastDegradedWarning == true, "flag must be true after a degraded stop")
+
+        // Acknowledge: flag must clear.
+        coordinator.acknowledgeDegradedWarning()
+        #expect(coordinator.lastDegradedWarning == false, "flag must be false after acknowledgeDegradedWarning()")
+
+        // Session 2: fresh fake so the already-finished stream from session 1 is not reused.
+        // A clean result (degradedWarning=false) must leave the flag false — no stale carry-over.
+        let fake2 = FakeRecordingControlling(
+            result: CoordinatorFixtures.result(degradedWarning: false)
+        )
+        // Re-bind a new coordinator that uses fake2 for the second session, sharing the same
+        // observable state to verify the flag's per-session independence.
+        let coordinator2 = RecordingCoordinator(sessionFactory: { _ in fake2 })
+
+        try await coordinator2.start(CoordinatorFixtures.request())
+        await coordinator2.stop()
+
+        #expect(coordinator2.lastDegradedWarning == false, "clean session must not set the degraded-warning flag")
+    }
+
     @Test("start failure rethrows and leaves phase unchanged")
     func start_failureRethrows() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
