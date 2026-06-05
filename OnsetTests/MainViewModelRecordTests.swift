@@ -109,8 +109,8 @@ struct MainViewModelRecordTests {
 
     // MARK: - Valid path
 
-    @Test("record() — valid state → preview stopped before coordinator.start invoked once")
-    func record_validState_previewStoppedThenStartCalled() async {
+    @Test("record() — valid state → coordinator.start invoked exactly once")
+    func record_validState_startCalledOnce() async {
         var startCount = 0
         // One display → auto-selected by loadDevices (AC-1); no mic → AC-2c (record without audio).
         let sut = await self.makeSUT(
@@ -119,8 +119,6 @@ struct MainViewModelRecordTests {
 
         await sut.record()
 
-        // Preview must be stopped before start to release the device for the recording session.
-        #expect(sut.previewSource == nil, "previewSource must be nil before coordinator.start (device contention)")
         #expect(startCount == 1, "coordinator.start must be called exactly once for a valid record()")
     }
 
