@@ -1,167 +1,350 @@
+import AppKit
+import os
 import SwiftUI
+
+// MARK: - Logger
+
+nonisolated private let mainViewLogger = Logger(
+    subsystem: "dev.androidbroadcast.Onset",
+    category: "MainView"
+)
 
 // MARK: - MainView
 
-/// Placeholder main recording screen.
+/// The main recording configuration screen (#36).
 ///
-/// - Note: This is a **stub** intentionally left incomplete. The real recording UI
-///   is implemented in the `onset-recording-mvp` feature. This view satisfies the
-///   composition-root requirement from Stage 4+5 so `RootView` has a valid destination
-///   for the `.main` route.
+/// Shows three source sections (screen, camera, microphone), the Record button,
+/// and a footer with a brief summary. Delegates all logic to `MainViewModel`.
 ///
-///   Replace this file entirely when landing `onset-recording-mvp`.
+/// View states:
+/// - No permissions (AC-2d): empty state with return-to-onboarding button
+/// - Normal: section cards + Record button
+///
+/// Section sub-views live in `MainView+Sections.swift`.
+/// Preview doubles and `#Preview` blocks live in `MainView+Previews.swift`.
+@MainActor
 struct MainView: View {
     // MARK: - Metrics
 
-    private enum Metrics {
-        static let contentSpacing: CGFloat = 16
+    enum Metrics {
         static let windowMinWidth: CGFloat = 460
-        static let windowMinHeight: CGFloat = 320
-        static let iconSize: CGFloat = 48
-        static let cardCornerRadius: CGFloat = 10
-        static let outerPadding: CGFloat = 24
-        static let cardPadding: CGFloat = 16
-        static let iconColumnWidth: CGFloat = 20
-        static let rowSpacing: CGFloat = 10
-        static let rowIconSpacing: CGFloat = 10
-        static let stubNotePadding: CGFloat = 4
+        static let windowMinHeight: CGFloat = 560
+        static let outerPaddingH: CGFloat = 20
+        static let outerPaddingV: CGFloat = 16
+        static let sectionSpacing: CGFloat = 12
+        static let previewHeight: CGFloat = 130
+        static let recordButtonHeight: CGFloat = 44
+        static let rowSpacing: CGFloat = 8
+        static let iconColumnWidth: CGFloat = 16
+        static let emptyIconSize: CGFloat = 40
+        static let noPermissionsTextPaddingH: CGFloat = 32
+        static let noPermissionsSpacing: CGFloat = 16
+        static let recordButtonDotSize: CGFloat = 10
+        static let recordButtonWithoutAudioOpacity: CGFloat = 0.75
+        static let recordButtonHSpacing: CGFloat = 6
+        static let previewCornerRadius: CGFloat = 8
+        static let accessorySpacing: CGFloat = 8
+        static let footerBottomPad: CGFloat = 8
     }
 
-    // MARK: - Inputs
+    // MARK: - Dependencies
 
-    let effectivePermissions: EffectivePermissions
-    /// Called when the user wants to return to onboarding (e.g. no recording possible).
+    @Bindable var model: MainViewModel
+
+    /// Called when the user wants to return to onboarding.
     let onReturnToOnboarding: () -> Void
+
+    // MARK: - State
+
+    /// Drives the post-stop alert. Write-error supersedes degraded-warning: when both are set,
+    /// only the write-error alert fires (the file was not saved — higher severity).
+    /// Using `alert(item:)` with an enum enforces the priority ordering and avoids two
+    /// simultaneous `isPresented` bindings competing for the same presentation slot.
+    @State private var pendingAlert: PostStopAlert?
 
     // MARK: - Body
 
     var body: some View {
-        VStack(spacing: Metrics.contentSpacing) {
-            if self.effectivePermissions.canRecord {
-                self.recordingReadyContent
+        Group {
+            if self.model.showNoPermissionsState {
+                self.noPermissionsView
             } else {
-                self.noPermissionsContent
+                self.mainContent
             }
         }
-        .frame(
-            minWidth: Metrics.windowMinWidth,
-            minHeight: Metrics.windowMinHeight
+        .frame(minWidth: Metrics.windowMinWidth, minHeight: Metrics.windowMinHeight)
+        .task {
+            await self.model.loadDevices()
+        }
+        // Post-stop alerts: surface on re-appear or on async flag changes.
+        // `.onAppear` covers the case where the flag is already set when the main window
+        // re-mounts (stop() sets the flag before opening the main window). `.onChange`
+        // covers any later asynchronous transition.
+        // Write-error supersedes degraded-warning (both can be true simultaneously when
+        // the writer fails under heavy backpressure). Priority is enforced in `resolvedAlert`.
+        .onAppear {
+            self.pendingAlert = self.resolvedAlert()
+            // Install menu-bar record intent while the main window is visible (#38).
+            // [weak model] prevents a retain cycle: coordinator ← closure ← model,
+            // while model also holds coordinator.
+            let model = self.model
+            self.model.coordinator.menuBarRecordIntent = { [weak model] in
+                guard let model else {
+                    mainViewLogger.error("menuBarRecordIntent fired but MainViewModel deallocated — no-op")
+                    return
+                }
+                Task { await model.record() }
+            }
+        }
+        .onDisappear {
+            // Clear the seam when the main window dismounts so the menu bar falls back
+            // to «открыть main window» when no window is showing (origin = .menuBar).
+            self.model.coordinator.menuBarRecordIntent = nil
+        }
+        .onChange(of: self.model.coordinator.lastWriteError) { _, _ in
+            if let alert = self.resolvedAlert() {
+                self.pendingAlert = alert
+            }
+        }
+        .onChange(of: self.model.coordinator.lastDegradedWarning) { _, newValue in
+            if newValue, self.pendingAlert == nil {
+                self.pendingAlert = self.resolvedAlert()
+            }
+        }
+        .alert(item: self.$pendingAlert) { alert in
+            self.makeAlert(for: alert)
+        }
+    }
+
+    // MARK: - Alert resolution
+
+    /// Returns the highest-priority pending alert, or `nil` when no alert is due.
+    /// Write-error supersedes degraded-warning when both flags are set simultaneously.
+    private func resolvedAlert() -> PostStopAlert? {
+        PostStopAlert.resolve(
+            writeError: self.model.coordinator.lastWriteError,
+            degraded: self.model.coordinator.lastDegradedWarning
         )
-        .padding(Metrics.outerPadding)
     }
 
-    // MARK: - Sub-views
-
-    private var recordingReadyContent: some View {
-        VStack(spacing: Metrics.rowSpacing) {
-            Image(systemName: "record.circle")
-                .font(.system(size: Metrics.iconSize))
-                .foregroundStyle(.red)
-                .accessibilityHidden(true)
-
-            Text("Готово к записи")
-                .font(.title2)
-                .fontWeight(.semibold)
-
-            self.availabilityCard
-
-            Text("Заглушка — реализация записи в onset-recording-mvp")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-                .padding(.top, Metrics.stubNotePadding)
-        }
-    }
-
-    private var availabilityCard: some View {
-        VStack(alignment: .leading, spacing: Metrics.rowSpacing) {
-            self.availabilityRow(
-                icon: "display",
-                label: "Запись экрана",
-                available: self.effectivePermissions.screenAvailable
+    /// Builds the `Alert` for a given `PostStopAlert` case.
+    private func makeAlert(for alert: PostStopAlert) -> Alert {
+        switch alert {
+        case let .writeError(reason):
+            Alert(
+                title: Text("Не удалось сохранить запись"),
+                message: Text(reason),
+                dismissButton: .default(Text("ОК")) {
+                    self.model.coordinator.acknowledgeWriteError()
+                    self.pendingAlert = nil
+                }
             )
-            self.availabilityRow(
-                icon: "camera.fill",
-                label: "Камера",
-                available: self.effectivePermissions.cameraAvailable
-            )
-            self.availabilityRow(
-                icon: "mic.fill",
-                label: "Микрофон",
-                available: self.effectivePermissions.microphoneAvailable
+
+        case .degradedWarning:
+            Alert(
+                title: Text("Запись завершена с ошибками"),
+                message: Text(
+                    "Во время записи были пропущены кадры из-за перегрузки диска." +
+                        " Видеофайл может содержать пропуски."
+                ),
+                dismissButton: .default(Text("ОК")) {
+                    self.model.coordinator.acknowledgeDegradedWarning()
+                    self.pendingAlert = nil
+                }
             )
         }
-        .padding(Metrics.cardPadding)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: Metrics.cardCornerRadius))
     }
 
-    private var noPermissionsContent: some View {
-        VStack(spacing: Metrics.rowSpacing) {
+    // MARK: - No permissions empty state (AC-2d)
+
+    private var noPermissionsView: some View {
+        VStack(spacing: Metrics.noPermissionsSpacing) {
+            Spacer()
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: Metrics.iconSize))
+                .font(.system(size: Metrics.emptyIconSize))
                 .foregroundStyle(.orange)
                 .accessibilityHidden(true)
-
             Text("Запись недоступна")
-                .font(.title2)
+                .font(.title3)
                 .fontWeight(.semibold)
-
-            Text("Выдайте разрешения, чтобы начать запись.")
+            Text("Выдайте разрешения на запись экрана или камеру, чтобы начать.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-
-            Button("Выдать разрешения") {
+                .padding(.horizontal, Metrics.noPermissionsTextPaddingH)
+            Button("Вернуться к разрешениям") {
                 self.onReturnToOnboarding()
             }
             .buttonStyle(.borderedProminent)
+            .accessibilityLabel("Вернуться к разрешениям")
+            Spacer()
+        }
+        .padding(.horizontal, Metrics.outerPaddingH)
+    }
+
+    // MARK: - Main content
+
+    var mainContent: some View {
+        ScrollView {
+            VStack(spacing: Metrics.sectionSpacing) {
+                self.screenSection
+                self.cameraSection
+                self.microphoneSection
+                Spacer(minLength: Metrics.footerBottomPad)
+                self.recordButton
+                self.recordFooter
+            }
+            .padding(.horizontal, Metrics.outerPaddingH)
+            .padding(.vertical, Metrics.outerPaddingV)
         }
     }
 
-    private func availabilityRow(icon: String, label: String, available: Bool) -> some View {
-        HStack(spacing: Metrics.rowIconSpacing) {
-            Image(systemName: icon)
-                .frame(width: Metrics.iconColumnWidth)
-                .foregroundStyle(available ? .primary : Color(nsColor: .tertiaryLabelColor))
-                .accessibilityHidden(true)
-            Text(label)
-                .foregroundStyle(available ? Color.primary : Color.secondary)
-            Spacer(minLength: 0)
-            Image(systemName: available ? "checkmark.circle.fill" : "xmark.circle")
-                .foregroundStyle(available ? Color.green : Color(nsColor: .tertiaryLabelColor))
-                .accessibilityLabel(available ? "\(label): доступно" : "\(label): недоступно")
+    // MARK: - Record footer (reason / error)
+
+    @ViewBuilder
+    private var recordFooter: some View {
+        if let reason = self.model.recordDisabledReason {
+            Text(reason)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .accessibilityLabel(reason)
+        }
+        if let error = self.model.recordError {
+            Text(error)
+                .font(.caption)
+                .foregroundStyle(.red)
+                .multilineTextAlignment(.center)
+        }
+    }
+
+    // MARK: - Record button
+
+    var recordButton: some View {
+        Button {
+            Task { await self.model.record() }
+        } label: {
+            self.recordButtonLabel
+                .frame(maxWidth: .infinity)
+                .frame(height: Metrics.recordButtonHeight)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(.red)
+        .disabled(!self.model.canRecord || self.model.isStartingRecording)
+        .accessibilityLabel(
+            self.model.isRecordingWithoutAudio
+                ? "Записать без звука"
+                : "Записать"
+        )
+        .accessibilityHint(self.model.recordDisabledReason ?? "")
+        .accessibilityIdentifier("record-button")
+    }
+
+    private var recordButtonLabel: some View {
+        HStack(spacing: Metrics.recordButtonHSpacing) {
+            if self.model.isStartingRecording {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .controlSize(.small)
+                    .accessibilityHidden(true)
+            } else {
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: Metrics.recordButtonDotSize, height: Metrics.recordButtonDotSize)
+                    .accessibilityHidden(true)
+            }
+            Text(self.model.isStartingRecording ? "Запуск…" : "Записать")
+                .fontWeight(.semibold)
+            if self.model.isRecordingWithoutAudio {
+                Text("без звука")
+                    .font(.caption)
+                    .opacity(Metrics.recordButtonWithoutAudioOpacity)
+            }
         }
     }
 }
 
-// MARK: - Previews
+// MARK: - SectionCard
 
-#Preview("Recording ready — full") {
-    MainView(
-        effectivePermissions: EffectivePermissions.compute(
-            screen: .authorized,
-            camera: .authorized,
-            microphone: .authorized
-        )
-    ) {}
+// Metrics as module-level lets: static stored properties are not supported in generic types.
+let sectionCardHeaderSpacing: CGFloat = 6
+let sectionCardPadding: CGFloat = 14
+let sectionCardCornerRadius: CGFloat = 10
+let sectionCardTitleKerning: CGFloat = 0.5
+
+/// Reusable card container for a labeled settings section.
+struct SectionCard<Content: View>: View {
+    let title: String
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: sectionCardHeaderSpacing) {
+            Text(self.title)
+                .font(.caption)
+                .fontWeight(.semibold)
+                .foregroundStyle(.secondary)
+                .kerning(sectionCardTitleKerning)
+
+            VStack(alignment: .leading, spacing: 0) {
+                self.content()
+            }
+            .padding(sectionCardPadding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .clipShape(RoundedRectangle(cornerRadius: sectionCardCornerRadius))
+        }
+    }
 }
 
-#Preview("Recording ready — no mic") {
-    MainView(
-        effectivePermissions: EffectivePermissions.compute(
-            screen: .authorized,
-            camera: .authorized,
-            microphone: .notDetermined
-        )
-    ) {}
+// MARK: - CameraPreviewRepresentable
+
+/// `NSViewRepresentable` wrapper for `CameraPreviewView`.
+///
+/// `CameraPreviewView.init` wires the `AVCaptureVideoPreviewLayer`; `updateNSView` is a no-op
+/// by design. Force recreation by toggling `.id(model.previewGeneration)` on the call site.
+struct CameraPreviewRepresentable: NSViewRepresentable {
+    let sessionHandle: SessionHandle?
+
+    func makeNSView(context: Context) -> CameraPreviewView {
+        CameraPreviewView(sessionHandle: self.sessionHandle)
+    }
+
+    func updateNSView(_ nsView: CameraPreviewView, context: Context) {
+        // No-op: CameraPreviewView wires the layer in init.
+        // Caller must use .id() to force recreation when sessionHandle changes.
+    }
 }
 
-#Preview("No permissions") {
-    MainView(
-        effectivePermissions: EffectivePermissions.compute(
-            screen: .notDetermined,
-            camera: .notDetermined,
-            microphone: .notDetermined
-        )
-    ) {}
+// MARK: - PostStopAlert
+
+/// Which post-stop alert `MainView` presents after a recording ends.
+///
+/// `writeError` carries the localized reason for the message body.
+/// Priority ordering is enforced by `resolve(writeError:degraded:)`: write-error supersedes
+/// degraded-warning because a failed write means the file was not saved (higher severity).
+enum PostStopAlert: Identifiable {
+    case writeError(reason: String)
+    case degradedWarning
+
+    var id: String {
+        switch self {
+        case .writeError: "writeError"
+        case .degradedWarning: "degradedWarning"
+        }
+    }
+
+    /// Returns the highest-priority alert given the coordinator state, or `nil` when no alert is due.
+    ///
+    /// Priority: `.writeError` > `.degradedWarning` > `nil`.
+    /// Both flags can be simultaneously true when the writer fails under heavy backpressure;
+    /// only the higher-severity alert is shown to avoid competing presentation slots.
+    nonisolated static func resolve(writeError: String?, degraded: Bool) -> Self? {
+        if let reason = writeError {
+            return .writeError(reason: reason)
+        }
+        if degraded {
+            return .degradedWarning
+        }
+        return nil
+    }
 }

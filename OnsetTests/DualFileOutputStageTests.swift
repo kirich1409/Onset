@@ -1,0 +1,510 @@
+// DualFileOutputStageTests.swift
+// OnsetTests
+//
+// Swift Testing suite for DualFileOutputStage (#33 audio fan-out + retiming, #34 dual-file output).
+//
+// L2 — no hardware. Uses a FakeWriter (records startSession T0, appendVideo, appendAudio buffer
+// REFERENCES for identity assertions, markFinished, finish) and synthetic CMSampleBuffers.
+//
+// The AC-7 retiming red-green discriminator is the most important test here: it asserts the buffer
+// handed to appendAudio has PTS == ptsHostTime after retiming, and FAILS if retiming is removed
+// (the synthetic audio buffer is built with original PTS != ptsHostTime so the assertion is not
+// vacuous).
+//
+// swiftlint:disable no_magic_numbers
+// swiftlint:disable file_length
+// swiftlint:disable function_body_length
+// Rationale: synthetic CMSampleBuffer / timing literals are inherent test data (no_magic_numbers),
+// the suite is long (file_length), and the audio-fixture builder is one CoreMedia transaction
+// (function_body_length). Same pattern as FileWriterTests.
+
+import AVFoundation
+import CoreMedia
+@testable import Onset
+import Testing
+
+// MARK: - Fakes
+
+/// A fake WriterFactory that hands out preconfigured FakeWriters and records creation order.
+private final class FakeWriterFactory: WriterFactory, @unchecked Sendable {
+    /// Writers keyed by pipeline, created on demand. Pre-seeded so tests can inspect them.
+    let screenWriter = FakeWriter(kind: .screen)
+    let cameraWriter = FakeWriter(kind: .camera)
+    private(set) var createdKinds: [RecordingPipelineKind] = []
+
+    func makeWriter(
+        kind: RecordingPipelineKind,
+        sourceFormatHint: CMFormatDescription,
+        includeAudio: Bool
+    ) throws
+    -> any WriterControlling {
+        self.createdKinds.append(kind)
+        switch kind {
+        case .screen:
+            self.screenWriter.includeAudio = includeAudio
+            return self.screenWriter
+
+        case .camera:
+            self.cameraWriter.includeAudio = includeAudio
+            return self.cameraWriter
+        }
+    }
+}
+
+/// A fake writer: records everything routed to it for assertions.
+private final class FakeWriter: WriterControlling, @unchecked Sendable {
+    let kind: RecordingPipelineKind
+    var includeAudio = false
+
+    /// The source time passed to start(atSourceTime:) — must be the verbatim session T0 (AC-7).
+    private(set) var startSourceTime: CMTime?
+    private(set) var appendedVideo: [EncodedSample] = []
+    /// Captured buffer REFERENCES for fan-out identity assertions (===).
+    private(set) var appendedAudioBuffers: [CMSampleBuffer] = []
+    private(set) var markFinishedCalled = false
+    private(set) var finishCalled = false
+
+    /// The result `finish()` returns — set to `.failed` to test AC-9 independence.
+    var finishResult: FinishResult
+
+    nonisolated let drops: AsyncStream<DropEvent>
+    private let dropsContinuation: AsyncStream<DropEvent>.Continuation
+
+    init(kind: RecordingPipelineKind) {
+        self.kind = kind
+        self.finishResult = .completed(url: URL(fileURLWithPath: "/tmp/onset-fake-\(kind).mp4"))
+        let (stream, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        self.drops = stream
+        self.dropsContinuation = continuation
+    }
+
+    func start(atSourceTime sourceTime: CMTime) throws {
+        self.startSourceTime = sourceTime
+    }
+
+    func appendVideo(_ sample: EncodedSample) {
+        self.appendedVideo.append(sample)
+    }
+
+    func appendAudio(_ audio: RetimedAudioBuffer) {
+        self.appendedAudioBuffers.append(audio.buffer)
+    }
+
+    func markFinished() {
+        self.markFinishedCalled = true
+        self.dropsContinuation.finish()
+    }
+
+    func finish() async -> FinishResult {
+        self.finishCalled = true
+        return self.finishResult
+    }
+}
+
+// MARK: - Synthetic buffers
+
+private enum SampleFactory {
+    /// Fixed session T0 (absolute host-time) used as the writers' startSession origin.
+    static let sessionT0 = CMTime(value: 100_000, timescale: 600)
+
+    /// Builds a minimal HEVC format description for the writer source hint.
+    static func hevcFormat() throws -> CMFormatDescription {
+        var desc: CMFormatDescription?
+        let status = CMVideoFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            codecType: kCMVideoCodecType_HEVC,
+            width: 1280,
+            height: 720,
+            extensions: nil,
+            formatDescriptionOut: &desc
+        )
+        guard status == noErr, let desc else { throw StageTestError.formatFailed(status) }
+        return desc
+    }
+
+    /// Builds an EncodedSample carrying a real HEVC format description (so the writer can be created).
+    static func encodedSample(ptsSeconds: Double, kind: RecordingPipelineKind) throws -> EncodedSample {
+        let pts = CMTime(seconds: ptsSeconds, preferredTimescale: 600)
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: 30),
+            presentationTimeStamp: pts,
+            decodeTimeStamp: .invalid
+        )
+        let format = try hevcFormat()
+        var sampleBuffer: CMSampleBuffer?
+        let status = CMSampleBufferCreate(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: nil,
+            dataReady: false,
+            makeDataReadyCallback: nil,
+            refcon: nil,
+            formatDescription: format,
+            sampleCount: 1,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleSizeEntryCount: 0,
+            sampleSizeArray: nil,
+            sampleBufferOut: &sampleBuffer
+        )
+        guard status == noErr, let sampleBuffer else { throw StageTestError.sampleFailed(status) }
+        // _ = kind is only used by callers for routing; encoded sample itself is kind-agnostic.
+        _ = kind
+        return EncodedSample(sampleBuffer: sampleBuffer, ptsHostTime: pts, isKeyframe: true)
+    }
+
+    /// Builds a multi-sample PCM audio buffer with a REAL block buffer (CMSampleBufferCreateCopyWithNewTiming
+    /// requires a data-ready buffer). `originalFirstPTS` is set DIFFERENT from `ptsHostTime` so the
+    /// retiming discriminator is not vacuous.
+    static func audioSample(
+        sampleCount: Int = 4,
+        sampleRate: Double = 48000,
+        originalFirstPTS: CMTime,
+        ptsHostTime: CMTime
+    ) throws
+    -> AudioSample {
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 2,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 2,
+            mChannelsPerFrame: 1,
+            mBitsPerChannel: 16,
+            mReserved: 0
+        )
+        var format: CMAudioFormatDescription?
+        let fmtStatus = CMAudioFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            asbd: &asbd,
+            layoutSize: 0,
+            layout: nil,
+            magicCookieSize: 0,
+            magicCookie: nil,
+            extensions: nil,
+            formatDescriptionOut: &format
+        )
+        guard fmtStatus == noErr, let format else { throw StageTestError.formatFailed(fmtStatus) }
+
+        // Real silent block buffer: sampleCount frames × 2 bytes/frame.
+        let dataLength = sampleCount * 2
+        var blockBuffer: CMBlockBuffer?
+        let blockStatus = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault,
+            memoryBlock: nil,
+            blockLength: dataLength,
+            blockAllocator: kCFAllocatorDefault,
+            customBlockSource: nil,
+            offsetToData: 0,
+            dataLength: dataLength,
+            flags: kCMBlockBufferAssureMemoryNowFlag,
+            blockBufferOut: &blockBuffer
+        )
+        guard blockStatus == kCMBlockBufferNoErr, let blockBuffer else {
+            throw StageTestError.blockBufferFailed(blockStatus)
+        }
+        // Zero the memory (silence).
+        CMBlockBufferFillDataBytes(with: 0, blockBuffer: blockBuffer, offsetIntoDestination: 0, dataLength: dataLength)
+
+        // Per-sample timing: uniform duration, first PTS = originalFirstPTS, DTS invalid.
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: Int32(sampleRate)),
+            presentationTimeStamp: originalFirstPTS,
+            decodeTimeStamp: .invalid
+        )
+        var sampleBuffer: CMSampleBuffer?
+        let status = CMSampleBufferCreateReady(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: blockBuffer,
+            formatDescription: format,
+            sampleCount: sampleCount,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleSizeEntryCount: 1,
+            sampleSizeArray: [2],
+            sampleBufferOut: &sampleBuffer
+        )
+        guard status == noErr, let sampleBuffer else { throw StageTestError.sampleFailed(status) }
+        return AudioSample(sampleBuffer: sampleBuffer, ptsHostTime: ptsHostTime)
+    }
+}
+
+private enum StageTestError: Error {
+    case formatFailed(OSStatus)
+    case sampleFailed(OSStatus)
+    case blockBufferFailed(OSStatus)
+}
+
+// MARK: - Stage factory helper
+
+private func makeStage(
+    factory: FakeWriterFactory,
+    expected: Set<RecordingPipelineKind>,
+    includeAudio: Bool
+)
+-> DualFileOutputStage {
+    DualFileOutputStage(
+        sessionT0: SampleFactory.sessionT0,
+        expectedPipelines: expected,
+        includeAudio: includeAudio,
+        writerFactory: factory
+    ) { _ in }
+}
+
+// MARK: - Retiming (AC-7, #33)
+
+@Suite("DualFileOutputStage — audio retiming (AC-7 / #33)")
+struct DualFileOutputStageRetimingTests {
+    /// THE red-green discriminator: after retiming, the buffer handed to appendAudio has
+    /// PTS == ptsHostTime. Original PTS is deliberately != ptsHostTime, so this fails if the
+    /// retiming is removed (the raw original PTS would be appended instead).
+    @Test("retimed audio buffer PTS == ptsHostTime (fails if retiming removed)")
+    func retiming_setsAbsoluteHostTimePTS() async throws {
+        let factory = FakeWriterFactory()
+        let stage = makeStage(factory: factory, expected: [.camera], includeAudio: true)
+
+        // Create the camera writer first (so audio is delivered live, not buffered).
+        let firstSample = try SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .camera)
+        await stage.routeVideo(firstSample, from: .camera)
+
+        let originalPTS = CMTime(value: 7777, timescale: 48000) // arbitrary, != ptsHostTime
+        let ptsHostTime = CMTime(value: 222_000, timescale: 600)
+        let audio = try SampleFactory.audioSample(originalFirstPTS: originalPTS, ptsHostTime: ptsHostTime)
+
+        await stage.routeAudio(audio)
+
+        let captured = try #require(factory.cameraWriter.appendedAudioBuffers.first)
+        let retimedPTS = CMSampleBufferGetPresentationTimeStamp(captured)
+        #expect(CMTimeCompare(retimedPTS, ptsHostTime) == 0, "retimed PTS must equal ptsHostTime")
+        // Guard against a vacuous test: original PTS must differ from ptsHostTime.
+        #expect(CMTimeCompare(originalPTS, ptsHostTime) != 0)
+    }
+
+    @Test("retiming preserves per-sample duration and keeps invalid DTS invalid")
+    func retiming_preservesDurationAndDTS() async throws {
+        let factory = FakeWriterFactory()
+        let stage = makeStage(factory: factory, expected: [.camera], includeAudio: true)
+        let firstSample = try SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .camera)
+        await stage.routeVideo(firstSample, from: .camera)
+
+        let originalPTS = CMTime(value: 5000, timescale: 48000)
+        let ptsHostTime = CMTime(value: 300_000, timescale: 600)
+        let audio = try SampleFactory.audioSample(originalFirstPTS: originalPTS, ptsHostTime: ptsHostTime)
+        await stage.routeAudio(audio)
+
+        let captured = try #require(factory.cameraWriter.appendedAudioBuffers.first)
+
+        // Duration preserved (one grid step at 48 kHz).
+        var timingCount: CMItemCount = 0
+        let countStatus = CMSampleBufferGetSampleTimingInfoArray(
+            captured,
+            entryCount: 0,
+            arrayToFill: nil,
+            entriesNeededOut: &timingCount
+        )
+        #expect(countStatus == noErr)
+        let emptyTiming = CMSampleTimingInfo(
+            duration: .invalid,
+            presentationTimeStamp: .invalid,
+            decodeTimeStamp: .invalid
+        )
+        var timing = [CMSampleTimingInfo](repeating: emptyTiming, count: Int(timingCount))
+        _ = CMSampleBufferGetSampleTimingInfoArray(
+            captured,
+            entryCount: timingCount,
+            arrayToFill: &timing,
+            entriesNeededOut: &timingCount
+        )
+        let first = try #require(timing.first)
+        #expect(CMTimeCompare(first.duration, CMTime(value: 1, timescale: 48000)) == 0, "duration preserved")
+        // DTS was invalid on input → must stay invalid (presentation order).
+        #expect(!first.decodeTimeStamp.isValid, "invalid DTS must remain invalid")
+    }
+}
+
+// MARK: - Fan-out (AC-7)
+
+@Suite("DualFileOutputStage — fan-out identity & isolation (AC-7)")
+struct DualFileOutputStageFanOutTests {
+    @Test("SAME retimed buffer reference reaches BOTH writers")
+    func fanOut_sameReferenceToBoth() async throws {
+        let factory = FakeWriterFactory()
+        let stage = makeStage(factory: factory, expected: [.screen, .camera], includeAudio: true)
+
+        // Create both writers so audio fans out live.
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .camera), from: .camera)
+
+        let audio = try SampleFactory.audioSample(
+            originalFirstPTS: CMTime(value: 1, timescale: 48000),
+            ptsHostTime: CMTime(value: 200_000, timescale: 600)
+        )
+        await stage.routeAudio(audio)
+
+        let screenBuf = try #require(factory.screenWriter.appendedAudioBuffers.first)
+        let cameraBuf = try #require(factory.cameraWriter.appendedAudioBuffers.first)
+        #expect(screenBuf === cameraBuf, "both writers must receive the SAME retimed buffer reference")
+    }
+
+    @Test("screen video never reaches the camera writer and vice versa")
+    func routing_isolation() async throws {
+        let factory = FakeWriterFactory()
+        let stage = makeStage(factory: factory, expected: [.screen, .camera], includeAudio: false)
+
+        let screenSample = try SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen)
+        let cameraSample = try SampleFactory.encodedSample(ptsSeconds: 2.0, kind: .camera)
+        await stage.routeVideo(screenSample, from: .screen)
+        await stage.routeVideo(cameraSample, from: .camera)
+
+        #expect(factory.screenWriter.appendedVideo.count == 1)
+        #expect(factory.cameraWriter.appendedVideo.count == 1)
+        // Identity: the screen writer got the screen sample's buffer, not the camera's.
+        #expect(factory.screenWriter.appendedVideo.first?.sampleBuffer === screenSample.sampleBuffer)
+        #expect(factory.cameraWriter.appendedVideo.first?.sampleBuffer === cameraSample.sampleBuffer)
+    }
+}
+
+// MARK: - Lazy writer + pending replay (AC-7)
+
+@Suite("DualFileOutputStage — lazy writer & pending replay (AC-7)")
+struct DualFileOutputStageLazyTests {
+    @Test("writers start at the verbatim session T0 (AC-7)")
+    func writerStartsAtT0() async throws {
+        let factory = FakeWriterFactory()
+        let stage = makeStage(factory: factory, expected: [.screen, .camera], includeAudio: false)
+
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 5.0, kind: .screen), from: .screen)
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 9.0, kind: .camera), from: .camera)
+
+        // Even though the first samples have different (and non-T0) PTS, both writers got T0.
+        let screenStart = try #require(factory.screenWriter.startSourceTime)
+        let cameraStart = try #require(factory.cameraWriter.startSourceTime)
+        #expect(CMTimeCompare(screenStart, SampleFactory.sessionT0) == 0)
+        #expect(CMTimeCompare(cameraStart, SampleFactory.sessionT0) == 0)
+    }
+
+    @Test("late-created writer replays identical early audio from the pending buffer")
+    func lateWriter_replaysEarlyAudio() async throws {
+        let factory = FakeWriterFactory()
+        // Both pipelines expected; camera writer created first, screen writer created LATE.
+        let stage = makeStage(factory: factory, expected: [.screen, .camera], includeAudio: true)
+
+        // Camera writer exists; screen writer does not yet.
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .camera), from: .camera)
+
+        // Early audio: camera gets it live; it is also buffered for the not-yet-created screen writer.
+        let audio = try SampleFactory.audioSample(
+            originalFirstPTS: CMTime(value: 3, timescale: 48000),
+            ptsHostTime: CMTime(value: 210_000, timescale: 600)
+        )
+        await stage.routeAudio(audio)
+
+        #expect(factory.cameraWriter.appendedAudioBuffers.count == 1)
+        #expect(factory.screenWriter.appendedAudioBuffers.isEmpty, "screen writer not created yet")
+
+        // Now create the screen writer late → it drains the pending buffer (identical early audio).
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
+
+        let cameraBuf = try #require(factory.cameraWriter.appendedAudioBuffers.first)
+        let screenBuf = try #require(factory.screenWriter.appendedAudioBuffers.first)
+        #expect(screenBuf === cameraBuf, "late writer must replay the IDENTICAL early audio buffer")
+    }
+
+    @Test("pending cap drops oldest (bounded)")
+    func pendingCap_dropsOldest() async throws {
+        let factory = FakeWriterFactory()
+        // Two expected pipelines, neither writer created → all audio is buffered.
+        let stage = makeStage(factory: factory, expected: [.screen, .camera], includeAudio: true)
+
+        // Overflow the 256 cap: route 300 distinct audio buffers.
+        let total = 300
+        var firstBuffer: CMSampleBuffer?
+        for index in 0..<total {
+            let audio = try SampleFactory.audioSample(
+                originalFirstPTS: CMTime(value: Int64(index), timescale: 48000),
+                ptsHostTime: CMTime(value: Int64(200_000 + index), timescale: 600)
+            )
+            if index == 0 { firstBuffer = audio.sampleBuffer }
+            await stage.routeAudio(audio)
+        }
+
+        // Now create both writers; each drains the (capped) pending list.
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .camera), from: .camera)
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
+
+        // Bounded: at most the cap (256) buffers replayed per writer — oldest dropped.
+        #expect(factory.cameraWriter.appendedAudioBuffers.count <= 256, "pending list must be bounded by the cap")
+        // The earliest buffer was dropped (300 > 256), so it is not the first replayed buffer.
+        let firstReplayed = factory.cameraWriter.appendedAudioBuffers.first
+        let unwrappedFirst = try #require(firstBuffer)
+        #expect(firstReplayed !== unwrappedFirst, "oldest buffer must have been dropped on overflow")
+    }
+}
+
+// MARK: - Finish independence (AC-9)
+
+@Suite("DualFileOutputStage — finish independence (AC-9)")
+struct DualFileOutputStageFinishTests {
+    @Test("one writer .failed does not prevent the other's finish")
+    func finishIndependence() async throws {
+        let factory = FakeWriterFactory()
+        let stage = makeStage(factory: factory, expected: [.screen, .camera], includeAudio: false)
+
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .camera), from: .camera)
+
+        // Camera writer fails; screen writer completes.
+        let failURL = URL(fileURLWithPath: "/tmp/onset-fake-camera.mp4")
+        factory.cameraWriter.finishResult = .failed(url: failURL, error: StageTestError.sampleFailed(-1))
+
+        let results = await stage.finishAll()
+
+        #expect(factory.screenWriter.markFinishedCalled)
+        #expect(factory.cameraWriter.markFinishedCalled)
+        #expect(factory.screenWriter.finishCalled)
+        #expect(factory.cameraWriter.finishCalled)
+
+        let screen = try #require(results[.screen])
+        let camera = try #require(results[.camera])
+        if case .completed = screen {} else { Issue.record("screen should be .completed") }
+        if case .failed = camera {} else { Issue.record("camera should be .failed") }
+    }
+
+    @Test("early-finalised pipeline keeps its captured result; other keeps recording (AC-12)")
+    func finalizePipeline_isolates() async throws {
+        let factory = FakeWriterFactory()
+        let stage = makeStage(factory: factory, expected: [.screen, .camera], includeAudio: true)
+
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .camera), from: .camera)
+
+        // Finalise camera early (AC-12 camera-disconnect).
+        await stage.finalizePipeline(.camera)
+        #expect(factory.cameraWriter.markFinishedCalled)
+        #expect(factory.cameraWriter.finishCalled)
+
+        // Audio after finalize must NOT reach the finalised camera writer, but must reach screen.
+        let beforeCamera = factory.cameraWriter.appendedAudioBuffers.count
+        let audio = try SampleFactory.audioSample(
+            originalFirstPTS: CMTime(value: 1, timescale: 48000),
+            ptsHostTime: CMTime(value: 250_000, timescale: 600)
+        )
+        await stage.routeAudio(audio)
+        #expect(factory.cameraWriter.appendedAudioBuffers.count == beforeCamera, "finalised camera gets no audio")
+        #expect(factory.screenWriter.appendedAudioBuffers.count >= 1, "screen still records audio")
+
+        // Screen video after finalize still reaches the screen writer.
+        let beforeScreenVideo = factory.screenWriter.appendedVideo.count
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 2.0, kind: .screen), from: .screen)
+        #expect(factory.screenWriter.appendedVideo.count == beforeScreenVideo + 1)
+
+        // finishAll carries both results (camera from finalize time, screen from finish).
+        let results = await stage.finishAll()
+        #expect(results[.camera] != nil)
+        #expect(results[.screen] != nil)
+    }
+}
+
+// swiftlint:enable no_magic_numbers
+// swiftlint:enable function_body_length
+// file_length stays disabled through EOF (whole-file rule — same pattern as FileWriterTests).
