@@ -76,6 +76,18 @@ struct MainView: View {
         // the writer fails under heavy backpressure). Priority is enforced in `resolvedAlert`.
         .onAppear {
             self.pendingAlert = self.resolvedAlert()
+            // Install menu-bar record intent while the main window is visible (#38).
+            // [weak model] prevents a retain cycle: coordinator ← closure ← model,
+            // while model also holds coordinator.
+            let model = self.model
+            self.model.coordinator.menuBarRecordIntent = { [weak model] in
+                Task { await model?.record() }
+            }
+        }
+        .onDisappear {
+            // Clear the seam when the main window dismounts so the menu bar falls back
+            // to «открыть main window» when no window is showing (origin = .menuBar).
+            self.model.coordinator.menuBarRecordIntent = nil
         }
         .onChange(of: self.model.coordinator.lastWriteError) { _, _ in
             if let alert = self.resolvedAlert() {

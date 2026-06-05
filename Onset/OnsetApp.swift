@@ -27,7 +27,8 @@ nonisolated private let isRunningUnderXCTest =
 // MARK: - Window IDs
 
 /// Stable scene identifiers used by `openWindow` / `dismissWindow`.
-private enum WindowID {
+/// Internal so `MenuBarMenu` can open windows without re-declaring the constants.
+enum WindowID {
     static let main = "onboarding"
     static let recording = "recording"
 }
@@ -110,14 +111,12 @@ struct OnsetApp: App {
         // opens on Record (AC-3). Without this the second Window scene would also pop at startup.
         .defaultLaunchBehavior(.suppressed)
 
-        // Menu bar item (#38 foundation). Phase 0 ships a minimal but functional menu so the app is
-        // usable as a menu-bar app; the full Idle / Recording / Degraded states land in #38.
+        // Menu bar item (#38). Full 3-state label and context menu.
         // Suppressed under XCTest so test hosts do not accumulate competing status items.
         MenuBarExtra(isInserted: .constant(!isRunningUnderXCTest)) {
-            MenuBarContent(coordinator: self.coordinator)
+            MenuBarMenu(coordinator: self.coordinator)
         } label: {
-            // Minimal reactive label: ● while recording, ○ at rest.
-            Image(systemName: self.coordinator.phase == .recording ? "record.circle.fill" : "circle")
+            MenuBarLabel(coordinator: self.coordinator)
         }
     }
 }
@@ -155,34 +154,14 @@ private struct WindowActionsBridge: View {
     }
 }
 
-// MARK: - MenuBarContent
-
-/// **Minimal menu (#38 foundation).** A functional menu so the app is usable as a menu-bar app:
-/// open the main window, and quit. The full Idle / Recording / Degraded menus land in #38.
-private struct MenuBarContent: View {
-    let coordinator: RecordingCoordinator
-
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        Button("Открыть Onset") {
-            self.openWindow(id: WindowID.main)
-            AppActivation.bringToFront()
-        }
-        Divider()
-        Button("Выход") {
-            NSApplication.shared.terminate(nil)
-        }
-    }
-}
-
 // MARK: - AppActivation
 
 /// Brings the app to the front when a window is reopened from the menu bar.
 ///
 /// `NSApp.activate()` suffices for a regular app — no activation-policy switching needed.
 /// Skipped under XCTest: test hosts must not steal focus.
-private enum AppActivation {
+/// Internal so `MenuBarMenu` can call it directly.
+enum AppActivation {
     static func bringToFront() {
         guard !isRunningUnderXCTest else { return }
         NSApp.activate()
