@@ -174,7 +174,11 @@ nonisolated struct CFRNormalizer {
 
     /// The last slot index that was emitted via `encode`. Initialised to `-1` so the
     /// first slot (index 0) is always considered a new slot.
-    private(set) nonisolated var lastEmittedSlot: Int = -1 // swiftlint:disable:this modifier_order
+    ///
+    /// - Note: The setter is deliberately not restricted to the primary file (`private(set)`)
+    ///   so that the catch-up extension in `CFRNormalizer+CatchUp.swift` can advance it.
+    ///   Read-only access is sufficient for all callers outside the normalizer module.
+    nonisolated var lastEmittedSlot: Int = -1
 
     /// Running count of frames dropped because their computed slot was already emitted.
     ///
@@ -207,8 +211,7 @@ nonisolated struct CFRNormalizer {
     -> CFRDecision {
         precondition(fps > 0, "fps must be positive")
 
-        let offset = ptsSeconds - anchorSeconds
-        let slotIndex = Int((offset * Double(fps)).rounded())
+        let slotIndex = Self.slotFor(ptsSeconds: ptsSeconds, anchorSeconds: anchorSeconds, fps: fps)
 
         if slotIndex < 0 {
             return .drop(reason: .preAnchor)
@@ -257,5 +260,29 @@ nonisolated struct CFRNormalizer {
         self.lastEmittedSlot = slotIndex
         let snappedPTS = Double(slotIndex) / Double(fps)
         return .encode(slotIndex: slotIndex, snappedPTS: snappedPTS, isHold: true)
+    }
+
+    // MARK: - Slot mapping (non-mutating)
+
+    /// Maps a PTS to a CFR grid slot index using the nearest-integer rounding rule.
+    ///
+    /// This is the canonical slot mapping shared by all normalizer methods. Using this
+    /// function ensures the mapping can never silently diverge between `processFrame` and
+    /// the catch-up APIs.
+    ///
+    /// ```
+    /// slotIndex = Int(round((ptsSeconds − anchorSeconds) × fps))
+    /// ```
+    ///
+    /// The result may be negative for pre-anchor PTS values; callers that need a valid
+    /// grid index must guard against `slotIndex < 0`.
+    ///
+    /// - Parameters:
+    ///   - ptsSeconds: Absolute PTS in seconds.
+    ///   - anchorSeconds: Session T0 in seconds.
+    ///   - fps: Target frame rate. Must be > 0.
+    /// - Returns: The nearest integer grid slot index (may be negative for pre-T0 PTS).
+    nonisolated static func slotFor(ptsSeconds: Double, anchorSeconds: Double, fps: Int) -> Int {
+        Int(((ptsSeconds - anchorSeconds) * Double(fps)).rounded())
     }
 }
