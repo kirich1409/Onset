@@ -21,6 +21,13 @@ nonisolated protocol RecordingControlling: Sendable {
     /// declaration. Emits only on transitions (no initial `.normal`).
     nonisolated var recordingStateStream: AsyncStream<RecordingState> { get }
 
+    /// Graceful-revocation notifications (AC-12 UI — #39): `.sourceRevoked(kind)` after a source is
+    /// revoked + its pipeline finalised, then `.allVideoSourcesLost` when no video pipeline remains.
+    ///
+    /// **Single-consumer.** The coordinator is the ONLY iterator; see `RecordingSession`'s
+    /// declaration. Finishes on `stop()`.
+    nonisolated var sourceRevocationStream: AsyncStream<RecordingRevocation> { get }
+
     /// Starts the session. Throws `RecordingError` on the AC-6 / AC-11 blocking paths. Never throws
     /// `.budgetExceeded` — the session self-adopts the reduced profile (research §3.1).
     func start(permissions: EffectivePermissions) async throws

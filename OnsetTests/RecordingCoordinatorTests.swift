@@ -33,6 +33,9 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
     nonisolated let recordingStateStream: AsyncStream<RecordingState>
     private let stateContinuation: AsyncStream<RecordingState>.Continuation
 
+    nonisolated let sourceRevocationStream: AsyncStream<RecordingRevocation>
+    private let revocationContinuation: AsyncStream<RecordingRevocation>.Continuation
+
     private(set) var startCalled = false
     private(set) var stopCalled = false
     private(set) var startCount = 0
@@ -49,9 +52,12 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
 
     init(result: RecordingResult) {
         self.result = result
-        let (stream, continuation) = AsyncStream.makeStream(of: RecordingState.self)
-        self.recordingStateStream = stream
-        self.stateContinuation = continuation
+        let (stateStream, stateContinuation) = AsyncStream.makeStream(of: RecordingState.self)
+        self.recordingStateStream = stateStream
+        self.stateContinuation = stateContinuation
+        let (revocationStream, revocationContinuation) = AsyncStream.makeStream(of: RecordingRevocation.self)
+        self.sourceRevocationStream = revocationStream
+        self.revocationContinuation = revocationContinuation
     }
 
     func start(permissions: EffectivePermissions) async throws {
@@ -63,9 +69,10 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
     func stop() async -> RecordingResult {
         self.stopCalled = true
         self.stopCount += 1
-        // The live session finishes its state stream on stop; mirror that so the coordinator's
-        // subscription loop ends deterministically.
+        // The live session finishes both streams on stop; mirror that so the coordinator's
+        // subscription loops end deterministically.
         self.stateContinuation.finish()
+        self.revocationContinuation.finish()
         return self.result
     }
 
@@ -76,6 +83,11 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
     /// Test hook: push a state transition into the stream (the coordinator is the sole consumer).
     func emitState(_ state: RecordingState) {
         self.stateContinuation.yield(state)
+    }
+
+    /// Test hook: push a revocation event into the stream (the coordinator is the sole consumer).
+    func emitRevocation(_ revocation: RecordingRevocation) {
+        self.revocationContinuation.yield(revocation)
     }
 }
 
@@ -518,6 +530,79 @@ struct RecordingCoordinatorTests {
         // intent is nil by default; optional-call must be a no-op without crashing.
         coordinator.menuBarRecordIntent?()
         #expect(coordinator.menuBarRecordIntent == nil)
+    }
+}
+
+// MARK: - Revocation stream (#39 / AC-12 UI seam) coordinator tests
+
+@Suite("RecordingCoordinator — source liveness (#39 / AC-12 UI seam)")
+@MainActor
+struct RecordingCoordinatorRevocationTests {
+    @Test(".sourceRevoked(.screen) → screen liveness false, camera+mic live, phase still .recording")
+    func screenRevoked_updatesLiveness() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        #expect(coordinator.sourceLiveness == .allLive, "starts fully live")
+
+        fake.emitRevocation(.sourceRevoked(.screen))
+
+        let settled = await eventuallyMain {
+            coordinator.sourceLiveness.screen == false
+        }
+        #expect(settled, "screen liveness must flip to false after .sourceRevoked(.screen)")
+        #expect(coordinator.sourceLiveness.camera, "camera must remain live after screen revoke")
+        #expect(coordinator.sourceLiveness.microphone, "microphone must remain live after screen revoke")
+        #expect(coordinator.phase == .recording, "phase must remain .recording — recording continues")
+
+        await coordinator.stop()
+    }
+
+    @Test(".sourceRevoked(.camera) → camera + mic liveness false, screen live, phase still .recording")
+    func cameraRevoked_updatesCameraAndMicLiveness() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        #expect(coordinator.sourceLiveness == .allLive, "starts fully live")
+
+        fake.emitRevocation(.sourceRevoked(.camera))
+
+        let cameraSettled = await eventuallyMain {
+            coordinator.sourceLiveness.camera == false
+        }
+        #expect(cameraSettled, "camera liveness must flip to false after .sourceRevoked(.camera)")
+        #expect(!coordinator.sourceLiveness.microphone, "mic liveness must flip to false (mic rides camera)")
+        #expect(coordinator.sourceLiveness.screen, "screen must remain live after camera revoke")
+        #expect(coordinator.phase == .recording, "phase must remain .recording — screen still records")
+
+        await coordinator.stop()
+    }
+
+    @Test(".allVideoSourcesLost → coordinator calls stop(), phase transitions away from .recording")
+    func allVideoSourcesLost_stopsSession() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        coordinator.enterMain() // set origin=.main so we can assert phase==.main after stop
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        #expect(coordinator.phase == .recording)
+
+        fake.emitRevocation(.allVideoSourcesLost)
+
+        let stopped = await eventuallyMain {
+            coordinator.phase == .main
+        }
+        #expect(stopped, "coordinator must stop and transition to .main after .allVideoSourcesLost")
+        #expect(coordinator.lastResult != nil, "lastResult must be set after auto-stop")
+        #expect(fake.stopCalled, "fake.stop() must have been called")
     }
 }
 

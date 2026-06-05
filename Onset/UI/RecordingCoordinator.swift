@@ -56,6 +56,29 @@ struct RecordingChecklist: Equatable {
     )
 }
 
+// MARK: - SourceLiveness
+
+/// Per-source liveness during recording, read by the recording-window checklist (#39 / AC-12).
+///
+/// Every source starts `true` (live) at recording start. A graceful revoke (display unplugged,
+/// camera disconnected) flips the affected source to `false` so the checklist can show it stopped
+/// while the surviving source keeps recording. The microphone rides the camera AVCaptureSession, so
+/// a camera revoke flips BOTH `camera` and `microphone` (AC-12).
+///
+/// A plain `@MainActor` value type — it never leaves the coordinator (unlike `RecordingRevocation`,
+/// which crosses the actor boundary and therefore hand-rolls its `nonisolated` conformance).
+struct SourceLiveness: Equatable {
+    /// `true` while the screen source is recording; `false` after a display-disconnect revoke.
+    var screen: Bool
+    /// `true` while the camera source is recording; `false` after a camera-disconnect revoke.
+    var camera: Bool
+    /// `true` while the microphone is capturing; `false` after a camera revoke (mic rides the camera).
+    var microphone: Bool
+
+    /// All sources live — the state every recording starts in.
+    static let allLive = Self(screen: true, camera: true, microphone: true)
+}
+
 // MARK: - RecordingRequest
 
 /// Everything the coordinator needs to start a session, assembled by the caller (#36 Record button,
@@ -96,6 +119,7 @@ struct RecordingRequest {
 /// Onboarding pattern — no `@EnvironmentObject`).
 @Observable
 @MainActor
+// swiftlint:disable:next type_body_length
 final class RecordingCoordinator {
     // MARK: - Published state (read by all recording-aware views)
 
@@ -119,6 +143,12 @@ final class RecordingCoordinator {
 
     /// The read-only source checklist captured at start (recording-window display).
     private(set) var checklist: RecordingChecklist = .empty
+
+    /// Live per-source liveness while recording (#39 / AC-12). All `true` at start; a graceful
+    /// revoke flips the affected source(s) to `false` so the checklist can show a stopped source
+    /// while the surviving one keeps recording. The recording window reads this; it never subscribes
+    /// to the session's revocation stream itself (the coordinator is the sole consumer).
+    private(set) var sourceLiveness: SourceLiveness = .allLive
 
     /// The terminal result of the most recent session (for reveal + warning). `nil` until the first
     /// stop completes.
@@ -185,6 +215,15 @@ final class RecordingCoordinator {
     /// The SOLE subscription to `session.recordingStateStream`.
     @ObservationIgnored
     private var stateTask: Task<Void, Never>?
+
+    /// The SOLE subscription to `session.sourceRevocationStream` (#39 / AC-12). Drives `sourceLiveness`
+    /// updates and, on `.allVideoSourcesLost`, calls `stop()`.
+    ///
+    /// NEVER awaited in `stop()` (only cancelled + nil'd): `.allVideoSourcesLost` makes THIS task call
+    /// `stop()`, so awaiting it from inside `stop()` would deadlock (a task awaiting itself). It writes
+    /// nothing after stop and the `stop()` guard makes any late event a no-op, so awaiting is needless.
+    @ObservationIgnored
+    private var revocationTask: Task<Void, Never>?
 
     /// One loop ticking ~1 Hz: updates `elapsed` from `startedAt` and polls `currentDrops()`. Folded
     /// into a single task (both tick at the same cadence) to minimise task surface / cancellation.
@@ -302,6 +341,8 @@ final class RecordingCoordinator {
         self.elapsed = 0
         self.recordingState = .normal
         self.drops = DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0)
+        // Every source starts live; a graceful revoke (AC-12) flips the affected one(s) during the session.
+        self.sourceLiveness = .allLive
         self.isStopping = false
         // Reset per-session warning flags — structural invariant: every new session starts clean.
         self.lastDegradedWarning = false
@@ -309,6 +350,7 @@ final class RecordingCoordinator {
         self.phase = .recording
 
         self.startStateSubscription(session)
+        self.startRevocationSubscription(session)
         self.startTickLoop(session)
 
         // Window choreography (AC-3): hide main, open recording.
@@ -324,6 +366,35 @@ final class RecordingCoordinator {
         self.stateTask = Task { [weak self] in
             for await state in stream {
                 self?.recordingState = state
+            }
+        }
+    }
+
+    /// The SOLE subscription to `session.sourceRevocationStream` (#39 / AC-12). Updates
+    /// `sourceLiveness` on each `.sourceRevoked` event, and calls `stop()` on `.allVideoSourcesLost`.
+    ///
+    /// NEVER awaited in `stop()` — only cancelled and nil'd. `.allVideoSourcesLost` makes THIS task
+    /// call `stop()`, so awaiting it from inside `stop()` would deadlock (a task awaiting itself).
+    private func startRevocationSubscription(_ session: any RecordingControlling) {
+        let stream = session.sourceRevocationStream
+        self.revocationTask = Task { [weak self] in
+            for await revocation in stream {
+                guard let self else { return }
+                switch revocation {
+                case .sourceRevoked(.screen):
+                    self.sourceLiveness.screen = false
+                    coordinatorLogger.notice("AC-12: screen source revoked — liveness updated")
+
+                case .sourceRevoked(.camera):
+                    // The microphone rides the camera AVCaptureSession: camera revoke ends both.
+                    self.sourceLiveness.camera = false
+                    self.sourceLiveness.microphone = false
+                    coordinatorLogger.notice("AC-12: camera source revoked — camera + mic liveness updated")
+
+                case .allVideoSourcesLost:
+                    coordinatorLogger.notice("AC-12: all video sources lost — stopping session")
+                    await self.stop()
+                }
             }
         }
     }
@@ -359,11 +430,15 @@ final class RecordingCoordinator {
         // session. The final drops/degraded come from the result, not a post-stop poll (the
         // session nils its monitor in stop()). Await the tick task fully (mirrors DropMonitor.stop())
         // so the poll loop cannot overwrite self.drops after the authoritative result is set below.
+        // revocationTask is cancelled + nil'd but NOT awaited: .allVideoSourcesLost drives this very
+        // stop() from inside revocationTask, so awaiting it would deadlock (a task awaiting itself).
         let tick = self.tickTask
         self.stateTask?.cancel()
         self.tickTask?.cancel()
+        self.revocationTask?.cancel()
         self.stateTask = nil
         self.tickTask = nil
+        self.revocationTask = nil
         await tick?.value
 
         let result = await session.stop()
