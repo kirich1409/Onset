@@ -1,5 +1,13 @@
 import AppKit
+import os
 import SwiftUI
+
+// MARK: - Logger
+
+nonisolated private let mainViewLogger = Logger(
+    subsystem: "dev.androidbroadcast.Onset",
+    category: "MainView"
+)
 
 // MARK: - MainView
 
@@ -81,7 +89,11 @@ struct MainView: View {
             // while model also holds coordinator.
             let model = self.model
             self.model.coordinator.menuBarRecordIntent = { [weak model] in
-                Task { await model?.record() }
+                guard let model else {
+                    mainViewLogger.error("menuBarRecordIntent fired but MainViewModel deallocated — no-op")
+                    return
+                }
+                Task { await model.record() }
             }
         }
         .onDisappear {

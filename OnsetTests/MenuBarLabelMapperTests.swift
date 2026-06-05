@@ -18,35 +18,38 @@ import Testing
 @Suite("MenuBarLabelMapper — idle states")
 @MainActor
 struct MenuBarLabelMapperIdleTests {
-    @Test("Idle phase produces hollow circle, no warning, no timer")
+    @Test("Idle phase produces hollow dot, no warning, no timer")
     func idlePhase() {
         let desc = MenuBarLabelMapper.descriptor(phase: .idle, recordingState: .normal, elapsed: 0)
-        #expect(desc.dotSymbol == "circle")
-        #expect(desc.showWarning == false)
+        #expect(desc.dot == .hollow)
+        #expect(desc.dot.systemName == "circle")
+        #expect(desc.dot.showsWarning == false)
         #expect(desc.elapsed == nil)
     }
 
-    @Test("Main phase produces hollow circle, no warning, no timer")
+    @Test("Main phase produces hollow dot, no warning, no timer")
     func mainPhase() {
         let desc = MenuBarLabelMapper.descriptor(phase: .main, recordingState: .normal, elapsed: 42)
-        #expect(desc.dotSymbol == "circle")
-        #expect(desc.showWarning == false)
+        #expect(desc.dot == .hollow)
+        #expect(desc.dot.systemName == "circle")
+        #expect(desc.dot.showsWarning == false)
         #expect(desc.elapsed == nil)
     }
 
-    @Test("Finished phase (transient) produces hollow circle — same as idle")
+    @Test("Finished phase (transient) produces hollow dot — same as idle")
     func finishedPhase() {
         let desc = MenuBarLabelMapper.descriptor(phase: .finished, recordingState: .normal, elapsed: 100)
-        #expect(desc.dotSymbol == "circle")
-        #expect(desc.showWarning == false)
+        #expect(desc.dot == .hollow)
+        #expect(desc.dot.systemName == "circle")
+        #expect(desc.dot.showsWarning == false)
         #expect(desc.elapsed == nil)
     }
 
     @Test("Idle phase ignores degraded recordingState")
     func idleWithDegradedState() {
         let desc = MenuBarLabelMapper.descriptor(phase: .idle, recordingState: .degraded, elapsed: 0)
-        #expect(desc.dotSymbol == "circle")
-        #expect(desc.showWarning == false)
+        #expect(desc.dot == .hollow)
+        #expect(desc.dot.showsWarning == false)
         #expect(desc.elapsed == nil)
     }
 }
@@ -56,16 +59,17 @@ struct MenuBarLabelMapperIdleTests {
 @Suite("MenuBarLabelMapper — recording normal")
 @MainActor
 struct MenuBarLabelMapperRecordingNormalTests {
-    @Test("Recording+normal uses solid record circle")
-    func normalUsesRecordCircle() {
+    @Test("Recording+normal uses red dot with record.circle.fill symbol")
+    func normalUsesRedDot() {
         let desc = MenuBarLabelMapper.descriptor(phase: .recording, recordingState: .normal, elapsed: 0)
-        #expect(desc.dotSymbol == "record.circle.fill")
+        #expect(desc.dot == .red)
+        #expect(desc.dot.systemName == "record.circle.fill")
     }
 
     @Test("Recording+normal shows no warning")
     func normalHasNoWarning() {
         let desc = MenuBarLabelMapper.descriptor(phase: .recording, recordingState: .normal, elapsed: 0)
-        #expect(desc.showWarning == false)
+        #expect(desc.dot.showsWarning == false)
     }
 
     @Test("Recording+normal carries elapsed timer at 0")
@@ -86,16 +90,17 @@ struct MenuBarLabelMapperRecordingNormalTests {
 @Suite("MenuBarLabelMapper — recording degraded")
 @MainActor
 struct MenuBarLabelMapperRecordingDegradedTests {
-    @Test("Recording+degraded uses solid circle (yellow-tinted)")
-    func degradedUsesSolidCircle() {
+    @Test("Recording+degraded uses yellow dot with circle.fill symbol")
+    func degradedUsesYellowDot() {
         let desc = MenuBarLabelMapper.descriptor(phase: .recording, recordingState: .degraded, elapsed: 0)
-        #expect(desc.dotSymbol == "circle.fill")
+        #expect(desc.dot == .yellow)
+        #expect(desc.dot.systemName == "circle.fill")
     }
 
     @Test("Recording+degraded shows warning triangle")
     func degradedShowsWarning() {
         let desc = MenuBarLabelMapper.descriptor(phase: .recording, recordingState: .degraded, elapsed: 0)
-        #expect(desc.showWarning == true)
+        #expect(desc.dot.showsWarning == true)
     }
 
     @Test("Recording+degraded carries elapsed timer")
@@ -110,13 +115,13 @@ struct MenuBarLabelMapperRecordingDegradedTests {
 @Suite("MenuBarLabelMapper — phase transitions")
 @MainActor
 struct MenuBarLabelMapperPhaseTransitionTests {
-    @Test("Normal→degraded changes descriptor (showWarning + symbol)")
+    @Test("Normal→degraded changes descriptor (showsWarning + dot case)")
     func normalToDegraded() {
         let normal = MenuBarLabelMapper.descriptor(phase: .recording, recordingState: .normal, elapsed: 60)
         let degraded = MenuBarLabelMapper.descriptor(phase: .recording, recordingState: .degraded, elapsed: 60)
         #expect(normal != degraded)
-        #expect(normal.showWarning == false)
-        #expect(degraded.showWarning == true)
+        #expect(normal.dot.showsWarning == false)
+        #expect(degraded.dot.showsWarning == true)
     }
 
     @Test("Recording→idle clears timer (elapsed becomes nil)")

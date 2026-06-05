@@ -1,5 +1,13 @@
 import AppKit
+import os
 import SwiftUI
+
+// MARK: - Logger
+
+nonisolated private let menuBarMenuLogger = Logger(
+    subsystem: "dev.androidbroadcast.Onset",
+    category: "MenuBarMenu"
+)
 
 // MARK: - MenuBarMenu
 
@@ -64,6 +72,7 @@ struct MenuBarMenu: View {
     @ViewBuilder
     private var recordingMenu: some View {
         Button("Остановить") {
+            menuBarMenuLogger.info("Stop triggered from menu bar")
             // stop() is async — wrap in unstructured Task (fire-and-forget is safe; the
             // coordinator's isStopping guard handles concurrent calls).
             Task { await self.coordinator.stop() }

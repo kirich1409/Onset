@@ -31,10 +31,10 @@ struct MenuBarLabel: View {
         )
 
         HStack(spacing: Metrics.elementSpacing) {
-            Image(systemName: desc.dotSymbol)
-                .foregroundStyle(self.dotColor(for: desc))
+            Image(systemName: desc.dot.systemName)
+                .foregroundStyle(desc.dot.color)
 
-            if desc.showWarning {
+            if desc.dot.showsWarning {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(Color.yellow)
             }
@@ -44,13 +44,5 @@ struct MenuBarLabel: View {
                     .monospacedDigit()
             }
         }
-    }
-
-    // MARK: - Private helpers
-
-    private func dotColor(for desc: MenuBarLabelDescriptor) -> Color {
-        guard desc.elapsed != nil else { return .primary }
-        // elapsed non-nil ↔ recording phase; differentiate normal vs degraded by warning flag.
-        return desc.showWarning ? .yellow : .red
     }
 }

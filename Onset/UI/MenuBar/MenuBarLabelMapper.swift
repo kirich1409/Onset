@@ -1,3 +1,5 @@
+import SwiftUI
+
 // MARK: - MenuBarLabelDescriptor
 
 /// Value type describing what the menu-bar label should display in a given moment.
@@ -12,12 +14,35 @@ struct MenuBarLabelDescriptor: Equatable {
         case red
         /// Solid yellow circle — recording in degraded state.
         case yellow
+
+        /// The SF Symbol name for this dot state.
+        var systemName: String {
+            switch self {
+            case .hollow: "circle"
+            case .red: "record.circle.fill"
+            case .yellow: "circle.fill"
+            }
+        }
+
+        /// The foreground color for this dot state.
+        /// Matches the original `MenuBarLabel.dotColor(for:)` logic exactly:
+        /// hollow → .primary (no recording), red → .red, yellow → .yellow.
+        var color: Color {
+            switch self {
+            case .hollow: .primary
+            case .red: .red
+            case .yellow: .yellow
+            }
+        }
+
+        /// `true` only when the warning triangle should appear (degraded state only).
+        var showsWarning: Bool {
+            self == .yellow
+        }
     }
 
-    /// The SF Symbol name for the dot portion of the label.
-    let dotSymbol: String
-    /// `true` when the warning triangle should be shown (degraded only).
-    let showWarning: Bool
+    /// Encodes the full visual state of the dot (symbol + color + warning flag) as a single enum.
+    let dot: DotStyle
     /// Non-nil when an elapsed timer should appear; `nil` in idle state.
     let elapsed: Int?
 }
@@ -29,12 +54,6 @@ struct MenuBarLabelDescriptor: Equatable {
 /// `nonisolated` avoids a MainActor hop under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`
 /// and enables direct use from tests without an actor context.
 nonisolated enum MenuBarLabelMapper {
-    // MARK: - SF Symbol names
-
-    private static let idleSymbol = "circle"
-    private static let recordingNormalSymbol = "record.circle.fill"
-    private static let recordingDegradedSymbol = "circle.fill"
-
     // MARK: - Mapping
 
     /// Maps the current coordinator state to a label descriptor.
@@ -56,26 +75,14 @@ nonisolated enum MenuBarLabelMapper {
         case .recording:
             switch recordingState {
             case .normal:
-                MenuBarLabelDescriptor(
-                    dotSymbol: self.recordingNormalSymbol,
-                    showWarning: false,
-                    elapsed: elapsed
-                )
+                MenuBarLabelDescriptor(dot: .red, elapsed: elapsed)
 
             case .degraded:
-                MenuBarLabelDescriptor(
-                    dotSymbol: self.recordingDegradedSymbol,
-                    showWarning: true,
-                    elapsed: elapsed
-                )
+                MenuBarLabelDescriptor(dot: .yellow, elapsed: elapsed)
             }
 
         case .idle, .main, .finished:
-            MenuBarLabelDescriptor(
-                dotSymbol: self.idleSymbol,
-                showWarning: false,
-                elapsed: nil
-            )
+            MenuBarLabelDescriptor(dot: .hollow, elapsed: nil)
         }
     }
 }
