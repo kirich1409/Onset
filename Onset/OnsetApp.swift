@@ -34,27 +34,16 @@ private enum WindowID {
 
 // MARK: - AppActivationDelegate
 
-/// Brings the app and its launch window to the front under `LSUIElement = YES`.
+/// Satisfies the `NSApplicationDelegateAdaptor` requirement for the app struct.
 ///
-/// `LSUIElement` makes the app a menu-bar accessory (no Dock icon). Such apps are NOT auto-activated
-/// at launch — their windows can open behind other apps or without key focus. Onboarding (Epic 2)
-/// must still present AND take focus on first run, so the delegate `activate()`s at launch. The main
-/// window is forced to present via `.defaultLaunchBehavior(.presented)` on its scene (accessory apps
-/// otherwise leave the `Window` scene unopened). The menu-bar item remains in either case.
-///
-/// Skipped under XCTest: test hosts must not steal focus while the L5 capture suite runs (mirrors
-/// the scene-suppression guard below).
+/// Focus on launch is handled by `WindowActionsBridge.onAppear` instead of here.
+/// `applicationDidFinishLaunching` fires before SwiftUI materialises the `Window` scene,
+/// so calling `NSApp.activate()` at that point wins no focus — the window does not yet
+/// exist and the system leaves Finder frontmost. The activation call therefore lives in
+/// `WindowActionsBridge.onAppear`, deferred by one runloop turn via `Task { @MainActor in }`,
+/// guaranteeing the window is on screen before activation is requested.
 @MainActor
-final class AppActivationDelegate: NSObject, NSApplicationDelegate {
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        guard !isRunningUnderXCTest else { return }
-        // LSUIElement apps are not auto-activated at launch; bring the app + its launch window
-        // (onboarding) to the front so onboarding presents and takes focus (Epic 2 parity).
-        // `activate()` is the macOS 14+ form of the deprecated `activate(ignoringOtherApps:)`.
-        NSApp.activate()
-        appLogger.info("App launched — activated for onboarding focus under LSUIElement")
-    }
-}
+final class AppActivationDelegate: NSObject, NSApplicationDelegate {}
 
 // MARK: - OnsetApp
 
@@ -122,7 +111,7 @@ struct OnsetApp: App {
         .defaultSize(width: WindowDefaults.width, height: WindowDefaults.height)
         // Force the launch window to present under LSUIElement: an accessory-at-launch app does NOT
         // auto-open its `Window` scene, which would regress onboarding (Epic 2). `.presented` opens
-        // it at launch; the delegate's `activate()` brings it to the front.
+        // it at launch; `WindowActionsBridge.onAppear` activates the app once the window exists.
         .defaultLaunchBehavior(.presented)
 
         // The recording window (#37). Phase 0 renders a minimal placeholder; the real RecordingView
@@ -181,6 +170,14 @@ private struct WindowActionsBridge: View {
                     }
                 )
                 self.coordinator.enterMain()
+                // Activate the app once the window has materialised. `applicationDidFinishLaunching`
+                // fires before SwiftUI creates the Window scene, so activation there is a no-op for
+                // LSUIElement apps. A one-runloop-turn Task hop guarantees the window is on screen
+                // before NSApp.activate() is called. Skipped under XCTest (AppActivation guard).
+                Task { @MainActor in
+                    AppActivation.bringToFront()
+                    appLogger.info("Main window appeared — activated app for launch focus")
+                }
             }
     }
 }
@@ -257,10 +254,17 @@ private struct MenuBarContent: View {
 
 // MARK: - AppActivation
 
-/// Brings the (menu-bar accessory) app to the front when opening a window from the menu bar.
+/// Brings the (menu-bar accessory) app to the front.
 ///
-/// Under `LSUIElement`, the app does not auto-activate, so a window opened from the status menu can
-/// appear behind the frontmost app. `activate()` brings Onset (and the just-opened window) forward.
+/// Used in two places:
+/// - **Launch**: called from `WindowActionsBridge.onAppear` (deferred via `Task { @MainActor in }`)
+///   after the main window has materialised — ensures Onset takes focus on first launch.
+/// - **Reopen**: called synchronously from menu-bar button handlers after `openWindow(id:)` — ensures
+///   Onset is frontmost when the user reopens the window from the status menu.
+///
+/// `NSApp.activate()` is the macOS 14+ non-deprecated form; `activate(ignoringOtherApps:)` is
+/// deprecated and rejected by `SWIFT_TREAT_WARNINGS_AS_ERRORS = YES`.
+/// Skipped under XCTest: test hosts must not steal focus during the L5 capture suite.
 private enum AppActivation {
     static func bringToFront() {
         guard !isRunningUnderXCTest else { return }
