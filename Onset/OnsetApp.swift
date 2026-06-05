@@ -24,6 +24,15 @@ nonisolated private let appLogger = Logger(
 nonisolated private let isRunningUnderXCTest =
     ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
+// MARK: - Window IDs
+
+/// Stable scene identifiers used by `openWindow` / `dismissWindow`.
+/// Internal so `MenuBarMenu` can open windows without re-declaring the constants.
+enum WindowID {
+    static let main = "onboarding"
+    static let recording = "recording"
+}
+
 // MARK: - OnsetApp
 
 @main
@@ -33,6 +42,8 @@ struct OnsetApp: App {
     private enum WindowDefaults {
         static let width: CGFloat = 460
         static let height: CGFloat = 560
+        static let recordingWidth: CGFloat = 370
+        static let recordingHeight: CGFloat = 420
     }
 
     // MARK: - Composition root
@@ -51,8 +62,19 @@ struct OnsetApp: App {
         relauncher: AppRelauncher()
     )
 
+    /// The single recording-lifecycle owner, shared by all recording-aware surfaces (#36/#37/#38).
+    /// Window actions are wired into it from `WindowActionsBridge` once the env actions exist.
+    @State private var coordinator = RecordingCoordinator()
+
+    /// System-wide hotkey monitor (#67 / AC-9 third stop path). Created at app-init time;
+    /// registered once from `WindowActionsBridge.onAppear` after the coordinator is wired.
+    /// Suppressed under XCTest — a test host must not grab the system-wide ⌘⌥⌃R shortcut
+    /// (would fight any other test run on the same machine and could accidentally stop a
+    /// real recording if the key is pressed during a test session).
+    @State private var hotKeyMonitor = GlobalHotKeyMonitor()
+
     var body: some Scene {
-        Window("Onset", id: "onboarding") {
+        Window("Onset", id: WindowID.main) {
             // Under XCTest the window is empty (no RootView, no onboarding flow, no
             // PermissionsService UI lifecycle). This prevents multiple app instances from
             // accumulating across test runs and popping competing onboarding windows that
@@ -67,13 +89,109 @@ struct OnsetApp: App {
             } else {
                 RootView(
                     permissionsService: self.permissionsService,
+                    coordinator: self.coordinator,
                     hasPostScreenGrantArg: CommandLine.arguments.contains(AppRelauncher.postScreenGrantArg)
                 )
+                // Capture the env window actions into the coordinator (a plain class cannot read
+                // @Environment(\.openWindow) itself). Also registers the system-wide hotkey (#67).
+                .background(WindowActionsBridge(coordinator: self.coordinator, hotKeyMonitor: self.hotKeyMonitor))
             }
         }
         // Fixed-size window that wraps the content — prevents user resizing.
         .windowResizability(.contentSize)
         .defaultSize(width: WindowDefaults.width, height: WindowDefaults.height)
+        // Explicitly open the main window at launch; a regular app focuses it automatically.
+        .defaultLaunchBehavior(.presented)
+
+        // The recording-in-progress window (#37). Suppressed under XCTest for the same reason as
+        // the main window.
+        Window("Onset — запись", id: WindowID.recording) {
+            if isRunningUnderXCTest {
+                EmptyView()
+            } else {
+                RecordingView(coordinator: self.coordinator)
+            }
+        }
+        .windowResizability(.contentSize)
+        .defaultSize(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
+        // Do NOT auto-open at launch — only the main window presents on launch; the recording window
+        // opens on Record (AC-3). Without this the second Window scene would also pop at startup.
+        .defaultLaunchBehavior(.suppressed)
+
+        // Menu bar item (#38). Full 3-state label and context menu.
+        // Suppressed under XCTest so test hosts do not accumulate competing status items.
+        MenuBarExtra(isInserted: .constant(!isRunningUnderXCTest)) {
+            MenuBarMenu(coordinator: self.coordinator)
+        } label: {
+            MenuBarLabel(coordinator: self.coordinator)
+        }
+    }
+}
+
+// MARK: - WindowActionsBridge
+
+/// Invisible helper that reads the SwiftUI environment window actions and installs them as closures
+/// on the coordinator. A plain `@Observable` class cannot read `@Environment(\.openWindow)`; this
+/// bridge runs inside a `View` where the actions exist and forwards them once on appear.
+///
+/// Also registers the global hotkey (#67) after the coordinator is wired, so `handleHotKey()`
+/// has a fully-bound coordinator when the hotkey fires. Suppressed under XCTest via the
+/// `isRunningUnderXCTest` gate on the enclosing `Window` view — the bridge never mounts under
+/// test, so `hotKeyMonitor.register` is never called.
+private struct WindowActionsBridge: View {
+    let coordinator: RecordingCoordinator
+    let hotKeyMonitor: GlobalHotKeyMonitor
+
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+            .onAppear {
+                self.coordinator.bindWindowActions(
+                    openRecordingWindow: {
+                        self.openWindow(id: WindowID.recording)
+                        AppActivation.bringToFront()
+                    },
+                    dismissMainWindow: { self.dismissWindow(id: WindowID.main) },
+                    dismissRecordingWindow: { self.dismissWindow(id: WindowID.recording) },
+                    openMainWindow: {
+                        self.openWindow(id: WindowID.main)
+                        AppActivation.bringToFront()
+                    }
+                )
+                self.coordinator.enterMain()
+
+                // Register the system-wide hotkey after the coordinator is fully wired
+                // (#67 / AC-9). The monitor's register() is idempotent; onAppear may fire
+                // more than once on scene re-attachment, so the guard inside register() is
+                // the primary de-duplication.
+                // Belt-and-suspenders: the monitor is also never instantiated under XCTest
+                // because this bridge only mounts when isRunningUnderXCTest is false
+                // (the enclosing `Window` body shows EmptyView instead).
+                // Capture only the coordinator (a reference type that does not point back
+                // to the monitor), breaking the bridge-struct → hotKeyMonitor cycle so
+                // the monitor's deinit/unregister teardown path remains reachable.
+                self.hotKeyMonitor.register { [coordinator = self.coordinator] in
+                    coordinator.handleHotKey()
+                }
+            }
+    }
+}
+
+// MARK: - AppActivation
+
+/// Brings the app to the front when a window is reopened from the menu bar.
+///
+/// `NSApp.activate()` suffices for a regular app — no activation-policy switching needed.
+/// Skipped under XCTest: test hosts must not steal focus.
+/// Internal so `MenuBarMenu` can call it directly.
+enum AppActivation {
+    static func bringToFront() {
+        guard !isRunningUnderXCTest else { return }
+        NSApp.activate()
     }
 }
 
@@ -89,6 +207,7 @@ struct RootView: View {
     // MARK: - Dependencies
 
     let permissionsService: PermissionsService
+    let coordinator: RecordingCoordinator
 
     // MARK: - Transient routing state
 
@@ -105,9 +224,12 @@ struct RootView: View {
     /// `allGranted` is false. Reset when `allGranted` becomes `true` (no bypass needed).
     @State private var bypassToMain = false
 
-    // MARK: - View-owned VM for onboarding
+    // MARK: - View-owned VMs
 
     @State private var onboardingViewModel: OnboardingViewModel
+
+    /// The main screen view model, created once and owned for the lifetime of `RootView`.
+    @State private var mainViewModel: MainViewModel
 
     // MARK: - Environment
 
@@ -115,10 +237,19 @@ struct RootView: View {
 
     // MARK: - Init
 
-    init(permissionsService: PermissionsService, hasPostScreenGrantArg: Bool) {
+    init(
+        permissionsService: PermissionsService,
+        coordinator: RecordingCoordinator,
+        hasPostScreenGrantArg: Bool
+    ) {
         self.permissionsService = permissionsService
+        self.coordinator = coordinator
         _hasPostScreenGrantArg = State(initialValue: hasPostScreenGrantArg)
         _onboardingViewModel = State(initialValue: OnboardingViewModel(permissions: permissionsService))
+        _mainViewModel = State(initialValue: MainViewModel(
+            permissions: permissionsService,
+            coordinator: coordinator
+        ))
     }
 
     // MARK: - Body
@@ -155,7 +286,7 @@ struct RootView: View {
                 }
 
             case .main:
-                MainView(effectivePermissions: self.permissionsService.effectivePermissions) {
+                MainView(model: self.mainViewModel) {
                     // Clear the bypass so AppRouter re-evaluates to .onboarding.
                     // This is the escape hatch from the "no permissions" blocked state
                     // that appears when the user tapped «Позже» at 0/3 (AC-7 graceful path).

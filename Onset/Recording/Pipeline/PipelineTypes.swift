@@ -411,3 +411,50 @@ extension SourceEvent: Equatable {
         }
     }
 }
+
+// MARK: - RecordingRevocation
+
+/// A graceful-revocation notification carried on `RecordingSession.sourceRevocationStream` (AC-12 UI).
+///
+/// `RecordingSession` already FINALISES the affected pipeline on a `.displayDisconnected` /
+/// `.cameraDisconnected` `SourceEvent` (Epic 3). This stream is the *UI seam* layered on top of that
+/// behaviour: after a pipeline is finalised, the session yields a `RecordingRevocation` so the
+/// `RecordingCoordinator` can update the per-source liveness the recording window reads — and, when
+/// the last video pipeline is gone, learn it must end the whole session.
+///
+/// **Single-consumer.** Exactly ONE subscriber (the `RecordingCoordinator`) may iterate the stream —
+/// same contract as `recordingStateStream`. `AsyncStream` splits elements across iterators rather
+/// than duplicating them, so a second consumer would starve the first.
+nonisolated enum RecordingRevocation: Equatable {
+    /// One video source was revoked mid-recording and its pipeline finalised (AC-12). The other
+    /// pipeline (if any) keeps recording. `.camera` additionally implies the microphone ended (the
+    /// mic rides the camera AVCaptureSession), so the coordinator marks the mic revoked too.
+    case sourceRevoked(RecordingPipelineKind)
+
+    /// The LAST remaining video pipeline was just finalised — no video source is left. The
+    /// coordinator must stop + finalise the session and surface the result (there is nothing left to
+    /// record). Yielded immediately after the `.sourceRevoked` for the final pipeline.
+    case allVideoSourcesLost
+}
+
+extension RecordingRevocation {
+    /// Manual `nonisolated` implementation.
+    ///
+    /// Under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, synthesised conformances are inferred
+    /// `@MainActor` (`InferIsolatedConformances`). Declaring `: Equatable` on the enum itself keeps
+    /// the conformance non-isolated; the manual nonisolated witness here overrides the synthesised
+    /// one so `==` is callable from actor-isolated code and from nonisolated test contexts
+    /// (same pattern as `RecordingState` / `SourceEvent` / `DropReason`).
+    nonisolated static func == (lhs: RecordingRevocation, rhs: RecordingRevocation) -> Bool {
+        switch (lhs, rhs) {
+        case let (.sourceRevoked(lhsKind), .sourceRevoked(rhsKind)):
+            lhsKind == rhsKind
+
+        case (.allVideoSourcesLost, .allVideoSourcesLost):
+            true
+
+        default:
+            false
+        }
+    }
+}
