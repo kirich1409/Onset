@@ -35,7 +35,8 @@ private final class FakeWriterFactory: WriterFactory, @unchecked Sendable {
     func makeWriter(
         kind: RecordingPipelineKind,
         sourceFormatHint: CMFormatDescription,
-        includeAudio: Bool
+        includeAudio: Bool,
+        nominalFps: Int
     ) throws
     -> any WriterControlling {
         self.createdKinds.append(kind)

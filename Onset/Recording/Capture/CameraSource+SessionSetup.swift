@@ -166,7 +166,8 @@ extension CameraSource {
             framesContinuation: self.framesContinuation,
             dropsContinuation: self.dropsContinuation,
             onDisconnect: onDisconnect,
-            cameraUniqueID: self.cameraDevice.uniqueID
+            cameraUniqueID: self.cameraDevice.uniqueID,
+            rateLock: self.captureRateLock
         )
         let audio = AudioOutputShim(
             sessionStart: sessionStart,

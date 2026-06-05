@@ -147,7 +147,8 @@ actor DualFileOutputStage {
             writer = try self.writerFactory.makeWriter(
                 kind: kind,
                 sourceFormatHint: hint,
-                includeAudio: self.includeAudio
+                includeAudio: self.includeAudio,
+                nominalFps: 0
             )
             // AC-7: the writer's session origin is the verbatim session T0 captured at session
             // start — NOT this first sample's PTS and NOT .zero. Both files share this one epoch

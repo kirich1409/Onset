@@ -120,6 +120,10 @@ actor VideoEncoder {
     /// also used by tests to drive `tick`/`clockTick`/`ingest` deterministically.
     private let selfClocked: Bool
 
+    /// Lane label used in telemetry lines ("screen" / "camera" / "video").
+    /// Additive — callers that do not care pass the default "video".
+    private let label: String
+
     /// `internal` (not `private`): the VideoEncoder+Configuration.swift extension uses it.
     nonisolated let logger = Logger(
         subsystem: "dev.androidbroadcast.Onset",
@@ -162,6 +166,14 @@ actor VideoEncoder {
     /// sleep. Replaced by #34's shared clock once it exists.
     private var clockTickTask: Task<Void, Never>?
 
+    // MARK: - Telemetry
+
+    /// Per-stage cadence accumulator. Flushed every ~1 s on the telemetry tick.
+    private var aggregator: StageRateAggregator
+
+    /// ~1 s periodic flush task started in `start()`, cancelled in `stop()`.
+    private var telemetryTask: Task<Void, Never>?
+
     // MARK: - Output streams
 
     /// Encoded HEVC samples, in decode order, fed by the C output callback via the sink.
@@ -199,6 +211,8 @@ actor VideoEncoder {
     ///   - selfClocked: Whether `start()` spawns the standalone CFR clock. `true` (default) for
     ///     standalone use; `false` when an external coordinator (#34) or a test drives
     ///     `clockTick()`.
+    ///   - label: Lane label emitted in telemetry lines ("screen", "camera"). Default "video" is
+    ///     safe for standalone / test use; `LiveEncoderFactory` overrides it per pipeline kind.
     ///   - sessionFactory: Injectable seam. Defaults to the live VideoToolbox implementation;
     ///     tests inject a mock.
     init(
@@ -210,6 +224,7 @@ actor VideoEncoder {
         maxPendingFrames: Int = 4,
         grace: Double = 0.005,
         selfClocked: Bool = true,
+        label: String = "video",
         sessionFactory: @escaping SessionFactory = VideoEncoder.liveSessionFactory
     ) {
         precondition(fps > 0, "fps must be positive")
@@ -225,6 +240,8 @@ actor VideoEncoder {
         self.maxPendingFrames = maxPendingFrames
         self.graceSeconds = grace
         self.selfClocked = selfClocked
+        self.label = label
+        self.aggregator = StageRateAggregator(lane: label, stage: "encoder", nominalFps: fps)
         self.sessionFactory = sessionFactory
 
         let (samples, samplesContinuation) = AsyncStream.makeStream(of: EncodedSample.self)
@@ -310,6 +327,7 @@ actor VideoEncoder {
         if self.selfClocked {
             self.startClock()
         }
+        self.startTelemetryTask()
         self.logger.info("VideoEncoder started — \(self.width)×\(self.height)@\(self.fps)fps")
     }
 
@@ -341,6 +359,8 @@ actor VideoEncoder {
     /// THEN are the continuations finished — so no callback ever yields into a finished
     /// continuation.
     func stop() async {
+        self.telemetryTask?.cancel()
+        self.telemetryTask = nil
         if let session = self.session {
             self.clockTickTask?.cancel()
             await self.clockTickTask?.value
@@ -397,6 +417,34 @@ actor VideoEncoder {
         }
     }
 
+    /// Spawns the ~1 s telemetry flush task.
+    ///
+    /// Uses `ContinuousClock` to measure the actual elapsed interval (not wall time) so that
+    /// the `win_s` field in the log line reflects the real measurement window.
+    private func startTelemetryTask() {
+        self.telemetryTask = Task { [weak self] in
+            let clock = ContinuousClock()
+            var lastInstant = clock.now
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, !Task.isCancelled else { return }
+                let now = clock.now
+                let elapsed = (now - lastInstant).components
+                // swiftlint:disable:next no_magic_numbers
+                let elapsedSeconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) * 1e-18
+                lastInstant = now
+                // Hop into the actor's isolation to mutate the aggregator.
+                await self.flushTelemetry(elapsedSeconds: elapsedSeconds)
+            }
+        }
+    }
+
+    private func flushTelemetry(elapsedSeconds: Double) {
+        if let line = self.aggregator.flush(elapsedSeconds: elapsedSeconds) {
+            telemetryLogger.notice("\(line, privacy: .public)")
+        }
+    }
+
     /// Returns the seconds remaining until the next hold-eligible deadline, or `nil` when
     /// the grid is not yet open (no real frame ingested, `lastEmittedSlot == -1`).
     ///
@@ -442,6 +490,20 @@ actor VideoEncoder {
     func clockTick(nowSeconds: Double) {
         guard self.lastPixelBuffer != nil else { return }
         let anchorSeconds = CMTimeGetSeconds(self.anchor.anchorTime)
+
+        // Measure tick-lag BEFORE catchUpHolds advances the grid — after, nextDeadlineSeconds
+        // returns the next window's deadline and the lag measurement would be meaningless.
+        if self.normalizer.lastEmittedSlot >= 0 {
+            let deadline = self.normalizer.nextDeadlineSeconds(
+                anchorSeconds: anchorSeconds,
+                fps: self.fps,
+                graceSeconds: self.graceSeconds
+            )
+            // swiftlint:disable:next no_magic_numbers
+            let lagMs = abs(nowSeconds - deadline) * 1000
+            self.aggregator.recordTickLag(lagMs: lagMs)
+        }
+
         let emission = self.normalizer.catchUpHolds(
             nowSeconds: nowSeconds,
             anchorSeconds: anchorSeconds,
@@ -449,6 +511,9 @@ actor VideoEncoder {
             graceSeconds: self.graceSeconds,
             cap: self.fps
         )
+        if !emission.slots.isEmpty {
+            self.aggregator.recordCatchupBatch(size: emission.slots.count)
+        }
         for slot in emission.slots {
             // lastPixelBuffer cannot be nil here: the guard above ensures it.
             // All slots from catchUpHolds are isHold==true by contract.
@@ -498,10 +563,12 @@ actor VideoEncoder {
                 assertionFailure("ingest: processFrame returned .encode for a frame expected to drop " +
                     "(slot \(slotS), lastEmitted \(self.normalizer.lastEmittedSlot))")
             }
+            self.aggregator.recordDropDup()
             return
         }
 
         // Valid new frame: emit holds for any elapsed slots, then the real frame.
+        self.aggregator.recordFresh()
         let emission = self.normalizer.catchUpThenEncode(
             ptsSeconds: ptsSeconds, anchorSeconds: anchorSeconds, fps: self.fps, cap: self.fps
         )
@@ -513,6 +580,7 @@ actor VideoEncoder {
     /// Hold slots re-submit `lastPixelBuffer`; the terminal real slot updates it first.
     /// Extracted from `ingest` to stay within the function-body-length limit.
     private func submitEmission(_ emission: CFREmission, frame: VideoFrame, computedSlot: Int) {
+        var holdCount = 0
         for slot in emission.slots {
             if slot.isHold {
                 // Hold: re-submit last known buffer. lastPixelBuffer is non-nil here because
@@ -525,12 +593,18 @@ actor VideoEncoder {
                 }
                 let holdPTS = self.anchoredPTS(slotIndex: slot.slotIndex)
                 self.submit(pixelBuffer: holdBuffer, slotIndex: slot.slotIndex, detectedAt: holdPTS)
+                self.aggregator.recordHold()
+                holdCount += 1
             } else {
                 // Real frame: update lastPixelBuffer before submitting so subsequent holds
                 // in a future batch (or from the clock) re-use the fresh content.
                 self.lastPixelBuffer = frame.pixelBuffer
                 self.submit(pixelBuffer: frame.pixelBuffer, slotIndex: slot.slotIndex, detectedAt: frame.ptsHostTime)
+                self.aggregator.recordEncodedReal()
             }
+        }
+        if holdCount > 0 {
+            self.aggregator.recordCatchupBatch(size: holdCount)
         }
         if emission.cappedShort {
             // The hold count exceeded `cap` (fps); the real frame's slot was not included.
@@ -578,6 +652,7 @@ actor VideoEncoder {
 
         if session.pendingFrameCount() >= self.maxPendingFrames {
             self.encoderBackpressureDrops += 1
+            self.aggregator.recordGateDrop()
             self.dropsContinuation.yield(
                 DropEvent(reason: .encoderBackpressureDrops, count: 1, detectedAt: detectedAt)
             )
@@ -592,12 +667,17 @@ actor VideoEncoder {
         if status != noErr {
             // F2 / KNOWN LIMITATION: the normalizer already advanced `lastEmittedSlot`, so a
             // non-noErr encode is a permanent invisible gap in the CFR grid. For MVP this is
-            // LOGGED ONLY — surfacing encode-failure to DropMonitor is deferred to #35, which
-            // owns the drop-reason taxonomy. It is deliberately NOT counted on
-            // `encoderBackpressureDrops` (that would corrupt the OpAC-4.3/4.4 counter separation)
-            // and NOT on `cfrNormalizationDrops` (normalizer-owned). A conscious decision, not an
-            // unmarked swallow.
+            // surfaced as a telemetry counter (vt_err) and logged — surfacing to DropMonitor is
+            // deferred to #35, which owns the drop-reason taxonomy. It is deliberately NOT counted
+            // on `encoderBackpressureDrops` (that would corrupt the OpAC-4.3/4.4 counter
+            // separation) and NOT on `cfrNormalizationDrops` (normalizer-owned).
+            self.aggregator.recordVTError()
             self.logger.error("VTCompressionSessionEncodeFrame failed: \(status) at slot \(slotIndex) — frame dropped")
+        } else {
+            // Count successful encodeFrame submissions as emitted slots.
+            // Counted here (actor-isolated) rather than from the VT output callback, which fires
+            // on VT's internal queue and has no access to the actor-isolated aggregator.
+            self.aggregator.recordEmit()
         }
     }
 
