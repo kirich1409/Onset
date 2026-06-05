@@ -112,7 +112,6 @@ struct RecordingContentView: View {
             Divider()
                 .padding(.top, Metrics.checklistTopDividerTopPadding)
             self.checklistSection
-            Divider()
             self.stopButtonSection
             self.footerSection
         }
@@ -143,11 +142,15 @@ struct RecordingContentView: View {
             .foregroundStyle(.primary)
             .frame(maxWidth: .infinity)
             .padding(.bottom, Metrics.timerBottomPadding)
+            .accessibilityLabel("Время записи \(ElapsedFormatter.string(from: self.elapsed))")
+            .accessibilityAddTraits(.updatesFrequently)
     }
 
     // MARK: Drop pill section
 
-    private var dropPillSection: some View {
+    @ViewBuilder private var dropPillSection: some View {
+        let dropCount = self.drops.encoderBackpressureDrops
+        let pillLabel = dropCount == 0 ? "Нет пропущенных кадров" : "Пропущено кадров: \(dropCount)"
         HStack(spacing: Metrics.pillDotSpacing) {
             Circle()
                 .fill(RecordingDisplayMapper.pillDotColor(for: self.state))
@@ -155,6 +158,8 @@ struct RecordingContentView: View {
             Text(RecordingDisplayMapper.pillText(state: self.state, drops: self.drops))
                 .font(.system(size: Metrics.pillFontSize))
                 .foregroundStyle(RecordingDisplayMapper.pillTextColor(for: self.state))
+                .accessibilityLabel(pillLabel)
+                .accessibilityAddTraits(.updatesFrequently)
         }
         .padding(.horizontal, Metrics.pillHPadding)
         .padding(.vertical, Metrics.pillVPadding)
