@@ -100,7 +100,7 @@ extension MainViewModel {
         )
 
         do {
-            try await self.coordinator.start(request)
+            try await (self.startSessionOverride ?? self.coordinator.start)(request)
             mainViewModelLogger.info("Recording started successfully")
         } catch {
             self.recordError = "Не удалось начать запись: \(error)"

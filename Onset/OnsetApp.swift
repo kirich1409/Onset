@@ -254,20 +254,21 @@ private struct MenuBarContent: View {
 
 // MARK: - AppActivation
 
-/// Brings the (menu-bar accessory) app to the front.
+/// Brings the menu-bar accessory app to the front on every window-show path.
 ///
-/// Used in two places:
-/// - **Launch**: called from `WindowActionsBridge.onAppear` (deferred via `Task { @MainActor in }`)
-///   after the main window has materialised — ensures Onset takes focus on first launch.
-/// - **Reopen**: called synchronously from menu-bar button handlers after `openWindow(id:)` — ensures
-///   Onset is frontmost when the user reopens the window from the status menu.
+/// Plain `NSApp.activate()` is a no-op for an `LSUIElement = YES` accessory: the OS keeps the
+/// process in `.accessory` policy and excludes it from normal activation promotion — Finder stays
+/// frontmost. Switching to `.regular` first makes the process activatable (a transient Dock icon
+/// appears while a window is open — accepted behaviour), then `NSApp.activate()` succeeds.
+/// `activate(ignoringOtherApps:)` is deprecated and rejected by `SWIFT_TREAT_WARNINGS_AS_ERRORS`.
 ///
-/// `NSApp.activate()` is the macOS 14+ non-deprecated form; `activate(ignoringOtherApps:)` is
-/// deprecated and rejected by `SWIFT_TREAT_WARNINGS_AS_ERRORS = YES`.
-/// Skipped under XCTest: test hosts must not steal focus during the L5 capture suite.
+/// Skipped under XCTest: test hosts must not flip activation policy or steal focus.
 private enum AppActivation {
     static func bringToFront() {
         guard !isRunningUnderXCTest else { return }
+        // Switch to .regular so NSApp.activate() can promote the process to frontmost.
+        // Without this, NSApp.activate() is a no-op for an LSUIElement accessory process.
+        NSApp.setActivationPolicy(.regular)
         NSApp.activate()
     }
 }

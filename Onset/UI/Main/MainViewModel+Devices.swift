@@ -39,6 +39,7 @@ extension MainViewModel {
         } catch {
             mainViewModelLogger.error("Display discovery failed: \(String(describing: error))")
             self.displays = []
+            self.recordError = "Не удалось загрузить список дисплеев"
         }
     }
 

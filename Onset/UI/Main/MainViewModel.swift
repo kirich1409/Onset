@@ -57,6 +57,13 @@ final class MainViewModel {
     let makeCameraSource:
         (CameraDevice, CameraFormat, MicrophoneDevice?, RecordingConfiguration) -> CameraSource
 
+    /// Test seam: when non-nil, replaces `coordinator.start(_:)` in `startRecording`.
+    ///
+    /// Injected by `MainViewModelTests` to spy on coordinator invocations without constructing
+    /// a real `RecordingCoordinator`. The live default is `nil` — the coordinator is called directly.
+    @ObservationIgnored
+    var startSessionOverride: (@MainActor (RecordingRequest) async throws -> Void)?
+
     // MARK: - Device lists
 
     // internal setters — must be settable from MainViewModel+Devices.swift extension
@@ -77,8 +84,10 @@ final class MainViewModel {
 
     // MARK: - Error state
 
-    /// Non-nil when the most recent `record()` call failed or a validation error occurred.
-    /// Internal (not private) so `MainViewModel+Record.swift` extension can write it.
+    /// Non-nil when the most recent `record()` call failed, a validation error occurred,
+    /// or device discovery failed (e.g. display list could not be loaded).
+    /// Internal (not private) so `MainViewModel+Record.swift` and `MainViewModel+Devices.swift`
+    /// extensions can write it.
     var recordError: String?
 
     /// `true` while a `record()` call is in flight.

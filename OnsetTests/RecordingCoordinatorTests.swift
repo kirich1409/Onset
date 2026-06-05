@@ -128,6 +128,21 @@ private enum CoordinatorFixtures {
     }
 }
 
+// MARK: - Thread-safe counter
+
+/// Minimal reference-type counter for use in `@Sendable` closures under Swift 6 strict concurrency.
+///
+/// Wrapped in a class so the closure captures a reference, avoiding the `var` mutation-across-
+/// isolation error. `@unchecked Sendable` mirrors `FakeRecordingControlling`: the counter is only
+/// incremented from one logical isolation (the coordinator on @MainActor) in these tests.
+private final class Counter: @unchecked Sendable {
+    private(set) var value = 0
+
+    func increment() {
+        self.value += 1
+    }
+}
+
 /// Polls a `@MainActor` condition with a bounded timeout (mirrors `eventually` in session tests).
 @MainActor
 private func eventuallyMain(timeoutMs: Int = 2000, _ condition: () -> Bool) async -> Bool {
@@ -261,19 +276,50 @@ struct RecordingCoordinatorTests {
 
     @Test("concurrent start calls result in exactly one session started")
     func start_concurrentCallsStartOneSession() async throws {
+        // Thread-safe box for tracking factory invocations across the @Sendable closure boundary.
+        // The coordinator's sessionFactory is @Sendable; a plain `var` would be a Swift 6
+        // data-race error. An @unchecked Sendable reference box (same pattern as FakeRecordingControlling)
+        // satisfies the compiler — the box is only written from @MainActor via the coordinator.
+        let factoryCounter = Counter()
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in
+            factoryCounter.increment()
+            return fake
+        })
 
         // Two concurrent start() calls (e.g. double-click on Record button). The synchronous
         // isStarting guard must let only one through; session.start() must be called exactly once.
+        // factoryCounter verifies the guard fires BEFORE the factory — moving the guard below
+        // the factory would create a second session even though only one is started.
         async let start1: Void = coordinator.start(CoordinatorFixtures.request())
         async let start2: Void = coordinator.start(CoordinatorFixtures.request())
         _ = try await (start1, start2)
 
+        // sessionFactory must be called exactly once — guard must fire before the factory.
+        #expect(factoryCounter.value == 1)
         #expect(fake.startCount == 1, "concurrent start() calls must start exactly one session")
         #expect(coordinator.phase == .recording)
 
         await coordinator.stop()
+    }
+
+    @Test("elapsed is frozen after stop — the tick loop is cancelled")
+    func elapsed_frozenAfterStop() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        // Wait until at least one tick so elapsed > 0 and the loop is confirmed running.
+        let ticked = await eventuallyMain(timeoutMs: 3000) { coordinator.elapsed >= 1 }
+        #expect(ticked, "prerequisite: elapsed must tick to at least 1 before stopping")
+
+        await coordinator.stop()
+        let elapsedAtStop = coordinator.elapsed
+
+        // Give the tick loop one more wake window. If the loop were still running after stop
+        // elapsed would increase; it must stay frozen at the value captured at stop time.
+        let stillIncrementing = await eventuallyMain(timeoutMs: 1500) { coordinator.elapsed > elapsedAtStop }
+        #expect(!stillIncrementing, "elapsed must NOT increment after stop — tick loop must be cancelled")
     }
 
     @Test("start failure rethrows and leaves phase unchanged")
