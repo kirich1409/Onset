@@ -54,21 +54,6 @@ struct MainView: View {
     /// simultaneous `isPresented` bindings competing for the same presentation slot.
     @State private var pendingAlert: PostStopAlert?
 
-    // MARK: - Alert model
-
-    /// Which post-stop alert to present. `writeError` carries the reason string for the message body.
-    private enum PostStopAlert: Identifiable {
-        case writeError(reason: String)
-        case degradedWarning
-
-        var id: String {
-            switch self {
-            case .writeError: "writeError"
-            case .degradedWarning: "degradedWarning"
-            }
-        }
-    }
-
     // MARK: - Body
 
     var body: some View {
@@ -112,13 +97,10 @@ struct MainView: View {
     /// Returns the highest-priority pending alert, or `nil` when no alert is due.
     /// Write-error supersedes degraded-warning when both flags are set simultaneously.
     private func resolvedAlert() -> PostStopAlert? {
-        if let reason = self.model.coordinator.lastWriteError {
-            return .writeError(reason: reason)
-        }
-        if self.model.coordinator.lastDegradedWarning {
-            return .degradedWarning
-        }
-        return nil
+        PostStopAlert.resolve(
+            writeError: self.model.coordinator.lastWriteError,
+            degraded: self.model.coordinator.lastDegradedWarning
+        )
     }
 
     /// Builds the `Alert` for a given `PostStopAlert` case.
@@ -306,5 +288,39 @@ struct CameraPreviewRepresentable: NSViewRepresentable {
     func updateNSView(_ nsView: CameraPreviewView, context: Context) {
         // No-op: CameraPreviewView wires the layer in init.
         // Caller must use .id() to force recreation when sessionHandle changes.
+    }
+}
+
+// MARK: - PostStopAlert
+
+/// Which post-stop alert `MainView` presents after a recording ends.
+///
+/// `writeError` carries the localized reason for the message body.
+/// Priority ordering is enforced by `resolve(writeError:degraded:)`: write-error supersedes
+/// degraded-warning because a failed write means the file was not saved (higher severity).
+enum PostStopAlert: Identifiable {
+    case writeError(reason: String)
+    case degradedWarning
+
+    var id: String {
+        switch self {
+        case .writeError: "writeError"
+        case .degradedWarning: "degradedWarning"
+        }
+    }
+
+    /// Returns the highest-priority alert given the coordinator state, or `nil` when no alert is due.
+    ///
+    /// Priority: `.writeError` > `.degradedWarning` > `nil`.
+    /// Both flags can be simultaneously true when the writer fails under heavy backpressure;
+    /// only the higher-severity alert is shown to avoid competing presentation slots.
+    nonisolated static func resolve(writeError: String?, degraded: Bool) -> Self? {
+        if let reason = writeError {
+            return .writeError(reason: reason)
+        }
+        if degraded {
+            return .degradedWarning
+        }
+        return nil
     }
 }
