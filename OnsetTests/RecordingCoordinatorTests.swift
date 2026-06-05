@@ -606,6 +606,82 @@ struct RecordingCoordinatorRevocationTests {
     }
 }
 
+// MARK: - Global hotkey toggle (#67 / AC-9 third stop path)
+
+@Suite("RecordingCoordinator — handleHotKey (#67 / AC-9 third stop path)")
+@MainActor
+struct RecordingCoordinatorHotKeyTests {
+    // MARK: - recording in progress → triggers stop
+
+    @Test("recording in progress — handleHotKey triggers stop()")
+    func handleHotKey_whileRecording_triggerStop() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request(origin: .main))
+        #expect(coordinator.phase == .recording, "prerequisite: must be recording")
+
+        // handleHotKey wraps stop() in a Task. Poll for the phase transition as the existing
+        // stop tests do (Task is structured, runs on @MainActor, but may not settle synchronously).
+        coordinator.handleHotKey()
+
+        let stopped = await eventuallyMain { coordinator.phase == .main }
+        #expect(stopped, "handleHotKey while recording must stop and return to .main origin")
+        #expect(fake.stopCalled, "fake.stop() must have been called via handleHotKey")
+        #expect(fake.stopCount == 1, "stop must be called exactly once")
+    }
+
+    // MARK: - not recording + intent installed → calls intent, NOT openMainWindow
+
+    @Test("not recording + intent installed — handleHotKey calls intent, skips openMainWindow")
+    func handleHotKey_notRecording_intentInstalled_callsIntent() {
+        let intentCounter = Counter()
+        let openWindowCounter = Counter()
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in
+            FakeRecordingControlling(result: CoordinatorFixtures.result())
+        })
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: { openWindowCounter.increment() }
+        )
+        coordinator.menuBarRecordIntent = { intentCounter.increment() }
+
+        coordinator.handleHotKey()
+
+        #expect(intentCounter.value == 1, "handleHotKey must call menuBarRecordIntent when installed")
+        #expect(openWindowCounter.value == 0, "handleHotKey must NOT open the main window when intent is installed")
+    }
+
+    // MARK: - not recording + no intent → calls openMainWindow, does NOT touch session
+
+    @Test("not recording + no intent — handleHotKey calls openMainWindow, does not start a session")
+    func handleHotKey_notRecording_noIntent_opensMainWindow() {
+        let openWindowCounter = Counter()
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: { openWindowCounter.increment() }
+        )
+        // menuBarRecordIntent is nil by default — no install.
+
+        coordinator.handleHotKey()
+
+        #expect(openWindowCounter.value == 1, "handleHotKey with no intent must open the main window")
+        #expect(!fake.startCalled, "handleHotKey must NOT start a session when no intent is installed")
+    }
+}
+
 // swiftlint:enable no_magic_numbers
 // swiftlint:enable trailing_closure
 // swiftlint:enable type_body_length

@@ -66,6 +66,13 @@ struct OnsetApp: App {
     /// Window actions are wired into it from `WindowActionsBridge` once the env actions exist.
     @State private var coordinator = RecordingCoordinator()
 
+    /// System-wide hotkey monitor (#67 / AC-9 third stop path). Created at app-init time;
+    /// registered once from `WindowActionsBridge.onAppear` after the coordinator is wired.
+    /// Suppressed under XCTest — a test host must not grab the system-wide ⌘⌥⌃R shortcut
+    /// (would fight any other test run on the same machine and could accidentally stop a
+    /// real recording if the key is pressed during a test session).
+    @State private var hotKeyMonitor = GlobalHotKeyMonitor()
+
     var body: some Scene {
         Window("Onset", id: WindowID.main) {
             // Under XCTest the window is empty (no RootView, no onboarding flow, no
@@ -86,8 +93,8 @@ struct OnsetApp: App {
                     hasPostScreenGrantArg: CommandLine.arguments.contains(AppRelauncher.postScreenGrantArg)
                 )
                 // Capture the env window actions into the coordinator (a plain class cannot read
-                // @Environment(\.openWindow) itself).
-                .background(WindowActionsBridge(coordinator: self.coordinator))
+                // @Environment(\.openWindow) itself). Also registers the system-wide hotkey (#67).
+                .background(WindowActionsBridge(coordinator: self.coordinator, hotKeyMonitor: self.hotKeyMonitor))
             }
         }
         // Fixed-size window that wraps the content — prevents user resizing.
@@ -126,8 +133,14 @@ struct OnsetApp: App {
 /// Invisible helper that reads the SwiftUI environment window actions and installs them as closures
 /// on the coordinator. A plain `@Observable` class cannot read `@Environment(\.openWindow)`; this
 /// bridge runs inside a `View` where the actions exist and forwards them once on appear.
+///
+/// Also registers the global hotkey (#67) after the coordinator is wired, so `handleHotKey()`
+/// has a fully-bound coordinator when the hotkey fires. Suppressed under XCTest via the
+/// `isRunningUnderXCTest` gate on the enclosing `Window` view — the bridge never mounts under
+/// test, so `hotKeyMonitor.register` is never called.
 private struct WindowActionsBridge: View {
     let coordinator: RecordingCoordinator
+    let hotKeyMonitor: GlobalHotKeyMonitor
 
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissWindow) private var dismissWindow
@@ -150,6 +163,17 @@ private struct WindowActionsBridge: View {
                     }
                 )
                 self.coordinator.enterMain()
+
+                // Register the system-wide hotkey after the coordinator is fully wired
+                // (#67 / AC-9). The monitor's register() is idempotent; onAppear may fire
+                // more than once on scene re-attachment, so the guard inside register() is
+                // the primary de-duplication.
+                // Belt-and-suspenders: the monitor is also never instantiated under XCTest
+                // because this bridge only mounts when isRunningUnderXCTest is false
+                // (the enclosing `Window` body shows EmptyView instead).
+                self.hotKeyMonitor.register {
+                    self.coordinator.handleHotKey()
+                }
             }
     }
 }

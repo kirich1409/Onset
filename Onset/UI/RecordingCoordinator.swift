@@ -479,4 +479,29 @@ final class RecordingCoordinator {
             "Recording stopped — files=\(result.outputURLs.count) origin=\(String(describing: self.origin))"
         )
     }
+
+    // MARK: - Global hotkey (#67 / AC-9 third stop path)
+
+    /// Toggle entry point for the global hotkey (#67, AC-9 third stop path) and any future
+    /// single-gesture toggle. Recording in progress → stop(); otherwise delegate to the
+    /// menu-bar record intent (installed by MainView when recording is possible), falling
+    /// back to opening the main window when no intent is installed (onboarding / no window)
+    /// — identical semantics to the #38 menu-bar action, so there is exactly one
+    /// "start from a single gesture" code path.
+    ///
+    /// The Task wrapping stop() is required because `handleHotKey()` is synchronous
+    /// (called from the Carbon callback via MainActor.assumeIsolated) while `stop()` is
+    /// async. A structured Task inherits @MainActor isolation from the enclosing context.
+    func handleHotKey() {
+        if self.phase == .recording {
+            Task { await self.stop() }
+            coordinatorLogger.notice("Hotkey ⌘⌥⌃R — stopping active recording")
+        } else if let intent = self.menuBarRecordIntent {
+            intent()
+            coordinatorLogger.info("Hotkey ⌘⌥⌃R — delegating to menuBarRecordIntent")
+        } else {
+            self.openMainWindow()
+            coordinatorLogger.info("Hotkey ⌘⌥⌃R — no intent installed, opening main window")
+        }
+    }
 }
