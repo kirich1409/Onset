@@ -433,6 +433,7 @@ private func makeSession(
     writers: SessionFakeWriterFactory,
     sources: FakeSourceFactory,
     probe: @escaping @Sendable () -> ProbeResult,
+    config: RecordingConfiguration = .mvpDefault,
     includeCamera: Bool = true,
     includeMic: Bool = true
 )
@@ -443,7 +444,7 @@ private func makeSession(
         cameraDevice: includeCamera ? SessionFixtures.cameraDevice() : nil,
         cameraFormat: includeCamera ? SessionFixtures.cameraFormat() : nil,
         micDevice: includeMic ? SessionFixtures.micDevice() : nil,
-        config: .mvpDefault,
+        config: config,
         probe: probe,
         encoderFactory: encoders,
         writerFactory: writers,
@@ -924,6 +925,71 @@ struct RecordingSessionStateSurfaceTests {
 
         let finished = await drained.value
         #expect(finished, "recordingStateStream must finish after stop() so the consumer's loop ends")
+    }
+}
+
+// MARK: - Output directory creation
+
+@Suite("RecordingSession — output directory")
+struct RecordingSessionOutputDirectoryTests {
+    @Test("start() creates the output directory when it does not exist")
+    func start_createsOutputDirectory_whenAbsent() async throws {
+        // UUID-unique path so parallel test runs do not collide.
+        let tempDir = URL(filePath: NSTemporaryDirectory(), directoryHint: .isDirectory)
+            .appending(path: "OnsetTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+            .appending(path: "Onset", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Precondition: directory must not exist before start().
+        #expect(!FileManager.default.fileExists(atPath: tempDir.path(percentEncoded: false)))
+
+        let mvp = RecordingConfiguration.mvpDefault
+        let config = RecordingConfiguration(
+            container: mvp.container,
+            codec: mvp.codec,
+            sampleEntry: mvp.sampleEntry,
+            profileLevel: mvp.profileLevel,
+            colorPrimaries: mvp.colorPrimaries,
+            transferFunction: mvp.transferFunction,
+            yCbCrMatrix: mvp.yCbCrMatrix,
+            bitDepth: mvp.bitDepth,
+            maxScreenFps: mvp.maxScreenFps,
+            minCameraFps: mvp.minCameraFps,
+            bitrateTable: mvp.bitrateTable,
+            dataRateLimitsPeakMultiplier: mvp.dataRateLimitsPeakMultiplier,
+            keyFrameIntervalSeconds: mvp.keyFrameIntervalSeconds,
+            allowFrameReordering: mvp.allowFrameReordering,
+            pixelFormatPreference: mvp.pixelFormatPreference,
+            audioSampleRate: mvp.audioSampleRate,
+            audioChannelCount: mvp.audioChannelCount,
+            audioBitrate: mvp.audioBitrate,
+            movieFragmentInterval: mvp.movieFragmentInterval,
+            degradedBackpressureThreshold: mvp.degradedBackpressureThreshold,
+            degradedWindowSeconds: mvp.degradedWindowSeconds,
+            budgetCap: mvp.budgetCap,
+            outputDirectory: tempDir
+        )
+
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(
+            encoders: encoders,
+            writers: writers,
+            sources: sources,
+            probe: probe.callable(),
+            config: config
+        )
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+
+        #expect(
+            FileManager.default.fileExists(atPath: tempDir.path(percentEncoded: false)),
+            "start() must create the output directory before constructing any FileWriter"
+        )
+
+        _ = await session.stop()
     }
 }
 
