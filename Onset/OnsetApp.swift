@@ -95,13 +95,13 @@ struct OnsetApp: App {
         // Explicitly open the main window at launch; a regular app focuses it automatically.
         .defaultLaunchBehavior(.presented)
 
-        // The recording window (#37). Phase 0 renders a minimal placeholder; the real RecordingView
-        // lands in Phase 2. Suppressed under XCTest for the same reason as the main window.
+        // The recording-in-progress window (#37). Suppressed under XCTest for the same reason as
+        // the main window.
         Window("Onset — запись", id: WindowID.recording) {
             if isRunningUnderXCTest {
                 EmptyView()
             } else {
-                RecordingWindowPlaceholder(coordinator: self.coordinator)
+                RecordingView(coordinator: self.coordinator)
             }
         }
         .windowResizability(.contentSize)
@@ -152,55 +152,6 @@ private struct WindowActionsBridge: View {
                 )
                 self.coordinator.enterMain()
             }
-    }
-}
-
-// MARK: - RecordingWindowPlaceholder
-
-/// **Phase-2 placeholder.** A minimal stand-in for the real `RecordingView` (#37), wired only to
-/// read the coordinator's live `phase` / `elapsed` so the scene + window choreography can be
-/// verified in Phase 0. Replace entirely when landing #37.
-private struct RecordingWindowPlaceholder: View {
-    private enum Metrics {
-        static let spacing: CGFloat = 12
-        static let padding: CGFloat = 24
-    }
-
-    let coordinator: RecordingCoordinator
-
-    var body: some View {
-        VStack(spacing: Metrics.spacing) {
-            Text(self.coordinator.phase == .recording ? "● ИДЁТ ЗАПИСЬ" : "Запись не идёт")
-                .font(.headline)
-            Text(ElapsedFormatter.string(from: self.coordinator.elapsed))
-                .font(.system(.largeTitle, design: .monospaced))
-            Text("Заглушка окна записи — реализация в #37")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-        }
-        .padding(Metrics.padding)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
-
-// MARK: - ElapsedFormatter
-
-/// Formats whole seconds as `mm:ss`.
-///
-/// Avoids `String(format:)`, whose variadic initializer trips `SWIFT_STRICT_MEMORY_SAFETY` (the
-/// project enables strict memory safety). Pads each component to two digits manually.
-private enum ElapsedFormatter {
-    private static let secondsPerMinute = 60
-    private static let twoDigitThreshold = 10
-
-    static func string(from seconds: Int) -> String {
-        let minutes = seconds / self.secondsPerMinute
-        let remainder = seconds % self.secondsPerMinute
-        return "\(self.padded(minutes)):\(self.padded(remainder))"
-    }
-
-    private static func padded(_ value: Int) -> String {
-        value < self.twoDigitThreshold ? "0\(value)" : "\(value)"
     }
 }
 
