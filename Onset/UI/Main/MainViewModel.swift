@@ -1,0 +1,243 @@
+import AVFoundation
+import os
+import SwiftUI
+
+// MARK: - Logger
+
+/// Sendable; nonisolated avoids a MainActor hop under SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor.
+nonisolated let mainViewModelLogger = Logger(
+    subsystem: "dev.androidbroadcast.Onset",
+    category: "MainViewModel"
+)
+
+// MARK: - MainViewModel
+
+/// View model for the main recording configuration screen (#36).
+///
+/// Owns device discovery, camera preview lifecycle, and the AC-2 record-button logic:
+/// - (a) ≥1 video source selected → button active
+/// - (b) mic available but NOT selected → button disabled with message
+/// - (c) mic unavailable → record without audio, «без звука» indicator
+/// - (d) no video source by permissions (`!canRecord`) → empty state (keyed on permissions, not UI selections)
+///
+/// ### Preview lifecycle
+/// A generation counter (`previewGeneration`) drives `.id()` on `CameraPreviewRepresentable`
+/// so SwiftUI recreates the NSView — and thus the `AVCaptureVideoPreviewLayer` — whenever the
+/// camera changes. The `CameraSource` actor for preview is started/stopped inside `.task(id: selectedCameraID)`.
+/// Old source MUST be stopped before a new one starts to avoid device contention.
+///
+/// ### Camera-only recording (screen=OFF)
+/// `RecordingRequest.display` is non-optional and `RecordingSession` has no screen-skip branch
+/// (service-layer gap). When screen capture is OFF but a camera is selected, the record action
+/// surfaces an explicit error. Follow-up for `swift-engineer`: add camera-only recording path.
+@Observable
+@MainActor
+final class MainViewModel {
+    // MARK: - Injectable seams
+
+    @ObservationIgnored
+    let permissions: any PermissionsProviding
+
+    @ObservationIgnored
+    let coordinator: RecordingCoordinator
+
+    /// Closure seam for display discovery — injectable for tests.
+    @ObservationIgnored
+    let discoverDisplays: (Bool) async throws -> [Display]
+
+    /// Closure seam for camera discovery — injectable for tests.
+    @ObservationIgnored
+    let discoverCameras: (Bool) -> [CameraDevice]
+
+    /// Closure seam for microphone discovery — injectable for tests.
+    @ObservationIgnored
+    let discoverMicrophones: (Bool) -> [MicrophoneDevice]
+
+    /// Factory seam for `CameraSource` — injectable for tests to avoid hardware calls.
+    @ObservationIgnored
+    let makeCameraSource:
+        (CameraDevice, CameraFormat, MicrophoneDevice?, RecordingConfiguration) -> CameraSource
+
+    // MARK: - Device lists
+
+    // internal setters — must be settable from MainViewModel+Devices.swift extension
+    var displays: [Display] = []
+    var cameras: [CameraDevice] = []
+    var microphones: [MicrophoneDevice] = []
+
+    // MARK: - User selections (ID-typed for Hashable Picker compatibility)
+
+    /// Whether screen recording is enabled. Mirrors the screen toggle.
+    /// Defaults to `true` when screen permission is available.
+    var screenEnabled = false
+
+    /// The `CGDirectDisplayID` of the selected display, or `nil` when no selection.
+    var selectedDisplayID: CGDirectDisplayID?
+
+    /// The `uniqueID` of the selected camera device, or `nil` for none.
+    var selectedCameraID: String?
+
+    /// The `uniqueID` of the selected microphone device, or `nil` for none.
+    var selectedMicID: String?
+
+    // MARK: - Error state
+
+    /// Non-nil when the most recent `record()` call failed or a validation error occurred.
+    /// Internal (not private) so `MainViewModel+Record.swift` extension can write it.
+    var recordError: String?
+
+    /// `true` while a `record()` call is in flight.
+    /// Internal (not private) so `MainViewModel+Record.swift` extension can write it.
+    var isStartingRecording = false
+
+    // MARK: - Preview state
+
+    /// The `SessionHandle` for the live camera preview, or `nil` for placeholder.
+    /// Internal (not private) so `MainViewModel+Preview.swift` extension can write it.
+    var previewHandle: SessionHandle?
+
+    /// Bumped on each camera change; drives `.id()` on the `NSViewRepresentable` wrapper
+    /// to force recreation of `CameraPreviewView` (its `init` wires the layer, `updateNSView` is no-op).
+    /// Internal (not private) so `MainViewModel+Preview.swift` extension can write it.
+    var previewGeneration = 0
+
+    /// The `CameraSource` actor kept alive for preview; stopped before recreation.
+    /// Internal (not private) so `MainViewModel+Preview.swift` extension can write it.
+    @ObservationIgnored
+    var previewSource: CameraSource?
+
+    // MARK: - Computed properties — effective permissions passthrough
+
+    /// Drives the AC-2(d) empty state: keyed on permission capability, NOT UI selections.
+    var showNoPermissionsState: Bool {
+        !self.permissions.effectivePermissions.canRecord
+    }
+
+    /// Screen permission denied — show disabled row + link back to onboarding.
+    var isScreenDenied: Bool {
+        self.permissions.screenStatus != .authorized
+    }
+
+    /// Camera permission denied.
+    var isCameraDenied: Bool {
+        self.permissions.cameraStatus != .authorized
+    }
+
+    /// Whether microphone is available (authorized) from permissions.
+    var isMicAvailable: Bool {
+        self.permissions.effectivePermissions.microphoneAvailable
+    }
+
+    // MARK: - Computed properties — selected devices (resolved from ID)
+
+    /// The display object matching `selectedDisplayID`, or `nil`.
+    var selectedDisplay: Display? {
+        guard let id = self.selectedDisplayID else { return nil }
+        return self.displays.first { $0.displayID == id }
+    }
+
+    /// The camera device matching `selectedCameraID`, or `nil`.
+    var selectedCamera: CameraDevice? {
+        guard let id = self.selectedCameraID else { return nil }
+        return self.cameras.first { $0.uniqueID == id }
+    }
+
+    /// The microphone device matching `selectedMicID`, or `nil`.
+    var selectedMic: MicrophoneDevice? {
+        guard let id = self.selectedMicID else { return nil }
+        return self.microphones.first { $0.uniqueID == id }
+    }
+
+    // MARK: - AC-2 computed properties
+
+    /// True when at least one video source is effectively selected and enabled.
+    ///
+    /// Screen counts only when `screenEnabled` and a display is selected.
+    /// Camera counts when a camera is selected (regardless of `screenEnabled`).
+    var hasVideoSource: Bool {
+        let screenSelected = self.screenEnabled && self.selectedDisplayID != nil
+        let cameraSelected = self.selectedCameraID != nil
+        return screenSelected || cameraSelected
+    }
+
+    /// AC-2(b): mic is available (authorized) but the user has not selected any microphone.
+    var isMicAvailableButUnselected: Bool {
+        self.isMicAvailable && self.selectedMicID == nil
+    }
+
+    /// AC-2(c): recording will proceed without audio.
+    ///
+    /// True when at least one video source is present but microphone is unavailable.
+    var isRecordingWithoutAudio: Bool {
+        self.hasVideoSource && !self.isMicAvailable
+    }
+
+    /// AC-2 record button enabled state.
+    ///
+    /// - Returns `true` when: has video source AND (mic is unavailable OR mic is selected).
+    /// - Returns `false` for AC-2(b): mic available but nothing selected.
+    /// - Returns `false` for AC-2(d): no video source by permissions (handled separately as empty state).
+    var canRecord: Bool {
+        guard self.hasVideoSource else { return false }
+        // AC-2(b): block if mic is available but none selected
+        guard !self.isMicAvailableButUnselected else { return false }
+        return true
+    }
+
+    /// AC-2(b) inline message shown below the record button when mic is available but unselected.
+    var recordDisabledReason: String? {
+        guard self.hasVideoSource, self.isMicAvailableButUnselected else { return nil }
+        return "Выберите аудио-вход, чтобы начать запись"
+    }
+
+    // MARK: - Device display names (resolved at UI layer via AVCaptureDevice)
+
+    /// Human-readable label for a camera device, resolved via `AVCaptureDevice(uniqueID:)`.
+    ///
+    /// PII note: device names are shown in UI but never logged. Log counts only.
+    func cameraLabel(for device: CameraDevice) -> String {
+        AVCaptureDevice(uniqueID: device.uniqueID)?.localizedName ?? "Камера"
+    }
+
+    /// Human-readable label for a microphone device, resolved via `AVCaptureDevice(uniqueID:)`.
+    func microphoneLabel(for device: MicrophoneDevice) -> String {
+        AVCaptureDevice(uniqueID: device.uniqueID)?.localizedName ?? "Микрофон"
+    }
+
+    /// Human-readable description for a display (e.g. "1920×1080 @ 60 Hz").
+    func displayLabel(for display: Display) -> String {
+        let res = "\(display.pixelWidth)×\(display.pixelHeight)"
+        guard display.refreshHz != 0.0 else { return res }
+        let refreshRate = Int(display.refreshHz)
+        return "\(res) @ \(refreshRate) Гц"
+    }
+
+    // MARK: - Init
+
+    init(
+        permissions: any PermissionsProviding,
+        coordinator: RecordingCoordinator,
+        discoverDisplays: @escaping (Bool) async throws -> [Display] = { authorized in
+            try await DeviceDiscovery.displays(screenAuthorized: authorized)
+        },
+        discoverCameras: @escaping (Bool) -> [CameraDevice] = { authorized in
+            DeviceDiscovery.cameras(cameraAuthorized: authorized)
+        },
+        discoverMicrophones: @escaping (Bool) -> [MicrophoneDevice] = { authorized in
+            DeviceDiscovery.microphones(microphoneAuthorized: authorized)
+        },
+        makeCameraSource: @escaping (
+            CameraDevice, CameraFormat, MicrophoneDevice?, RecordingConfiguration
+        )
+            -> CameraSource = { device, format, mic, config in
+                CameraSource(cameraDevice: device, format: format, micDevice: mic, config: config)
+            }
+    ) {
+        self.permissions = permissions
+        self.coordinator = coordinator
+        self.discoverDisplays = discoverDisplays
+        self.discoverCameras = discoverCameras
+        self.discoverMicrophones = discoverMicrophones
+        self.makeCameraSource = makeCameraSource
+    }
+}

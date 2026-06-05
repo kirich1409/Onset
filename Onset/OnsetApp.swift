@@ -109,6 +109,7 @@ struct OnsetApp: App {
             } else {
                 RootView(
                     permissionsService: self.permissionsService,
+                    coordinator: self.coordinator,
                     hasPostScreenGrantArg: CommandLine.arguments.contains(AppRelauncher.postScreenGrantArg)
                 )
                 // Capture the env window actions into the coordinator (a plain class cannot read
@@ -279,6 +280,7 @@ struct RootView: View {
     // MARK: - Dependencies
 
     let permissionsService: PermissionsService
+    let coordinator: RecordingCoordinator
 
     // MARK: - Transient routing state
 
@@ -295,9 +297,12 @@ struct RootView: View {
     /// `allGranted` is false. Reset when `allGranted` becomes `true` (no bypass needed).
     @State private var bypassToMain = false
 
-    // MARK: - View-owned VM for onboarding
+    // MARK: - View-owned VMs
 
     @State private var onboardingViewModel: OnboardingViewModel
+
+    /// The main screen view model, created once and owned for the lifetime of `RootView`.
+    @State private var mainViewModel: MainViewModel
 
     // MARK: - Environment
 
@@ -305,10 +310,19 @@ struct RootView: View {
 
     // MARK: - Init
 
-    init(permissionsService: PermissionsService, hasPostScreenGrantArg: Bool) {
+    init(
+        permissionsService: PermissionsService,
+        coordinator: RecordingCoordinator,
+        hasPostScreenGrantArg: Bool
+    ) {
         self.permissionsService = permissionsService
+        self.coordinator = coordinator
         _hasPostScreenGrantArg = State(initialValue: hasPostScreenGrantArg)
         _onboardingViewModel = State(initialValue: OnboardingViewModel(permissions: permissionsService))
+        _mainViewModel = State(initialValue: MainViewModel(
+            permissions: permissionsService,
+            coordinator: coordinator
+        ))
     }
 
     // MARK: - Body
@@ -345,7 +359,7 @@ struct RootView: View {
                 }
 
             case .main:
-                MainView(effectivePermissions: self.permissionsService.effectivePermissions) {
+                MainView(model: self.mainViewModel) {
                     // Clear the bypass so AppRouter re-evaluates to .onboarding.
                     // This is the escape hatch from the "no permissions" blocked state
                     // that appears when the user tapped «Позже» at 0/3 (AC-7 graceful path).

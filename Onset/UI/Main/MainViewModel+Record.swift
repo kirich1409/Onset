@@ -1,0 +1,116 @@
+import os
+
+// MARK: - MainViewModel — Record action
+
+extension MainViewModel {
+    /// Validates guards, resolves devices, and calls `coordinator.start`.
+    ///
+    /// AC-2 guards are re-checked defensively even though the button should be disabled.
+    /// Camera-only path (screen=OFF, display=nil): surfaces error — service-layer gap.
+    /// Follow-up for `swift-engineer`: add camera-only recording path to RecordingSession.
+    func record() async {
+        guard !self.isStartingRecording else { return }
+        self.recordError = nil
+
+        guard self.validateRecordGuards() else { return }
+        guard let display = self.validateDisplaySelection() else { return }
+
+        let resolvedCameraFormat: CameraFormat?
+        do {
+            resolvedCameraFormat = try self.resolveCameraFormat()
+        } catch {
+            return
+        }
+
+        await self.startRecording(display: display, cameraFormat: resolvedCameraFormat)
+    }
+
+    /// Validates AC-2 guards. Returns `true` when recording may proceed, `false` if an error was set.
+    func validateRecordGuards() -> Bool {
+        // AC-2(d): no permissions — should be showing empty state, not calling record()
+        guard self.permissions.effectivePermissions.canRecord else {
+            mainViewModelLogger.warning("record() called with no video permissions — ignoring")
+            return false
+        }
+        guard self.canRecord else {
+            if self.isMicAvailableButUnselected {
+                self.recordError = "Выберите аудио-вход, чтобы начать запись"
+            }
+            return false
+        }
+        return true
+    }
+
+    /// Resolves and validates the selected display. Returns `nil` if an error was set.
+    func validateDisplaySelection() -> Display? {
+        guard let display = self.selectedDisplay else {
+            if self.screenEnabled {
+                self.recordError = "Выберите дисплей для записи экрана"
+            } else {
+                // Camera-only path is not yet supported at the service layer
+                self.recordError =
+                    "Запись только с камеры пока не поддерживается. Включите запись экрана."
+                mainViewModelLogger.info(
+                    "Camera-only recording requested — not yet supported (service-layer gap)"
+                )
+            }
+            return nil
+        }
+        return display
+    }
+
+    /// Resolves the camera format for the selected camera. Returns `nil` for no camera.
+    /// Throws and sets `recordError` when the camera has no suitable format.
+    func resolveCameraFormat() throws -> CameraFormat? {
+        guard let camera = self.selectedCamera else { return nil }
+        do {
+            return try CameraFormatSelector.pickBestFormat(
+                from: camera.formats,
+                minFps: Double(RecordingConfiguration.mvpDefault.minCameraFps)
+            )
+        } catch {
+            self.recordError = "Не удалось выбрать формат камеры"
+            mainViewModelLogger.error(
+                "Camera format selection failed: \(String(describing: error))"
+            )
+            throw error
+        }
+    }
+
+    /// Stops preview, builds the request, and calls `coordinator.start`.
+    func startRecording(display: Display, cameraFormat: CameraFormat?) async {
+        let plan = CapabilityResolver.resolveStartProfile(
+            display: display,
+            cameraFormat: cameraFormat,
+            config: .mvpDefault
+        )
+
+        // Stop preview source before starting recording (device contention)
+        if let preview = self.previewSource {
+            await preview.stop()
+            self.previewSource = nil
+            self.previewHandle = nil
+        }
+
+        let request = RecordingRequest(
+            plan: plan,
+            display: display,
+            cameraDevice: self.selectedCamera,
+            cameraFormat: cameraFormat,
+            micDevice: self.selectedMic,
+            permissions: self.permissions.effectivePermissions,
+            checklist: self.buildChecklist(display: display),
+            origin: .main
+        )
+
+        self.isStartingRecording = true
+        do {
+            try await self.coordinator.start(request)
+            mainViewModelLogger.info("Recording started successfully")
+        } catch {
+            self.recordError = "Не удалось начать запись: \(error)"
+            mainViewModelLogger.error("Recording start failed: \(String(describing: error))")
+        }
+        self.isStartingRecording = false
+    }
+}
