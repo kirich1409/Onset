@@ -736,10 +736,10 @@ struct RecordingCoordinatorHotKeyTests {
         try await coordinator.start(CoordinatorFixtures.request(origin: .main))
         #expect(coordinator.phase == .recording, "prerequisite: must be recording")
 
-        // Both calls are synchronous on @MainActor before any Task suspension.
-        // The first call flips isStopping=true (synchronous, before the first await in stop()),
-        // so the second call's guard (phase==.recording && !isStopping) fails and stop() is
-        // never enqueued a second time.
+        // Both handleHotKey() calls enqueue a Task before either runs. Both tasks execute
+        // sequentially on @MainActor. The first task's stop() sets isStopping=true synchronously
+        // (before its first await), so the second task's guard check in stop() fails —
+        // teardown runs exactly once.
         coordinator.handleHotKey()
         coordinator.handleHotKey()
 
