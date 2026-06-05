@@ -179,6 +179,17 @@ actor RecordingSession {
         try self.runCapabilityPreflight() // 1. AC-6
         let startPlan = try self.resolvePlan(permissions: permissions) // 2. AC-11
 
+        // Ensure the output directory exists before any FileWriter is constructed.
+        // Placed after resolvePlan so the directory is only created when recording will
+        // actually proceed, and before the T0 anchor capture so filesystem I/O does not
+        // perturb the timing-critical window.
+        do {
+            try RecordingOutput.ensureDirectory(self.config.outputDirectory)
+        } catch {
+            self.logger.error("Output directory unavailable: \(self.config.outputDirectory.path) — \(error)")
+            throw RecordingError.outputDirectoryUnavailable(error)
+        }
+
         // 3. The single T0 epoch (AC-7). Captured ONCE, here, before anything else runs.
         let anchor = HostTimeAnchor.now()
         let stage = self.makeStage(startPlan: startPlan, sessionT0: anchor.anchorTime) // 4.

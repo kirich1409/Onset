@@ -127,6 +127,11 @@ final class RecordingCoordinator {
     /// AC-9 warning. Computed from `RecordingResult.degradedWarning` on stop.
     private(set) var lastDegradedWarning = false
 
+    /// Non-nil when the most recent session had a hard write failure (e.g. disk full). Contains
+    /// the human-readable reason for the error alert. Distinct from `lastDegradedWarning` — a
+    /// write failure means the file was not saved cleanly. Reset on `start()` / `acknowledgeWriteError()`.
+    private(set) var lastWriteError: String?
+
     // MARK: - Dependencies (injected)
 
     /// Builds a `RecordingControlling` for a request. Live = `RecordingSession`; tests inject a fake.
@@ -247,6 +252,17 @@ final class RecordingCoordinator {
         self.phase = .main
     }
 
+    /// Clears `lastDegradedWarning` after the user has acknowledged the alert (AC-9). Called by
+    /// `MainView` on dismiss so the flag does not persist across subsequent recordings.
+    func acknowledgeDegradedWarning() {
+        self.lastDegradedWarning = false
+    }
+
+    /// Clears `lastWriteError` after the user has acknowledged the alert.
+    func acknowledgeWriteError() {
+        self.lastWriteError = nil
+    }
+
     // MARK: - Start (AC-3)
 
     /// Starts a recording for the given request. On success: hides the main window, opens the
@@ -280,6 +296,9 @@ final class RecordingCoordinator {
         self.recordingState = .normal
         self.drops = DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0)
         self.isStopping = false
+        // Reset per-session warning flags — structural invariant: every new session starts clean.
+        self.lastDegradedWarning = false
+        self.lastWriteError = nil
         self.phase = .recording
 
         self.startStateSubscription(session)
@@ -345,13 +364,18 @@ final class RecordingCoordinator {
         self.lastResult = result
         self.drops = result.drops
         self.lastDegradedWarning = result.degradedWarning
+        self.lastWriteError = result.writeFailureReason
         self.session = nil
         self.startedAt = nil
 
         // Transient finished phase, then return to the origin (spec lifecycle).
         self.phase = .finished
         self.revealInFinder(result.outputURLs)
-        if result.degradedWarning {
+        if let writeError = result.writeFailureReason {
+            coordinatorLogger.error(
+                "Recording finished with write failure — \(writeError)"
+            )
+        } else if result.degradedWarning {
             coordinatorLogger.notice(
                 "Recording finished with degraded warning — backpressureDrops=\(result.drops.encoderBackpressureDrops)"
             )

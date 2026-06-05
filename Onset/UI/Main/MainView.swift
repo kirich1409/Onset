@@ -46,6 +46,14 @@ struct MainView: View {
     /// Called when the user wants to return to onboarding.
     let onReturnToOnboarding: () -> Void
 
+    // MARK: - State
+
+    /// Drives the post-stop alert. Write-error supersedes degraded-warning: when both are set,
+    /// only the write-error alert fires (the file was not saved — higher severity).
+    /// Using `alert(item:)` with an enum enforces the priority ordering and avoids two
+    /// simultaneous `isPresented` bindings competing for the same presentation slot.
+    @State private var pendingAlert: PostStopAlert?
+
     // MARK: - Body
 
     var body: some View {
@@ -59,6 +67,67 @@ struct MainView: View {
         .frame(minWidth: Metrics.windowMinWidth, minHeight: Metrics.windowMinHeight)
         .task {
             await self.model.loadDevices()
+        }
+        // Post-stop alerts: surface on re-appear or on async flag changes.
+        // `.onAppear` covers the case where the flag is already set when the main window
+        // re-mounts (stop() sets the flag before opening the main window). `.onChange`
+        // covers any later asynchronous transition.
+        // Write-error supersedes degraded-warning (both can be true simultaneously when
+        // the writer fails under heavy backpressure). Priority is enforced in `resolvedAlert`.
+        .onAppear {
+            self.pendingAlert = self.resolvedAlert()
+        }
+        .onChange(of: self.model.coordinator.lastWriteError) { _, _ in
+            if let alert = self.resolvedAlert() {
+                self.pendingAlert = alert
+            }
+        }
+        .onChange(of: self.model.coordinator.lastDegradedWarning) { _, newValue in
+            if newValue, self.pendingAlert == nil {
+                self.pendingAlert = self.resolvedAlert()
+            }
+        }
+        .alert(item: self.$pendingAlert) { alert in
+            self.makeAlert(for: alert)
+        }
+    }
+
+    // MARK: - Alert resolution
+
+    /// Returns the highest-priority pending alert, or `nil` when no alert is due.
+    /// Write-error supersedes degraded-warning when both flags are set simultaneously.
+    private func resolvedAlert() -> PostStopAlert? {
+        PostStopAlert.resolve(
+            writeError: self.model.coordinator.lastWriteError,
+            degraded: self.model.coordinator.lastDegradedWarning
+        )
+    }
+
+    /// Builds the `Alert` for a given `PostStopAlert` case.
+    private func makeAlert(for alert: PostStopAlert) -> Alert {
+        switch alert {
+        case let .writeError(reason):
+            Alert(
+                title: Text("Не удалось сохранить запись"),
+                message: Text(reason),
+                dismissButton: .default(Text("ОК")) {
+                    self.model.coordinator.acknowledgeWriteError()
+                    self.pendingAlert = nil
+                }
+            )
+
+        case .degradedWarning:
+            Alert(
+                title: Text("Запись завершена с ошибками"),
+                message: Text(
+                    "Во время записи были пропущены кадры из-за перегрузки диска." +
+                        " Видеофайл может содержать пропуски."
+                ),
+                dismissButton: .default(Text("ОК")) {
+                    self.model.coordinator.acknowledgeDegradedWarning()
+                    self.pendingAlert = nil
+                }
+            )
         }
     }
 
@@ -219,5 +288,39 @@ struct CameraPreviewRepresentable: NSViewRepresentable {
     func updateNSView(_ nsView: CameraPreviewView, context: Context) {
         // No-op: CameraPreviewView wires the layer in init.
         // Caller must use .id() to force recreation when sessionHandle changes.
+    }
+}
+
+// MARK: - PostStopAlert
+
+/// Which post-stop alert `MainView` presents after a recording ends.
+///
+/// `writeError` carries the localized reason for the message body.
+/// Priority ordering is enforced by `resolve(writeError:degraded:)`: write-error supersedes
+/// degraded-warning because a failed write means the file was not saved (higher severity).
+enum PostStopAlert: Identifiable {
+    case writeError(reason: String)
+    case degradedWarning
+
+    var id: String {
+        switch self {
+        case .writeError: "writeError"
+        case .degradedWarning: "degradedWarning"
+        }
+    }
+
+    /// Returns the highest-priority alert given the coordinator state, or `nil` when no alert is due.
+    ///
+    /// Priority: `.writeError` > `.degradedWarning` > `nil`.
+    /// Both flags can be simultaneously true when the writer fails under heavy backpressure;
+    /// only the higher-severity alert is shown to avoid competing presentation slots.
+    nonisolated static func resolve(writeError: String?, degraded: Bool) -> Self? {
+        if let reason = writeError {
+            return .writeError(reason: reason)
+        }
+        if degraded {
+            return .degradedWarning
+        }
+        return nil
     }
 }

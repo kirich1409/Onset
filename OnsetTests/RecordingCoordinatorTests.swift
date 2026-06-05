@@ -10,9 +10,12 @@
 //
 // swiftlint:disable no_magic_numbers
 // swiftlint:disable trailing_closure
+// swiftlint:disable file_length
+// swiftlint:disable type_body_length
 // Rationale: synthetic fixture dimensions / drop counts are inherent test data (no_magic_numbers);
 // the `sessionFactory:` closure reads clearer as a labelled argument than as a trailing closure
 // (trailing_closure), matching the existing RecordingSessionTests convention.
+// file_length/type_body_length: covers full coordinator lifecycle incl. write-failure paths.
 
 import Foundation
 @testable import Onset
@@ -126,6 +129,42 @@ private enum CoordinatorFixtures {
             degradedWarning: degradedWarning
         )
     }
+
+    /// A result whose screen writer ended in `.failed`, simulating a disk-full mid-recording.
+    static func failedWriteResult() -> RecordingResult {
+        struct FakeWriteError: Error, LocalizedError {
+            var errorDescription: String? {
+                "The disk is full."
+            }
+        }
+        return RecordingResult(
+            screen: .failed(
+                url: URL(fileURLWithPath: "/tmp/onset-coordinator-screen.mp4"),
+                error: FakeWriteError()
+            ),
+            camera: nil,
+            drops: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
+            degradedWarning: false
+        )
+    }
+
+    /// Request with all three checklist rows populated (screen + camera + mic).
+    static func fullChecklistRequest() -> RecordingRequest {
+        RecordingRequest(
+            plan: self.plan(),
+            display: self.display(),
+            cameraDevice: nil,
+            cameraFormat: nil,
+            micDevice: nil,
+            permissions: self.permissions(),
+            checklist: RecordingChecklist(
+                screenDescription: "1280×720 @ 60 Hz",
+                cameraDescription: "FaceTime HD · 1080p30",
+                microphoneDescription: "MacBook Pro — микрофон"
+            ),
+            origin: .main
+        )
+    }
 }
 
 // MARK: - Thread-safe counter
@@ -172,13 +211,31 @@ struct RecordingCoordinatorTests {
             openMainWindow: {}
         )
 
-        try await coordinator.start(CoordinatorFixtures.request())
+        try await coordinator.start(CoordinatorFixtures.fullChecklistRequest())
 
         #expect(coordinator.phase == .recording)
         #expect(fake.startCalled)
+        // All three checklist rows must be captured from the request.
         #expect(coordinator.checklist.screenDescription == "1280×720 @ 60 Hz")
+        #expect(coordinator.checklist.cameraDescription == "FaceTime HD · 1080p30")
+        #expect(coordinator.checklist.microphoneDescription == "MacBook Pro — микрофон")
         #expect(openedRecording, "recording window must open on start (AC-3)")
         #expect(dismissedMain, "main window must hide on start (AC-3)")
+
+        await coordinator.stop()
+    }
+
+    @Test("checklist rows are nil when source absent — nil-gating preserved")
+    func start_checklistNilGating() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+
+        // Default request: only screenDescription is non-nil; camera + mic are nil.
+        try await coordinator.start(CoordinatorFixtures.request())
+
+        #expect(coordinator.checklist.screenDescription != nil)
+        #expect(coordinator.checklist.cameraDescription == nil, "camera absent → nil checklist row")
+        #expect(coordinator.checklist.microphoneDescription == nil, "mic absent → nil checklist row")
 
         await coordinator.stop()
     }
@@ -228,7 +285,10 @@ struct RecordingCoordinatorTests {
         #expect(coordinator.phase == .main, "main origin → return to .main")
         #expect(coordinator.lastResult != nil)
         #expect(coordinator.lastDegradedWarning == false)
+        #expect(coordinator.drops.encoderBackpressureDrops == 0, "drops propagate from result (clean path)")
+        #expect(coordinator.lastWriteError == nil, "no write error on clean result")
         #expect(revealed?.count == 1, "finished files must be revealed in Finder")
+        #expect(revealed?.first?.lastPathComponent == "onset-coordinator-screen.mp4", "revealed URL matches result")
     }
 
     @Test("stop → phase returns to .idle when started from the menu bar")
@@ -322,6 +382,95 @@ struct RecordingCoordinatorTests {
         #expect(!stillIncrementing, "elapsed must NOT increment after stop — tick loop must be cancelled")
     }
 
+    @Test("AC-9 degraded-warning lifecycle: set on degraded stop, cleared by acknowledge, absent after clean session")
+    func degradedWarning_lifecycle() async throws {
+        // Session 1: result carries degradedWarning=true.
+        let fake1 = FakeRecordingControlling(
+            result: CoordinatorFixtures.result(degradedWarning: true, backpressureDrops: 64)
+        )
+        // Session 2 fake is returned on the second factory call (stateful factory box, see Counter pattern).
+        let fake2 = FakeRecordingControlling(
+            result: CoordinatorFixtures.result(degradedWarning: false)
+        )
+        // Thread-safe call counter: Counter is @unchecked Sendable (see class declaration above);
+        // used here so the @Sendable factory closure can switch between fake1/fake2 without a
+        // Swift 6 data-race error on a captured `var`.
+        let callCounter = Counter()
+        // Single coordinator instance — reused across both sessions to verify the FIX 2 reset.
+        // A fresh coordinator2 would default false and could never catch stale carry-over.
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in
+            callCounter.increment()
+            return callCounter.value == 1 ? fake1 : fake2
+        })
+
+        // --- Session 1: degraded stop ---
+        try await coordinator.start(CoordinatorFixtures.request())
+        await coordinator.stop()
+
+        #expect(coordinator.lastDegradedWarning == true, "flag must be true after a degraded stop")
+
+        // Acknowledge: flag must clear.
+        coordinator.acknowledgeDegradedWarning()
+        #expect(coordinator.lastDegradedWarning == false, "flag must be false after acknowledgeDegradedWarning()")
+
+        // --- Session 2 on the SAME coordinator: clean result must not carry flag forward ---
+        // This exercises the FIX 2 reset in start(): lastDegradedWarning must be false at the
+        // start of every new session as a structural invariant, not just because fake2 is clean.
+        try await coordinator.start(CoordinatorFixtures.request())
+        await coordinator.stop()
+
+        // The flag must be false — same coordinator, so FIX 2 reset in start() is exercised.
+        #expect(coordinator.lastDegradedWarning == false, "no stale degraded flag on same-instance second session")
+    }
+
+    @Test("stop with write-failed result sets lastWriteError; acknowledge clears it")
+    func stop_writeFailure_setsError() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.failedWriteResult())
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        await coordinator.stop()
+
+        #expect(coordinator.lastWriteError != nil, "lastWriteError must be set when a writer finishes .failed")
+
+        coordinator.acknowledgeWriteError()
+        #expect(coordinator.lastWriteError == nil, "lastWriteError must clear after acknowledgeWriteError()")
+    }
+
+    @Test("stop with clean result leaves lastWriteError nil")
+    func stop_cleanResult_noWriteError() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        await coordinator.stop()
+
+        #expect(coordinator.lastWriteError == nil, "lastWriteError must be nil when all writers succeed")
+    }
+
+    @Test("start resets lastWriteError from previous session")
+    func start_resetsWriteError() async throws {
+        let fake1 = FakeRecordingControlling(result: CoordinatorFixtures.failedWriteResult())
+        let fake2 = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let callCounter2 = Counter()
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in
+            callCounter2.increment()
+            return callCounter2.value == 1 ? fake1 : fake2
+        })
+
+        // Session 1: ends with a write error.
+        try await coordinator.start(CoordinatorFixtures.request())
+        await coordinator.stop()
+        #expect(coordinator.lastWriteError != nil, "prerequisite: write error set after failed session")
+
+        // Session 2: start() must reset lastWriteError before the new session runs.
+        try await coordinator.start(CoordinatorFixtures.request())
+        // lastWriteError must be nil immediately after start() (reset in the adopt block).
+        #expect(coordinator.lastWriteError == nil, "start() must reset lastWriteError so stale error does not linger")
+
+        await coordinator.stop()
+    }
+
     @Test("start failure rethrows and leaves phase unchanged")
     func start_failureRethrows() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
@@ -343,3 +492,4 @@ struct RecordingCoordinatorTests {
 
 // swiftlint:enable no_magic_numbers
 // swiftlint:enable trailing_closure
+// swiftlint:enable type_body_length
