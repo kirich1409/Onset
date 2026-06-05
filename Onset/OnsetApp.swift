@@ -24,6 +24,14 @@ nonisolated private let appLogger = Logger(
 nonisolated private let isRunningUnderXCTest =
     ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
+// MARK: - Window IDs
+
+/// Stable scene identifiers used by `openWindow` / `dismissWindow`.
+private enum WindowID {
+    static let main = "onboarding"
+    static let recording = "recording"
+}
+
 // MARK: - OnsetApp
 
 @main
@@ -33,6 +41,8 @@ struct OnsetApp: App {
     private enum WindowDefaults {
         static let width: CGFloat = 460
         static let height: CGFloat = 560
+        static let recordingWidth: CGFloat = 370
+        static let recordingHeight: CGFloat = 420
     }
 
     // MARK: - Composition root
@@ -51,8 +61,12 @@ struct OnsetApp: App {
         relauncher: AppRelauncher()
     )
 
+    /// The single recording-lifecycle owner, shared by all recording-aware surfaces (#36/#37/#38).
+    /// Window actions are wired into it from `WindowActionsBridge` once the env actions exist.
+    @State private var coordinator = RecordingCoordinator()
+
     var body: some Scene {
-        Window("Onset", id: "onboarding") {
+        Window("Onset", id: WindowID.main) {
             // Under XCTest the window is empty (no RootView, no onboarding flow, no
             // PermissionsService UI lifecycle). This prevents multiple app instances from
             // accumulating across test runs and popping competing onboarding windows that
@@ -67,13 +81,160 @@ struct OnsetApp: App {
             } else {
                 RootView(
                     permissionsService: self.permissionsService,
+                    coordinator: self.coordinator,
                     hasPostScreenGrantArg: CommandLine.arguments.contains(AppRelauncher.postScreenGrantArg)
                 )
+                // Capture the env window actions into the coordinator (a plain class cannot read
+                // @Environment(\.openWindow) itself).
+                .background(WindowActionsBridge(coordinator: self.coordinator))
             }
         }
         // Fixed-size window that wraps the content — prevents user resizing.
         .windowResizability(.contentSize)
         .defaultSize(width: WindowDefaults.width, height: WindowDefaults.height)
+        // Explicitly open the main window at launch; a regular app focuses it automatically.
+        .defaultLaunchBehavior(.presented)
+
+        // The recording window (#37). Phase 0 renders a minimal placeholder; the real RecordingView
+        // lands in Phase 2. Suppressed under XCTest for the same reason as the main window.
+        Window("Onset — запись", id: WindowID.recording) {
+            if isRunningUnderXCTest {
+                EmptyView()
+            } else {
+                RecordingWindowPlaceholder(coordinator: self.coordinator)
+            }
+        }
+        .windowResizability(.contentSize)
+        .defaultSize(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
+        // Do NOT auto-open at launch — only the main window presents on launch; the recording window
+        // opens on Record (AC-3). Without this the second Window scene would also pop at startup.
+        .defaultLaunchBehavior(.suppressed)
+
+        // Menu bar item (#38 foundation). Phase 0 ships a minimal but functional menu so the app is
+        // usable as a menu-bar app; the full Idle / Recording / Degraded states land in #38.
+        // Suppressed under XCTest so test hosts do not accumulate competing status items.
+        MenuBarExtra(isInserted: .constant(!isRunningUnderXCTest)) {
+            MenuBarContent(coordinator: self.coordinator)
+        } label: {
+            // Minimal reactive label: ● while recording, ○ at rest.
+            Image(systemName: self.coordinator.phase == .recording ? "record.circle.fill" : "circle")
+        }
+    }
+}
+
+// MARK: - WindowActionsBridge
+
+/// Invisible helper that reads the SwiftUI environment window actions and installs them as closures
+/// on the coordinator. A plain `@Observable` class cannot read `@Environment(\.openWindow)`; this
+/// bridge runs inside a `View` where the actions exist and forwards them once on appear.
+private struct WindowActionsBridge: View {
+    let coordinator: RecordingCoordinator
+
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.dismissWindow) private var dismissWindow
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+            .onAppear {
+                self.coordinator.bindWindowActions(
+                    openRecordingWindow: {
+                        self.openWindow(id: WindowID.recording)
+                        AppActivation.bringToFront()
+                    },
+                    dismissMainWindow: { self.dismissWindow(id: WindowID.main) },
+                    dismissRecordingWindow: { self.dismissWindow(id: WindowID.recording) },
+                    openMainWindow: {
+                        self.openWindow(id: WindowID.main)
+                        AppActivation.bringToFront()
+                    }
+                )
+                self.coordinator.enterMain()
+            }
+    }
+}
+
+// MARK: - RecordingWindowPlaceholder
+
+/// **Phase-2 placeholder.** A minimal stand-in for the real `RecordingView` (#37), wired only to
+/// read the coordinator's live `phase` / `elapsed` so the scene + window choreography can be
+/// verified in Phase 0. Replace entirely when landing #37.
+private struct RecordingWindowPlaceholder: View {
+    private enum Metrics {
+        static let spacing: CGFloat = 12
+        static let padding: CGFloat = 24
+    }
+
+    let coordinator: RecordingCoordinator
+
+    var body: some View {
+        VStack(spacing: Metrics.spacing) {
+            Text(self.coordinator.phase == .recording ? "● ИДЁТ ЗАПИСЬ" : "Запись не идёт")
+                .font(.headline)
+            Text(ElapsedFormatter.string(from: self.coordinator.elapsed))
+                .font(.system(.largeTitle, design: .monospaced))
+            Text("Заглушка окна записи — реализация в #37")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(Metrics.padding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+// MARK: - ElapsedFormatter
+
+/// Formats whole seconds as `mm:ss`.
+///
+/// Avoids `String(format:)`, whose variadic initializer trips `SWIFT_STRICT_MEMORY_SAFETY` (the
+/// project enables strict memory safety). Pads each component to two digits manually.
+private enum ElapsedFormatter {
+    private static let secondsPerMinute = 60
+    private static let twoDigitThreshold = 10
+
+    static func string(from seconds: Int) -> String {
+        let minutes = seconds / self.secondsPerMinute
+        let remainder = seconds % self.secondsPerMinute
+        return "\(self.padded(minutes)):\(self.padded(remainder))"
+    }
+
+    private static func padded(_ value: Int) -> String {
+        value < self.twoDigitThreshold ? "0\(value)" : "\(value)"
+    }
+}
+
+// MARK: - MenuBarContent
+
+/// **Minimal menu (#38 foundation).** A functional menu so the app is usable as a menu-bar app:
+/// open the main window, and quit. The full Idle / Recording / Degraded menus land in #38.
+private struct MenuBarContent: View {
+    let coordinator: RecordingCoordinator
+
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Открыть Onset") {
+            self.openWindow(id: WindowID.main)
+            AppActivation.bringToFront()
+        }
+        Divider()
+        Button("Выход") {
+            NSApplication.shared.terminate(nil)
+        }
+    }
+}
+
+// MARK: - AppActivation
+
+/// Brings the app to the front when a window is reopened from the menu bar.
+///
+/// `NSApp.activate()` suffices for a regular app — no activation-policy switching needed.
+/// Skipped under XCTest: test hosts must not steal focus.
+private enum AppActivation {
+    static func bringToFront() {
+        guard !isRunningUnderXCTest else { return }
+        NSApp.activate()
     }
 }
 
@@ -89,6 +250,7 @@ struct RootView: View {
     // MARK: - Dependencies
 
     let permissionsService: PermissionsService
+    let coordinator: RecordingCoordinator
 
     // MARK: - Transient routing state
 
@@ -105,9 +267,12 @@ struct RootView: View {
     /// `allGranted` is false. Reset when `allGranted` becomes `true` (no bypass needed).
     @State private var bypassToMain = false
 
-    // MARK: - View-owned VM for onboarding
+    // MARK: - View-owned VMs
 
     @State private var onboardingViewModel: OnboardingViewModel
+
+    /// The main screen view model, created once and owned for the lifetime of `RootView`.
+    @State private var mainViewModel: MainViewModel
 
     // MARK: - Environment
 
@@ -115,10 +280,19 @@ struct RootView: View {
 
     // MARK: - Init
 
-    init(permissionsService: PermissionsService, hasPostScreenGrantArg: Bool) {
+    init(
+        permissionsService: PermissionsService,
+        coordinator: RecordingCoordinator,
+        hasPostScreenGrantArg: Bool
+    ) {
         self.permissionsService = permissionsService
+        self.coordinator = coordinator
         _hasPostScreenGrantArg = State(initialValue: hasPostScreenGrantArg)
         _onboardingViewModel = State(initialValue: OnboardingViewModel(permissions: permissionsService))
+        _mainViewModel = State(initialValue: MainViewModel(
+            permissions: permissionsService,
+            coordinator: coordinator
+        ))
     }
 
     // MARK: - Body
@@ -155,7 +329,7 @@ struct RootView: View {
                 }
 
             case .main:
-                MainView(effectivePermissions: self.permissionsService.effectivePermissions) {
+                MainView(model: self.mainViewModel) {
                     // Clear the bypass so AppRouter re-evaluates to .onboarding.
                     // This is the escape hatch from the "no permissions" blocked state
                     // that appears when the user tapped «Позже» at 0/3 (AC-7 graceful path).

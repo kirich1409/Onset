@@ -835,6 +835,98 @@ private struct SampleProbeOK {
     }
 }
 
+// MARK: - UI state surface (#36/#37 — recordingStateStream + currentDrops)
+
+@Suite("RecordingSession — UI state surface (#36/#37)")
+struct RecordingSessionStateSurfaceTests {
+    @Test("recordingStateStream forwards a .degraded transition from the monitor")
+    func stateStream_forwardsDegradedTransition() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        // Subscribe BEFORE start — the stream + continuation exist from init, the forwarding task
+        // is spun in start(). The coordinator is the single consumer; here the test is that consumer.
+        let received = Task { () -> RecordingState? in
+            for await state in session.recordingStateStream {
+                return state // first transition only
+            }
+            return nil
+        }
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.screenWriter.startSourceTime != nil }
+
+        // Emit enough backpressure drops to cross the degraded threshold for the configured window.
+        // mvpDefault threshold is small; emit a burst at the same instant so the window trips.
+        let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
+        let burst = RecordingConfiguration.mvpDefault.degradedBackpressureThreshold + 1
+        encoders.screenEncoder.emitDrop(
+            DropEvent(reason: .encoderBackpressureDrops, count: burst, detectedAt: dropPts)
+        )
+
+        let first = await received.value
+        #expect(first == .degraded, "the first forwarded transition must be .degraded")
+
+        _ = await session.stop()
+    }
+
+    @Test("currentDrops() reflects the monitor's snapshot")
+    func currentDrops_reflectsSnapshot() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        // Before start, no monitor exists → zero counters.
+        let beforeStart = await session.currentDrops()
+        #expect(beforeStart.encoderBackpressureDrops == 0, "zero before start (no monitor yet)")
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.screenWriter.startSourceTime != nil }
+
+        let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
+        encoders.screenEncoder.emitDrop(DropEvent(reason: .encoderBackpressureDrops, count: 3, detectedAt: dropPts))
+
+        // Poll currentDrops() until the asynchronously-ingested drop is reflected.
+        let reflected = await eventually {
+            await session.currentDrops().encoderBackpressureDrops == 3
+        }
+        #expect(reflected, "currentDrops() must reflect the monitor snapshot (3 backpressure drops)")
+
+        _ = await session.stop()
+    }
+
+    @Test("recordingStateStream finishes after stop()")
+    func stateStream_finishesAfterStop() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.screenWriter.startSourceTime != nil }
+
+        // Consume the stream to completion on a background task; it must terminate after stop().
+        let drained = Task { () -> Bool in
+            for await _ in session.recordingStateStream {}
+            return true // returns only when the stream finishes
+        }
+
+        _ = await session.stop()
+
+        let finished = await drained.value
+        #expect(finished, "recordingStateStream must finish after stop() so the consumer's loop ends")
+    }
+}
+
 // MARK: - L5 gated integration
 
 /// Returns `true` when the L5 live recording test should run (real screen+camera+mic, hardware).
