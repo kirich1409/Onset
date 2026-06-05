@@ -150,14 +150,13 @@ final class MainViewModel {
 
     // MARK: - AC-2 computed properties
 
-    /// True when at least one video source is effectively selected and enabled.
+    /// True when a valid recordable video source is selected.
     ///
-    /// Screen counts only when `screenEnabled` and a display is selected.
-    /// Camera counts when a camera is selected (regardless of `screenEnabled`).
+    /// MVP constraint: `RecordingRequest.display` is non-optional, so screen recording must
+    /// be enabled with a selected display. Camera-only (screen OFF) cannot be recorded yet —
+    /// it does not count as a video source. Follow-up for `swift-engineer`: add camera-only path.
     var hasVideoSource: Bool {
-        let screenSelected = self.screenEnabled && self.selectedDisplayID != nil
-        let cameraSelected = self.selectedCameraID != nil
-        return screenSelected || cameraSelected
+        self.screenEnabled && self.selectedDisplayID != nil
     }
 
     /// AC-2(b): mic is available (authorized) but the user has not selected any microphone.

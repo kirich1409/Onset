@@ -151,17 +151,19 @@ struct MainViewModelTests {
         #expect(sut.canRecord) // no mic available, so AC-2c applies — can record
     }
 
-    @Test("Camera selected, no screen — hasVideoSource true via camera (AC-2a)")
-    func cameraSelected_hasVideoSource() async {
+    @Test("Camera selected, screen OFF — hasVideoSource false (MVP: display required)")
+    func cameraOnly_noVideoSource() async {
         let cam = Self.makeCamera()
-        // screen not authorized → screenEnabled=false; camera selected
+        // screen not authorized → screenEnabled=false; camera auto-selected
         let (sut, _) = self.makeSUT(screen: .notDetermined, microphone: .notDetermined, cameras: [cam])
         await sut.loadDevices()
 
+        // MVP: RecordingRequest.display is non-optional; camera-only path not yet supported.
+        // hasVideoSource requires screenEnabled + selectedDisplayID != nil.
         #expect(!sut.screenEnabled)
         #expect(sut.selectedCameraID != nil)
-        #expect(sut.hasVideoSource)
-        #expect(sut.canRecord) // no mic available → AC-2c → can record
+        #expect(!sut.hasVideoSource)
+        #expect(!sut.canRecord)
     }
 
     // MARK: - AC-2(b): Mic available but not selected → disabled

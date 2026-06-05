@@ -42,18 +42,13 @@ extension MainViewModel {
     }
 
     /// Resolves and validates the selected display. Returns `nil` if an error was set.
+    ///
+    /// `hasVideoSource` already requires `screenEnabled && selectedDisplayID != nil`, so this
+    /// guard is a defensive backstop — reached only if state mutates between `canRecord` check
+    /// and this call.
     func validateDisplaySelection() -> Display? {
         guard let display = self.selectedDisplay else {
-            if self.screenEnabled {
-                self.recordError = "Выберите дисплей для записи экрана"
-            } else {
-                // Camera-only path is not yet supported at the service layer
-                self.recordError =
-                    "Запись только с камеры пока не поддерживается. Включите запись экрана."
-                mainViewModelLogger.info(
-                    "Camera-only recording requested — not yet supported (service-layer gap)"
-                )
-            }
+            self.recordError = "Выберите дисплей для записи экрана"
             return nil
         }
         return display
