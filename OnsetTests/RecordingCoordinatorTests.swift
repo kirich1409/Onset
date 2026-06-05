@@ -488,6 +488,37 @@ struct RecordingCoordinatorTests {
         #expect(threw, "start() must rethrow the RecordingError for the UI to surface (AC-6/AC-11)")
         #expect(coordinator.phase == .main, "phase must be unchanged after a failed start")
     }
+
+    // MARK: - menuBarRecordIntent seam (#38)
+
+    @Test("menuBarRecordIntent seam — installed closure is invoked")
+    func menuBarRecordIntent_installedClosureRuns() {
+        // Verifies that the coordinator stores and dispatches the intent closure exactly as set.
+        // This is the seam wiring test: MainView installs the closure; this proves it fires.
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in
+            FakeRecordingControlling(result: CoordinatorFixtures.result())
+        })
+
+        var ran = false
+        coordinator.menuBarRecordIntent = { ran = true }
+        coordinator.menuBarRecordIntent?()
+
+        #expect(ran, "intent closure must be invoked when menuBarRecordIntent?() is called")
+    }
+
+    @Test("menuBarRecordIntent seam — nil intent is a no-op (menu bar fallback path)")
+    func menuBarRecordIntent_nilIsNoOp() {
+        // When no main window is mounted, intent is nil and the menu bar falls back to
+        // openWindow. This test proves the coordinator does not crash on nil intent.
+        // The SwiftUI Button else-branch (openWindow) has no unit-test seam — L5 only.
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in
+            FakeRecordingControlling(result: CoordinatorFixtures.result())
+        })
+
+        // intent is nil by default; optional-call must be a no-op without crashing.
+        coordinator.menuBarRecordIntent?()
+        #expect(coordinator.menuBarRecordIntent == nil)
+    }
 }
 
 // swiftlint:enable no_magic_numbers

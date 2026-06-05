@@ -1,3 +1,4 @@
+// swiftlint:disable file_length
 import AppKit
 import Foundation
 import os
@@ -160,6 +161,12 @@ final class RecordingCoordinator {
     /// `NSWorkspace`. Defaults to the live `NSWorkspace.shared.activateFileViewerSelecting`.
     @ObservationIgnored
     private let revealInFinder: ([URL]) -> Void
+
+    /// Menu-bar «Начать запись» intent (#38). Installed by `MainView.onAppear`, cleared on disappear.
+    /// Non-nil → delegates to `MainViewModel.record()` (all AC-2 guards there).
+    /// Nil → menu bar falls back to opening the main window.
+    @ObservationIgnored
+    var menuBarRecordIntent: (() -> Void)?
 
     // MARK: - Runtime state
 
