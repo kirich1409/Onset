@@ -117,7 +117,8 @@ nonisolated struct StageRateAggregator {
         self.vtErr += 1
     }
 
-    /// Counts a slot emitted on `encodedSamples` (from the VT output callback).
+    /// Counts a slot emitted on `encodedSamples` (counted at successful `encodeFrame` submission,
+    /// actor-isolated; not from the VT output callback).
     mutating func recordEmit() {
         self.emitCount += 1
     }
@@ -161,6 +162,14 @@ nonisolated struct StageRateAggregator {
         let durationMs = (nowSeconds - self.episodeStartSeconds) * 1000
         self.notReadyTotalMs += max(0, durationMs)
         self.notReadyEpisodes += 1
+    }
+
+    // MARK: - Test accessors
+
+    /// The raw hold-frame count accumulated since the last flush.
+    /// Exposed for L2 tests that verify clock-driven holds are counted.
+    var holdsCount: Int {
+        self.holds
     }
 
     // MARK: - Flush

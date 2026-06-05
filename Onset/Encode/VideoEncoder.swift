@@ -266,6 +266,12 @@ actor VideoEncoder {
         self.encoderBackpressureDrops
     }
 
+    /// Aggregator-tracked hold count for the current telemetry window.
+    /// Used by L2 tests to verify clock-driven holds are counted.
+    var aggregatorHoldsCount: Int {
+        self.aggregator.holdsCount
+    }
+
     /// Whether the active session uses a hardware encoder (false when not started).
     /// Drives the L5 HW assertion.
     var isUsingHardwareEncoder: Bool {
@@ -520,6 +526,7 @@ actor VideoEncoder {
             let pts = self.anchoredPTS(slotIndex: slot.slotIndex)
             // swiftlint:disable:next force_unwrapping
             self.submit(pixelBuffer: self.lastPixelBuffer!, slotIndex: slot.slotIndex, detectedAt: pts)
+            self.aggregator.recordHold()
         }
     }
 

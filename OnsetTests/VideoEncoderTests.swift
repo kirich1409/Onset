@@ -357,6 +357,33 @@ struct VideoEncoderTests {
         #expect(mock.encodedBuffers.count == 1 + testFps + 1)
     }
 
+    @Test("clockTick(nowSeconds:) catch-up batch → aggregator holds count equals emitted hold count")
+    func clockTick_holdsCounted_inAggregator() async throws {
+        // Verify that clock-driven holds are recorded in the aggregator (telemetry invariant:
+        // emit_rate = enc_real + holds must hold regardless of whether holds come from ingest
+        // catch-up or from the clock directly).
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        try await encoder.start()
+
+        // Ingest slot 0 so the clock has a lastPixelBuffer to re-submit.
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let grace = 0.005
+        // Place now far enough ahead to make slots 1..3 all eligible (cap not hit).
+        // Eligibility boundary for slot N = anchor + (N + 0.5)/fps + grace.
+        // nowForSlot3 puts all three slots past their boundary.
+        let nowForSlot3 = anchorSeconds + 3.5 / Double(testFps) + grace + 0.001
+        await encoder.clockTick(nowSeconds: nowForSlot3)
+
+        // Three holds emitted (slots 1, 2, 3).
+        #expect(mock.encodedBuffers.count == 1 + 3)
+        // The aggregator must have counted exactly 3 clock-driven holds.
+        #expect(await encoder.aggregatorHoldsCount == 3)
+    }
+
     @Test("clockTick is a no-op before any frame has been ingested")
     func clockTick_noOpBeforeFirstFrame() async throws {
         let anchor = makeFixedAnchor()
