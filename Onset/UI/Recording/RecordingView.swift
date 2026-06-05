@@ -245,7 +245,7 @@ struct RecordingContentView: View {
 /// Pure static mappers from recording state to display values.
 ///
 /// Extracted here so they can be tested directly without rendering a SwiftUI view.
-enum RecordingDisplayMapper {
+nonisolated enum RecordingDisplayMapper {
     // MARK: Status row
 
     /// The status label text.

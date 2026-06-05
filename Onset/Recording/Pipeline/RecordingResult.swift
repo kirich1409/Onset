@@ -48,9 +48,27 @@ extension RecordingResult {
         }
         return urls
     }
+
+    /// `true` when at least one writer finished as `.failed` (e.g. disk full mid-recording).
+    ///
+    /// A write failure produces a corrupt or empty file. This flag gates a distinct user-facing
+    /// error alert that is separate from — and supersedes — the degraded-drops warning (AC-9),
+    /// because the user must know the file was NOT saved cleanly.
+    nonisolated var hasWriteFailure: Bool {
+        self.screen?.failureError != nil || self.camera?.failureError != nil
+    }
+
+    /// A human-readable description of the write failure(s), joining screen and camera reasons
+    /// with a newline when both failed. `nil` when `hasWriteFailure` is `false`.
+    nonisolated var writeFailureReason: String? {
+        guard self.hasWriteFailure else { return nil }
+        let reasons = [self.screen?.failureError, self.camera?.failureError]
+            .compactMap { $0?.localizedDescription }
+        return reasons.joined(separator: "\n")
+    }
 }
 
-// MARK: - FinishResult URL accessor
+// MARK: - FinishResult accessors
 
 extension FinishResult {
     /// The output file URL, available in every terminal case (the path is reserved regardless
@@ -62,5 +80,11 @@ extension FinishResult {
              let .failed(url, _):
             url
         }
+    }
+
+    /// The write error when this result is `.failed`; `nil` for `.completed` and `.cancelled`.
+    nonisolated var failureError: (any Error)? {
+        guard case let .failed(_, error) = self else { return nil }
+        return error
     }
 }

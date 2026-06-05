@@ -4,7 +4,7 @@
 ///
 /// Avoids `String(format:)`, whose variadic initializer trips `SWIFT_STRICT_MEMORY_SAFETY` (the
 /// project enables strict memory safety). Pads each component to two digits manually.
-enum ElapsedFormatter {
+nonisolated enum ElapsedFormatter {
     private static let secondsPerMinute = 60
     private static let minutesPerHour = 60
     private static let secondsPerHour = secondsPerMinute * minutesPerHour

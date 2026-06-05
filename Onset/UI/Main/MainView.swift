@@ -48,9 +48,26 @@ struct MainView: View {
 
     // MARK: - State
 
-    /// Drives the AC-9 degraded-warning alert. Set when `coordinator.lastDegradedWarning`
-    /// becomes true (either via `.onChange` or on re-appear after stop).
-    @State private var showDegradedAlert = false
+    /// Drives the post-stop alert. Write-error supersedes degraded-warning: when both are set,
+    /// only the write-error alert fires (the file was not saved — higher severity).
+    /// Using `alert(item:)` with an enum enforces the priority ordering and avoids two
+    /// simultaneous `isPresented` bindings competing for the same presentation slot.
+    @State private var pendingAlert: PostStopAlert?
+
+    // MARK: - Alert model
+
+    /// Which post-stop alert to present. `writeError` carries the reason string for the message body.
+    private enum PostStopAlert: Identifiable {
+        case writeError(reason: String)
+        case degradedWarning
+
+        var id: String {
+            switch self {
+            case .writeError: "writeError"
+            case .degradedWarning: "degradedWarning"
+            }
+        }
+    }
 
     // MARK: - Body
 
@@ -66,27 +83,69 @@ struct MainView: View {
         .task {
             await self.model.loadDevices()
         }
-        // AC-9: surface degraded-recording warning on return to main window.
+        // Post-stop alerts: surface on re-appear or on async flag changes.
         // `.onAppear` covers the case where the flag is already set when the main window
         // re-mounts (stop() sets the flag before opening the main window). `.onChange`
         // covers any later asynchronous transition.
+        // Write-error supersedes degraded-warning (both can be true simultaneously when
+        // the writer fails under heavy backpressure). Priority is enforced in `resolvedAlert`.
         .onAppear {
-            if self.model.coordinator.lastDegradedWarning {
-                self.showDegradedAlert = true
+            self.pendingAlert = self.resolvedAlert()
+        }
+        .onChange(of: self.model.coordinator.lastWriteError) { _, _ in
+            if let alert = self.resolvedAlert() {
+                self.pendingAlert = alert
             }
         }
         .onChange(of: self.model.coordinator.lastDegradedWarning) { _, newValue in
-            if newValue {
-                self.showDegradedAlert = true
+            if newValue, self.pendingAlert == nil {
+                self.pendingAlert = self.resolvedAlert()
             }
         }
-        .alert("Запись завершена с ошибками", isPresented: self.$showDegradedAlert) {
-            Button("ОК") {
-                self.model.coordinator.acknowledgeDegradedWarning()
-                self.showDegradedAlert = false
-            }
-        } message: {
-            Text("Во время записи были пропущены кадры из-за перегрузки диска. Видеофайл может содержать пропуски.")
+        .alert(item: self.$pendingAlert) { alert in
+            self.makeAlert(for: alert)
+        }
+    }
+
+    // MARK: - Alert resolution
+
+    /// Returns the highest-priority pending alert, or `nil` when no alert is due.
+    /// Write-error supersedes degraded-warning when both flags are set simultaneously.
+    private func resolvedAlert() -> PostStopAlert? {
+        if let reason = self.model.coordinator.lastWriteError {
+            return .writeError(reason: reason)
+        }
+        if self.model.coordinator.lastDegradedWarning {
+            return .degradedWarning
+        }
+        return nil
+    }
+
+    /// Builds the `Alert` for a given `PostStopAlert` case.
+    private func makeAlert(for alert: PostStopAlert) -> Alert {
+        switch alert {
+        case let .writeError(reason):
+            Alert(
+                title: Text("Не удалось сохранить запись"),
+                message: Text(reason),
+                dismissButton: .default(Text("ОК")) {
+                    self.model.coordinator.acknowledgeWriteError()
+                    self.pendingAlert = nil
+                }
+            )
+
+        case .degradedWarning:
+            Alert(
+                title: Text("Запись завершена с ошибками"),
+                message: Text(
+                    "Во время записи были пропущены кадры из-за перегрузки диска." +
+                        " Видеофайл может содержать пропуски."
+                ),
+                dismissButton: .default(Text("ОК")) {
+                    self.model.coordinator.acknowledgeDegradedWarning()
+                    self.pendingAlert = nil
+                }
+            )
         }
     }
 
