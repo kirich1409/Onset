@@ -178,27 +178,53 @@ struct RecordingContentView: View {
     @ViewBuilder
     private var checklistSection: some View {
         if let screenDesc = self.checklist.screenDescription {
-            self.checklistRow(label: "Экран", value: screenDesc, isLive: self.sourceLiveness.screen)
+            self.checklistRow(
+                label: "Экран",
+                value: screenDesc,
+                isLive: self.sourceLiveness.screen,
+                gender: .masculine
+            )
         }
         if let cameraDesc = self.checklist.cameraDescription {
-            self.checklistRow(label: "Камера", value: cameraDesc, isLive: self.sourceLiveness.camera)
+            self.checklistRow(
+                label: "Камера",
+                value: cameraDesc,
+                isLive: self.sourceLiveness.camera,
+                gender: .feminine
+            )
         }
         if let micDesc = self.checklist.microphoneDescription {
-            self.checklistRow(label: "Микрофон", value: micDesc, isLive: self.sourceLiveness.microphone)
+            self.checklistRow(
+                label: "Микрофон",
+                value: micDesc,
+                isLive: self.sourceLiveness.microphone,
+                gender: .masculine
+            )
         }
     }
 
     @ViewBuilder
-    private func checklistRow(label: String, value: String, isLive: Bool) -> some View {
-        let rowLabel = "\(label) — \(isLive ? "активен" : "остановлен")"
+    private func checklistRow(
+        label: String,
+        value: String,
+        isLive: Bool,
+        gender: SourceGender
+    )
+    -> some View {
+        let rowLabel = RecordingDisplayMapper.checklistRowAccessibilityLabel(
+            label: label,
+            value: value,
+            isLive: isLive,
+            gender: gender
+        )
         HStack {
             Text(label)
                 .font(.system(size: Metrics.checklistLabelFontSize))
                 .foregroundStyle(.primary)
             Spacer()
-            Text(RecordingDisplayMapper.checklistRowValueText(value: value, isLive: isLive))
+            Text(RecordingDisplayMapper.checklistRowValueText(value: value, isLive: isLive, gender: gender))
                 .font(.system(size: Metrics.checklistLabelFontSize))
-                .foregroundStyle(RecordingDisplayMapper.checklistRowValueTextColor(isLive: isLive))
+                .foregroundStyle(.secondary)
             Image(systemName: RecordingDisplayMapper.checklistRowIcon(isLive: isLive))
                 .font(.system(size: Metrics.checklistCheckmarkFontSize, weight: .semibold))
                 .foregroundStyle(RecordingDisplayMapper.checklistRowIconColor(isLive: isLive))
@@ -251,6 +277,17 @@ struct RecordingContentView: View {
         .frame(maxWidth: .infinity)
         .multilineTextAlignment(.center)
     }
+}
+
+// MARK: - SourceGender
+
+/// Grammatical gender of a source label used to produce correct Russian state words.
+///
+/// Russian adjectives and short forms agree with the grammatical gender of the noun they modify.
+/// Экран and Микрофон are masculine; Камера is feminine.
+nonisolated enum SourceGender {
+    case masculine
+    case feminine
 }
 
 // MARK: - RecordingDisplayMapper
@@ -340,11 +377,6 @@ nonisolated enum RecordingDisplayMapper {
 
     // MARK: Checklist row liveness (#39 / AC-12)
 
-    /// Opacity applied to the value text color when a source is revoked.
-    ///
-    /// Dims `.secondary` to visually distinguish a stopped source from an active one.
-    static let revokedValueTextOpacity = 0.5
-
     /// SF Symbol name for the checklist row status icon.
     ///
     /// - Live: «checkmark» (green, source is recording).
@@ -361,20 +393,44 @@ nonisolated enum RecordingDisplayMapper {
         isLive ? .green : .red
     }
 
+    /// The Russian state word for a source, agreeing with its grammatical gender.
+    ///
+    /// - Live masculine: «активен» (Экран, Микрофон).
+    /// - Live feminine: «активна» (Камера).
+    /// - Revoked masculine: «остановлен».
+    /// - Revoked feminine: «остановлена».
+    static func stateWord(isLive: Bool, gender: SourceGender) -> String {
+        switch (isLive, gender) {
+        case (true, .masculine): "активен"
+        case (true, .feminine): "активна"
+        case (false, .masculine): "остановлен"
+        case (false, .feminine): "остановлена"
+        }
+    }
+
     /// Display text for the checklist row value.
     ///
     /// - Live: returns `value` unchanged.
-    /// - Revoked: appends «· остановлен» to signal the source stopped mid-recording.
-    static func checklistRowValueText(value: String, isLive: Bool) -> String {
-        isLive ? value : "\(value) · остановлен"
+    /// - Revoked: appends «· <state>» with the correct gendered form to signal the source stopped
+    ///   mid-recording (e.g. «MX Brio · 1920×1080 · остановлена» for a feminine source).
+    static func checklistRowValueText(value: String, isLive: Bool, gender: SourceGender) -> String {
+        isLive ? value : "\(value) · \(self.stateWord(isLive: false, gender: gender))"
     }
 
-    /// Foreground color of the checklist row value text.
+    /// Accessibility label for a checklist row that folds name, device value, and state into one
+    /// announcement so VoiceOver users hear which source is recording and in what state.
     ///
-    /// - Live: `.secondary` (full opacity).
-    /// - Revoked: `.secondary` dimmed by `revokedValueTextOpacity` (visually de-emphasised).
-    static func checklistRowValueTextColor(isLive: Bool) -> Color {
-        isLive ? .secondary : .secondary.opacity(self.revokedValueTextOpacity)
+    /// Format: «<label> — <value> — <state>», e.g. «Камера — MX Brio · 1920×1080 — активна».
+    ///
+    /// The raw `value` is used (not the visible suffixed text) to avoid duplicating the state word.
+    static func checklistRowAccessibilityLabel(
+        label: String,
+        value: String,
+        isLive: Bool,
+        gender: SourceGender
+    )
+    -> String {
+        "\(label) — \(value) — \(self.stateWord(isLive: isLive, gender: gender))"
     }
 }
 

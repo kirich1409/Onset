@@ -604,6 +604,45 @@ struct RecordingCoordinatorRevocationTests {
         #expect(coordinator.lastResult != nil, "lastResult must be set after auto-stop")
         #expect(fake.stopCalled, "fake.stop() must have been called")
     }
+
+    @Test("sourceLiveness resets to .allLive on the second recording start")
+    func sourceLiveness_resetsToAllLiveOnRestart() async throws {
+        // Two fakes so the second start() gets a fresh stream (the first fake's streams are
+        // finished by stop(), making it unusable for a second session — same two-fake pattern
+        // as degradedWarning_lifecycle).
+        let fake1 = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let fake2 = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let callCounter = Counter()
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in
+            callCounter.increment()
+            return callCounter.value == 1 ? fake1 : fake2
+        })
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+
+        // --- Session 1: revoke the camera source so sourceLiveness goes stale ---
+        try await coordinator.start(CoordinatorFixtures.request())
+        #expect(coordinator.sourceLiveness == .allLive, "prerequisite: starts fully live")
+
+        fake1.emitRevocation(.sourceRevoked(.camera))
+        let cameraRevoked = await eventuallyMain { coordinator.sourceLiveness.camera == false }
+        #expect(cameraRevoked, "prerequisite: camera must be marked revoked")
+
+        await coordinator.stop()
+
+        // --- Session 2 on the SAME coordinator: start() must reset sourceLiveness ---
+        try await coordinator.start(CoordinatorFixtures.request())
+        #expect(
+            coordinator.sourceLiveness == .allLive,
+            "sourceLiveness must reset to .allLive at the start of every new session (stale revoke must not carry over)"
+        )
+
+        await coordinator.stop()
+    }
 }
 
 // MARK: - Global hotkey toggle (#67 / AC-9 third stop path)
@@ -679,6 +718,34 @@ struct RecordingCoordinatorHotKeyTests {
 
         #expect(openWindowCounter.value == 1, "handleHotKey with no intent must open the main window")
         #expect(!fake.startCalled, "handleHotKey must NOT start a session when no intent is installed")
+    }
+
+    // MARK: - double-tap guard (isStopping memoization)
+
+    @Test("double handleHotKey while recording — stop() runs exactly once")
+    func handleHotKey_doubleTap_stopsExactlyOnce() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request(origin: .main))
+        #expect(coordinator.phase == .recording, "prerequisite: must be recording")
+
+        // Both calls are synchronous on @MainActor before any Task suspension.
+        // The first call flips isStopping=true (synchronous, before the first await in stop()),
+        // so the second call's guard (phase==.recording && !isStopping) fails and stop() is
+        // never enqueued a second time.
+        coordinator.handleHotKey()
+        coordinator.handleHotKey()
+
+        let stopped = await eventuallyMain { coordinator.phase == .main }
+        #expect(stopped, "coordinator must reach .main after double-tap")
+        #expect(fake.stopCount == 1, "stop() must be called exactly once despite two handleHotKey() calls")
     }
 }
 

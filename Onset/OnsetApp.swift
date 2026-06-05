@@ -171,8 +171,11 @@ private struct WindowActionsBridge: View {
                 // Belt-and-suspenders: the monitor is also never instantiated under XCTest
                 // because this bridge only mounts when isRunningUnderXCTest is false
                 // (the enclosing `Window` body shows EmptyView instead).
-                self.hotKeyMonitor.register {
-                    self.coordinator.handleHotKey()
+                // Capture only the coordinator (a reference type that does not point back
+                // to the monitor), breaking the bridge-struct → hotKeyMonitor cycle so
+                // the monitor's deinit/unregister teardown path remains reachable.
+                self.hotKeyMonitor.register { [coordinator = self.coordinator] in
+                    coordinator.handleHotKey()
                 }
             }
     }
