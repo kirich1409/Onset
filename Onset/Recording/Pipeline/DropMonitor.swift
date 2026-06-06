@@ -312,7 +312,7 @@ actor DropMonitor {
     }
 
     /// Test seam: evaluate the window at an explicit time, bypassing the real clock. Mirrors
-    /// `VideoEncoder.tick(slotIndex:)` — lets actor tests drive recovery deterministically.
+    /// `VideoEncoder.clockTick(nowSeconds:)` — lets actor tests drive recovery deterministically.
     func evaluate(nowSeconds: Double) {
         let degraded = self.window.evaluate(nowSeconds: nowSeconds)
         self.applyDegraded(degraded)

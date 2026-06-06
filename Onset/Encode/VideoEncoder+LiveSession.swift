@@ -42,7 +42,11 @@ nonisolated final class LiveCompressionSession: CompressionSession, @unchecked S
     /// recovers the sink from the refcon and yields any successfully compressed buffer.
     private static let outputCallback: VTCompressionOutputCallback = { refcon, _, status, infoFlags, sampleBuffer in
         // swiftformat:enable unusedArguments
-        guard let refcon = unsafe refcon else { return }
+        guard let refcon = unsafe refcon else {
+            // Nil refcon means the Unmanaged reference was lost — no sink to yield to.
+            LiveCompressionSession.logger.fault("VT output callback: nil refcon — encoder sink lost, frames dropped")
+            return
+        }
         // Recover the sink WITHOUT consuming a retain (passUnretained on the create side).
         let sink = unsafe Unmanaged<EncodedSampleSink>.fromOpaque(refcon).takeUnretainedValue()
         // F3: each failure branch is logged distinctly rather than a single silent `return`.

@@ -225,8 +225,8 @@ struct AllSetView: View {
 
         func checkScreenStatusNow() {}
     }
-#endif
 
-#Preview("All set") {
-    AllSetView(permissions: PreviewPermissionsServiceAllSet()) {}
-}
+    #Preview("All set") {
+        AllSetView(permissions: PreviewPermissionsServiceAllSet()) {}
+    }
+#endif

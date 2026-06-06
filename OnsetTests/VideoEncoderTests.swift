@@ -185,11 +185,16 @@ private func makeSampleBuffer(pts: CMTime) -> CMSampleBuffer? {
 }
 
 /// Convenience: build a `VideoEncoder` wired to a provided mock session.
+///
+/// - Parameter grace: Explicit grace window in seconds. Pass `nil` to use the fps-derived default.
+///   Tests that pin the 5 ms legacy default pass `grace: 0.005` explicitly so they are not
+///   affected by the fps-derived default changing at different fps values.
 @MainActor
 private func makeEncoder(
     mock: MockCompressionSession,
     anchor: HostTimeAnchor,
-    maxPendingFrames: Int = 4
+    maxPendingFrames: Int = 4,
+    grace: Double? = nil
 )
 -> VideoEncoder {
     VideoEncoder(
@@ -199,7 +204,8 @@ private func makeEncoder(
         fps: testFps,
         anchor: anchor,
         maxPendingFrames: maxPendingFrames,
-        // selfClocked: false — L2 drives tick/clockTick/ingest synchronously; no wall-clock loop.
+        grace: grace,
+        // selfClocked: false — L2 drives clockTick/ingest synchronously; no wall-clock loop.
         selfClocked: false
     ) { _, _, _ in mock }
 }
@@ -230,14 +236,17 @@ struct VideoEncoderTests {
 
     // MARK: - Anchored-PTS math pin
 
-    @Test("Anchored PTS equals CMTimeAdd(anchor, slot/fps) exactly for several slots")
+    @Test("Anchored PTS equals CMTimeAdd(anchor, slot/fps) exactly for adjacent slots")
     func anchoredPTS_exactInteger() async throws {
+        // Adjacent slots 0..5: no catch-up holds, so encodedPTS[i] maps 1:1 to slotIndex i.
+        // The purpose of this test is to pin the exact-integer CMTime reconstruction — not
+        // catch-up contiguity (that is covered by catchUpContiguity and noGapInvariant below).
         let anchor = makeFixedAnchor()
         let mock = MockCompressionSession()
         let encoder = await makeEncoder(mock: mock, anchor: anchor)
         try await encoder.start()
 
-        let slots = [0, 1, 5, 29, 30, 91]
+        let slots = [0, 1, 2, 3, 4, 5]
         for slot in slots {
             await encoder.ingest(makeFrame(slotIndex: slot, anchor: anchor))
         }
@@ -261,13 +270,18 @@ struct VideoEncoderTests {
     func skippedSlot_holdReSubmitsLastBuffer() async throws {
         let anchor = makeFixedAnchor()
         let mock = MockCompressionSession()
-        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        let encoder = await makeEncoder(mock: mock, anchor: anchor, grace: 0.005)
         try await encoder.start()
 
-        // Ingest slot 0 (a real frame), then tick slot 1 (no frame → hold).
+        // Ingest slot 0 (a real frame), then drive slot 1 via clockTick (no frame → hold).
         let frame0 = makeFrame(slotIndex: 0, anchor: anchor)
         await encoder.ingest(frame0)
-        await encoder.tick(slotIndex: 1)
+
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let grace = 0.005
+        // Slot 1 becomes hold-eligible once now >= anchor + 1.5/fps + grace.
+        let boundary = anchorSeconds + 1.5 / Double(testFps) + grace
+        await encoder.clockTick(nowSeconds: boundary + 0.001)
 
         #expect(mock.encodedBuffers.count == 2)
         // Hold re-submits the same pixel buffer reference as slot 0.
@@ -281,11 +295,15 @@ struct VideoEncoderTests {
     func hold_doesNotCountAsDrop() async throws {
         let anchor = makeFixedAnchor()
         let mock = MockCompressionSession()
-        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        let encoder = await makeEncoder(mock: mock, anchor: anchor, grace: 0.005)
         try await encoder.start()
 
         await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
-        await encoder.tick(slotIndex: 1)
+
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let grace = 0.005
+        let boundary = anchorSeconds + 1.5 / Double(testFps) + grace
+        await encoder.clockTick(nowSeconds: boundary + 0.001)
 
         #expect(await encoder.cfrNormalizationDropCount == 0)
         #expect(await encoder.backpressureDropCount == 0)
@@ -293,25 +311,92 @@ struct VideoEncoderTests {
 
     // MARK: - Wall-clock clockTick()
 
-    @Test("clockTick fires a hold of the last buffer when the current slot is ahead")
+    @Test("clockTick(nowSeconds:) fires exactly one hold when now is one-slot-plus-grace ahead of slot 0")
     func clockTick_holdsWhenSlotAhead() async throws {
-        // Anchor is fixed ~100s in the past; PipelineClock.currentHostTime() is real mach time,
-        // so the computed current slot is far ahead of slot 0 → clockTick fires a hold. This
-        // also exercises the counter-corruption guard: an ahead slot must NOT increment
-        // cfrNormalizationDrops (only a slot ≤ lastEmittedSlot would, via processTick).
+        // Slot 1 is hold-eligible once: now >= anchor + 1.5/fps + grace
+        // (eligibility boundary derived from catchUpHolds formula).
+        // Pass now = boundary + 1ms → exactly one hold for slot 1.
         let anchor = makeFixedAnchor()
         let mock = MockCompressionSession()
-        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        let encoder = await makeEncoder(mock: mock, anchor: anchor, grace: 0.005)
         try await encoder.start()
 
         await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
-        await encoder.clockTick()
 
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let grace = 0.005 // matches encoder default
+        // boundary = anchor + 1.5/fps + grace  (slot 1 becomes eligible)
+        let boundary = anchorSeconds + 1.5 / Double(testFps) + grace
+        let nowJustAfter = boundary + 0.001
+
+        await encoder.clockTick(nowSeconds: nowJustAfter)
+
+        // Exactly one hold emitted for slot 1.
         #expect(mock.encodedBuffers.count == 2)
-        // The hold re-submits the same buffer reference as the real slot-0 frame.
+        // Hold re-submits the same buffer reference as the real slot-0 frame.
         #expect(mock.encodedBuffers[0] === mock.encodedBuffers[1])
+        let expectedHoldPTS = CMTimeAdd(anchor.anchorTime, CMTimeMake(value: 1, timescale: Int32(testFps)))
+        #expect(CMTimeCompare(mock.encodedPTS[1], expectedHoldPTS) == 0)
         #expect(await encoder.cfrNormalizationDropCount == 0)
         #expect(await encoder.backpressureDropCount == 0)
+    }
+
+    @Test("clockTick(nowSeconds:) emits exactly cap=fps holds when now is far ahead, then continues on next call")
+    func clockTick_farAheadEmitsCap() async throws {
+        // Ingest slot 0, then call clockTick with a time far enough ahead to make
+        // slots 1..testFps all eligible → exactly testFps holds (cap), cappedShort.
+        // A second clockTick one more slot ahead emits exactly one more hold.
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor, grace: 0.005)
+        try await encoder.start()
+
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let grace = 0.005
+        // Make slots 1 through testFps+1 all eligible by placing now well past their boundaries.
+        let nowFarAhead = anchorSeconds + Double(testFps + 2) / Double(testFps) + grace + 0.001
+
+        await encoder.clockTick(nowSeconds: nowFarAhead)
+
+        // Cap = fps, so exactly testFps holds emitted (slots 1..testFps).
+        #expect(mock.encodedBuffers.count == 1 + testFps)
+        #expect(await encoder.cfrNormalizationDropCount == 0)
+
+        // Second tick: slot testFps+1 is now eligible.
+        // Eligibility boundary for slot N = anchor + (N + 0.5)/fps + grace.
+        // For slot testFps+1 (=31 at fps=30): anchor + 31.5/30 + grace.
+        let nowNextSlot = anchorSeconds + (Double(testFps + 1) + 0.5) / Double(testFps) + grace + 0.001
+        await encoder.clockTick(nowSeconds: nowNextSlot)
+        #expect(mock.encodedBuffers.count == 1 + testFps + 1)
+    }
+
+    @Test("clockTick(nowSeconds:) catch-up batch → aggregator holds count equals emitted hold count")
+    func clockTick_holdsCounted_inAggregator() async throws {
+        // Verify that clock-driven holds are recorded in the aggregator (telemetry invariant:
+        // emit_rate = enc_real + holds must hold regardless of whether holds come from ingest
+        // catch-up or from the clock directly).
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor, grace: 0.005)
+        try await encoder.start()
+
+        // Ingest slot 0 so the clock has a lastPixelBuffer to re-submit.
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let grace = 0.005
+        // Place now far enough ahead to make slots 1..3 all eligible (cap not hit).
+        // Eligibility boundary for slot N = anchor + (N + 0.5)/fps + grace.
+        // nowForSlot3 puts all three slots past their boundary.
+        let nowForSlot3 = anchorSeconds + 3.5 / Double(testFps) + grace + 0.001
+        await encoder.clockTick(nowSeconds: nowForSlot3)
+
+        // Three holds emitted (slots 1, 2, 3).
+        #expect(mock.encodedBuffers.count == 1 + 3)
+        // The aggregator must have counted exactly 3 clock-driven holds.
+        #expect(await encoder.aggregatorHoldsCount == 3)
     }
 
     @Test("clockTick is a no-op before any frame has been ingested")
@@ -325,6 +410,211 @@ struct VideoEncoderTests {
 
         #expect(mock.encodedBuffers.isEmpty)
         #expect(await encoder.cfrNormalizationDropCount == 0)
+    }
+
+    // MARK: - #102 regression: beat-race fix
+
+    /// Regression: the old clock fired a hold for slot N at the start of N's window.
+    /// The real frame for N (arriving a few ms later) was then dropped as a duplicate,
+    /// degrading the camera file to a run of holds re-submitting stale content.
+    ///
+    /// The fix: `ingest` calls `catchUpThenEncode` which atomically claims the slot before
+    /// the clock can touch it. `clockTick(nowSeconds:)` with now < slot-1's eligibility
+    /// boundary must emit nothing; ingest of the real slot-1 frame must update
+    /// `lastPixelBuffer`; the subsequent `clockTick` for slot 2 must re-submit the slot-1
+    /// buffer (not the slot-0 buffer).
+    @Test("#102 beat-race: pre-grace clock is no-op; real slot 1 wins; post-grace clock holds slot-1 buffer")
+    func beatRaceRegression() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor, grace: 0.005)
+        try await encoder.start()
+
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let grace = 0.005
+
+        // 1. Ingest real frame for slot 0.
+        let frame0 = makeFrame(slotIndex: 0, anchor: anchor)
+        await encoder.ingest(frame0)
+        #expect(mock.encodedBuffers.count == 1)
+        let buffer0 = mock.encodedBuffers[0]
+
+        // 2. clockTick with now BEFORE slot 1's eligibility boundary → no emission.
+        // boundary = anchor + 1.5/fps + grace
+        let boundary1 = anchorSeconds + 1.5 / Double(testFps) + grace
+        let nowJustBefore = boundary1 - 0.001
+        await encoder.clockTick(nowSeconds: nowJustBefore)
+        #expect(mock.encodedBuffers.count == 1) // no hold emitted
+
+        // 3. Ingest real frame for slot 1 → must encode as real (not drop as duplicate).
+        let frame1 = makeFrame(slotIndex: 1, anchor: anchor)
+        await encoder.ingest(frame1)
+        #expect(mock.encodedBuffers.count == 2)
+        let buffer1 = mock.encodedBuffers[1]
+        // buffer1 is a fresh allocation — distinct from buffer0.
+        #expect(buffer1 !== buffer0)
+        let expectedSlot1PTS = CMTimeAdd(anchor.anchorTime, CMTimeMake(value: 1, timescale: Int32(testFps)))
+        #expect(CMTimeCompare(mock.encodedPTS[1], expectedSlot1PTS) == 0)
+
+        // 4. clockTick with now just past slot 2's eligibility boundary → one hold.
+        // The hold must re-submit buffer1 (the fresh slot-1 content), NOT buffer0.
+        let boundary2 = anchorSeconds + 2.5 / Double(testFps) + grace
+        let nowAfterSlot2 = boundary2 + 0.001
+        await encoder.clockTick(nowSeconds: nowAfterSlot2)
+        #expect(mock.encodedBuffers.count == 3)
+        #expect(mock.encodedBuffers[2] === buffer1)
+        #expect(mock.encodedBuffers[2] !== buffer0)
+
+        #expect(await encoder.cfrNormalizationDropCount == 0)
+        #expect(await encoder.backpressureDropCount == 0)
+    }
+
+    // MARK: - #102 regression: catch-up contiguity (ingest gap)
+
+    @Test("Ingest slot 0 then slot 4 → holds 1,2,3 + real 4; encodedPTS strictly contiguous 0..4")
+    func catchUpContiguity_ingestGap() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        try await encoder.start()
+
+        let frame0 = makeFrame(slotIndex: 0, anchor: anchor)
+        await encoder.ingest(frame0)
+        let buffer0 = mock.encodedBuffers[0]
+
+        let frame4 = makeFrame(slotIndex: 4, anchor: anchor)
+        await encoder.ingest(frame4)
+
+        // Total: slot 0 (real) + holds 1,2,3 + slot 4 (real) = 5 frames.
+        #expect(mock.encodedBuffers.count == 5)
+
+        // Holds (indices 1,2,3) re-submit buffer0.
+        #expect(mock.encodedBuffers[1] === buffer0)
+        #expect(mock.encodedBuffers[2] === buffer0)
+        #expect(mock.encodedBuffers[3] === buffer0)
+
+        // Real frame at index 4 is a different buffer.
+        #expect(mock.encodedBuffers[4] !== buffer0)
+
+        // PTS is strictly contiguous 0..4 with no gaps.
+        for slot in 0...4 {
+            let expected = CMTimeAdd(anchor.anchorTime, CMTimeMake(value: CMTimeValue(slot), timescale: Int32(testFps)))
+            #expect(CMTimeCompare(mock.encodedPTS[slot], expected) == 0)
+        }
+
+        #expect(await encoder.cfrNormalizationDropCount == 0)
+        #expect(await encoder.backpressureDropCount == 0)
+    }
+
+    // MARK: - #102 regression: clock catch-up contiguity
+
+    @Test("Ingest slot 0, then clockTick far ahead → holds 1..6; encodedPTS contiguous; all buffer0")
+    func clockCatchUpContiguity() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor, grace: 0.005)
+        try await encoder.start()
+
+        let frame0 = makeFrame(slotIndex: 0, anchor: anchor)
+        await encoder.ingest(frame0)
+        let buffer0 = mock.encodedBuffers[0]
+
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let grace = 0.005
+        // Slot 6 is eligible when now >= anchor + 6.5/fps + grace.
+        let nowAfterSlot6 = anchorSeconds + 6.5 / Double(testFps) + grace + 0.001
+        await encoder.clockTick(nowSeconds: nowAfterSlot6)
+
+        // 1 real + 6 holds = 7 total.
+        #expect(mock.encodedBuffers.count == 7)
+
+        // All holds re-submit buffer0.
+        for idx in 1...6 {
+            #expect(mock.encodedBuffers[idx] === buffer0)
+        }
+
+        // PTS contiguous 0..6.
+        for slot in 0...6 {
+            let expected = CMTimeAdd(anchor.anchorTime, CMTimeMake(value: CMTimeValue(slot), timescale: Int32(testFps)))
+            #expect(CMTimeCompare(mock.encodedPTS[slot], expected) == 0)
+        }
+
+        #expect(await encoder.cfrNormalizationDropCount == 0)
+    }
+
+    // MARK: - #102 regression: grace boundary (fps=30)
+
+    @Test("Grace boundary: slot not eligible just before, eligible just after (fps=30)")
+    func graceBoundary_fps30() async throws {
+        // Verify the eligibility formula through the encoder driver at fps=30.
+        // Slot 1: boundary = anchor + 1.5/30 + 0.005 = anchor + 0.055s.
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor, grace: 0.005)
+        try await encoder.start()
+
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let grace = 0.005
+        let boundary = anchorSeconds + 1.5 / Double(testFps) + grace
+
+        // Just before: no emission.
+        await encoder.clockTick(nowSeconds: boundary - 0.0001)
+        #expect(mock.encodedBuffers.count == 1)
+
+        // Just after: exactly one hold.
+        await encoder.clockTick(nowSeconds: boundary + 0.0001)
+        #expect(mock.encodedBuffers.count == 2)
+        let expectedPTS = CMTimeAdd(anchor.anchorTime, CMTimeMake(value: 1, timescale: Int32(testFps)))
+        #expect(CMTimeCompare(mock.encodedPTS[1], expectedPTS) == 0)
+    }
+
+    // MARK: - #102 regression: no-gap invariant
+
+    @Test("Interleaved ingest/clockTick(nowSeconds:) produces no missing slots and strictly increasing PTS")
+    func noGapInvariant() async throws {
+        // Interleave real frames and clock ticks in a realistic pattern:
+        // frame 0, clock tick (eligible for 1), frame 2, clock tick (eligible for 3,4), frame 5.
+        // Expected emission order: 0(real), 1(hold), 2(real), 3(hold), 4(hold), 5(real).
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor, grace: 0.005)
+        try await encoder.start()
+
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let grace = 0.005
+
+        // Real frame slot 0.
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+
+        // Clock tick: slot 1 just eligible.
+        let after1 = anchorSeconds + 1.5 / Double(testFps) + grace + 0.001
+        await encoder.clockTick(nowSeconds: after1)
+
+        // Real frame slot 2.
+        await encoder.ingest(makeFrame(slotIndex: 2, anchor: anchor))
+
+        // Clock tick: slots 3 and 4 eligible.
+        let after4 = anchorSeconds + 4.5 / Double(testFps) + grace + 0.001
+        await encoder.clockTick(nowSeconds: after4)
+
+        // Real frame slot 5.
+        await encoder.ingest(makeFrame(slotIndex: 5, anchor: anchor))
+
+        // Total: 6 frames (0..5), no gaps, strictly increasing PTS.
+        #expect(mock.encodedPTS.count == 6)
+        for slot in 0...5 {
+            let expected = CMTimeAdd(anchor.anchorTime, CMTimeMake(value: CMTimeValue(slot), timescale: Int32(testFps)))
+            #expect(CMTimeCompare(mock.encodedPTS[slot], expected) == 0)
+        }
+        // Strictly increasing: each PTS > previous.
+        for idx in 1..<mock.encodedPTS.count {
+            #expect(CMTimeCompare(mock.encodedPTS[idx], mock.encodedPTS[idx - 1]) > 0)
+        }
+
+        #expect(await encoder.cfrNormalizationDropCount == 0)
+        #expect(await encoder.backpressureDropCount == 0)
     }
 
     // MARK: - CFR: duplicate frame into a filled slot
@@ -688,6 +978,95 @@ struct VideoEncoderTests {
             CMTimeCompare(sample.ptsHostTime, expectedPTS) == 0,
             "EncodedSample.ptsHostTime must equal the anchored slot-0 PTS"
         )
+    }
+
+    // MARK: - Backpressure gate during catch-up
+
+    /// Verifies that when the session is already saturated (pending >= maxPendingFrames),
+    /// clock-driven catch-up holds are dropped via the gate and counted as backpressure drops.
+    /// Only the real frame at slot 0 (submitted before the gate fills) must be encoded.
+    @Test("clockTick catch-up: gate closed → backpressure drops counted, only slot-0 real frame encoded")
+    func clockTick_gateClosedDuringCatchUp() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        // maxPendingFrames=1 so the gate closes after the first encode.
+        let encoder = await makeEncoder(mock: mock, anchor: anchor, maxPendingFrames: 1, grace: 0.005)
+        try await encoder.start()
+
+        // Ingest slot 0 (fills the one pending slot).
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+        #expect(mock.encodedBuffers.count == 1)
+
+        // Saturate: mark pending as already at the limit so the next submits are gated.
+        mock.pending = 1
+
+        // Tick 3 slots ahead — slots 1, 2, 3 are all eligible.
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let grace = 0.005
+        let nowAfterSlot3 = anchorSeconds + 3.5 / Double(testFps) + grace + 0.001
+        await encoder.clockTick(nowSeconds: nowAfterSlot3)
+
+        // All 3 hold slots must have been gated (pending >= maxPendingFrames throughout).
+        #expect(await encoder.backpressureDropCount >= 2)
+        // Only slot-0 real frame was encoded before the gate was set.
+        #expect(mock.encodedBuffers.count == 1)
+        // The aggregator should have counted at least 2 gate drops.
+        #expect(await encoder.aggregatorHoldsCount >= 2)
+    }
+
+    // MARK: - Pre-anchor frame routing
+
+    /// Verifies that a frame with PTS before the anchor is silently discarded —
+    /// it must NOT be encoded and must NOT increment `cfrNormalizationDrops`
+    /// (pre-anchor is not a CFR normalizer drop, only a routing guard).
+    @Test("ingest pre-anchor frame → not encoded, cfrNormalizationDropCount stays 0")
+    func ingest_preAnchor_notEncoded() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        try await encoder.start()
+
+        // Build a frame whose PTS is 0.1 s before the anchor.
+        let preAnchorPTS = CMTimeSubtract(anchor.anchorTime, CMTimeMake(value: 3, timescale: Int32(testFps)))
+        let preAnchorFrame = VideoFrame(
+            pixelBuffer: makePixelBuffer(),
+            ptsHostTime: preAnchorPTS,
+            isHoldRepeat: false
+        )
+        await encoder.ingest(preAnchorFrame)
+
+        // Pre-anchor frame must not produce any encode call.
+        #expect(mock.encodedBuffers.isEmpty)
+        // Pre-anchor does NOT go through the CFR normalizer's drop counter.
+        #expect(await encoder.cfrNormalizationDropCount == 0)
+    }
+
+    // MARK: - Cap-overflow: real frame deferred
+
+    /// Verifies that when the catch-up gap is larger than `holdCapSlots` (fps), the batch
+    /// is capped, the real frame is NOT encoded in that batch, and the cap-overflow counter
+    /// in the aggregator is incremented.
+    @Test("ingest huge gap > holdCapSlots → cap holds emitted, real frame NOT encoded, cap_overflow counted")
+    func ingest_cappedShort_realFrameDeferred() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        try await encoder.start()
+
+        // Slot 0 — opens the grid, encodes one real frame.
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+        #expect(mock.encodedBuffers.count == 1)
+
+        // Slot testFps+5 — gap is testFps+4 holds (> holdCapSlots == testFps), so cappedShort.
+        let bigSlot = testFps + 5
+        await encoder.ingest(makeFrame(slotIndex: bigSlot, anchor: anchor))
+
+        // Exactly `holdCapSlots` holds + 0 real (capped short).
+        #expect(mock.encodedBuffers.count == 1 + testFps)
+        // Real frame at bigSlot was NOT encoded this ingest.
+        #expect(await encoder.cfrNormalizationDropCount == 0)
+        // Aggregator cap-overflow counter must be 1.
+        #expect(await encoder.aggregatorCapOverflowCount == 1)
     }
 }
 

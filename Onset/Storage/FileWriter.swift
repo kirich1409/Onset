@@ -3,9 +3,11 @@ import CoreAudio
 import CoreMedia
 import OSLog
 
-// swiftlint:disable file_length
+// swiftlint:disable file_length type_body_length
 // Rationale: FileWriter is a single-responsibility actor. The extra length comes from its
-// complete lifecycle (init / start / append / finish), test seams, and their inline doc comments.
+// complete lifecycle (init / start / append / finish), telemetry task, test seams, and their
+// inline doc comments. The telemetry flush task added for cadence telemetry is lifecycle-coupled
+// to markFinished() — splitting it to an extension would scatter the cancel coupling.
 
 // MARK: - FileWriter
 
@@ -101,6 +103,17 @@ actor FileWriter {
         category: "FileWriter"
     )
 
+    // MARK: - Telemetry
+
+    /// Per-stage cadence accumulator. Flushed every ~1 s on the telemetry tick.
+    private var aggregator: StageRateAggregator
+
+    /// ~1 s periodic flush task started in `start(atSourceTime:)`, cancelled in `markFinished()`.
+    private var telemetryTask: Task<Void, Never>?
+
+    /// Lane label used in telemetry lines ("screen" / "camera" / "writer").
+    private let label: String
+
     // MARK: - Init
 
     /// Creates a FileWriter for one recording stream.
@@ -112,12 +125,17 @@ actor FileWriter {
     ///   - sourceFormatHint: The `CMFormatDescription` of the compressed HEVC stream.
     ///     **Required for MP4 passthrough** — see type-level doc. Obtain from the first
     ///     `EncodedSample.sampleBuffer` produced by `VideoEncoder`.
+    ///   - label: Lane label emitted in telemetry lines ("screen", "camera"). Default "writer"
+    ///     is safe for standalone / test use; `LiveWriterFactory` overrides it per pipeline kind.
+    ///   - nominalFps: The pipeline's target frame rate for telemetry. Default 0 when unknown.
     /// - Throws: `CocoaError` if `AVAssetWriter(url:fileType:)` fails (disk full, bad path).
     init(
         outputURL: URL,
         configuration: RecordingConfiguration,
         includeAudio: Bool,
-        sourceFormatHint: CMFormatDescription
+        sourceFormatHint: CMFormatDescription,
+        label: String = "writer",
+        nominalFps: Int = 0
     ) throws {
         self.outputURL = outputURL
         self.configuration = configuration
@@ -170,6 +188,8 @@ actor FileWriter {
         }
 
         self.assetWriter = writer
+        self.label = label
+        self.aggregator = StageRateAggregator(lane: label, stage: .writer, nominalFps: nominalFps)
 
         let (stream, continuation) = AsyncStream.makeStream(of: DropEvent.self)
         self.drops = stream
@@ -216,6 +236,7 @@ actor FileWriter {
         // Restrict the file to owner-read/write after AVAssetWriter creates it.
         try RecordingOutput.setOwnerOnly(file: self.outputURL)
 
+        self.startTelemetryTask()
         self.logger.info("FileWriter started: \(self.outputURL.lastPathComponent)")
     }
 
@@ -242,6 +263,7 @@ actor FileWriter {
         // and keeps the error logged once (see `isFaulted`).
         guard !self.isFaulted else { return }
 
+        let nowSeconds = CMTimeGetSeconds(PipelineClock.currentHostTime())
         guard self.videoSeam.isReadyForMoreMediaData else {
             // Writer/disk backpressure — distinct from encoder backpressure (which originates
             // in VideoEncoder before the sample is compressed). Both map to
@@ -250,6 +272,7 @@ actor FileWriter {
             // level; the log message disambiguates for diagnostics (AC-4 / spec §163).
             // Per-frame backpressure detail is stripped from release at .debug; DropMonitor owns
             // the aggregate .warning/Degraded signal, and the DropEvent already carries the data.
+            self.aggregator.openEpisode(nowSeconds: nowSeconds)
             self.logger.debug(
                 "FileWriter video input not ready (backpressure) — dropping sample (writer/disk)"
             )
@@ -269,6 +292,10 @@ actor FileWriter {
             self.markFaulted(track: "video")
             return
         }
+
+        // Successful append: close any active not-ready episode and count the frame.
+        self.aggregator.closeEpisode(nowSeconds: nowSeconds)
+        self.aggregator.recordFresh()
     }
 
     /// Appends a raw PCM audio buffer to the audio track (encoded to AAC by `AVAssetWriter`).
@@ -293,6 +320,33 @@ actor FileWriter {
         }
     }
 
+    // MARK: - Telemetry task
+
+    /// Spawns the ~1 s telemetry flush task.
+    private func startTelemetryTask() {
+        self.telemetryTask = Task { [weak self] in
+            let clock = ContinuousClock()
+            var lastInstant = clock.now
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, !Task.isCancelled else { return }
+                let now = clock.now
+                let elapsedSeconds = (now - lastInstant).totalSeconds
+                lastInstant = now
+                // Hop into the actor's isolation to mutate the aggregator.
+                await self.flushTelemetry(elapsedSeconds: elapsedSeconds)
+            }
+        }
+    }
+
+    private func flushTelemetry(elapsedSeconds: Double) {
+        if let line = self.aggregator.flush(elapsedSeconds: elapsedSeconds) {
+            telemetryLogger.notice("\(line, privacy: .public)")
+        } else {
+            self.logger.debug("flushTelemetry: skipped (elapsed ≤ 0)")
+        }
+    }
+
     /// Records a hard writer failure (an `append()` returned `false`) and logs it once —
     /// the `isFaulted` top-guards ensure this runs only on the faulting transition.
     private func markFaulted(track: String) {
@@ -311,6 +365,8 @@ actor FileWriter {
     /// Must be called before `finish()`. After this, `append*` calls are no-ops on a
     /// real `AVAssetWriterInput`.
     func markFinished() {
+        self.telemetryTask?.cancel()
+        self.telemetryTask = nil
         self.rawVideoInput.markAsFinished()
         self.rawAudioInput?.markAsFinished()
         self.dropsContinuation.finish()
@@ -422,3 +478,5 @@ actor FileWriter {
         self.dropsContinuation.finish()
     }
 }
+
+// swiftlint:enable type_body_length
