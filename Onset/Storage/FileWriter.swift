@@ -83,6 +83,15 @@ actor FileWriter {
     /// `appendVideo`/`appendAudio` short-circuit them and keep the failure logged exactly once.
     private var isFaulted = false
 
+    // MARK: - Diagnostics (#105)
+
+    /// Source time passed to `startSession(atSourceTime:)` — captured for first-append logging (#105).
+    private var sessionSourceTime: CMTime = .invalid
+    /// One-shot: true until the first successful audio append has been logged (#105).
+    private var firstAudioAppendPending = true
+    /// One-shot: true until the first successful video append has been logged (#105).
+    private var firstVideoAppendPending = true
+
     // MARK: - Output streams
 
     /// Writer-side backpressure drop events for `DropMonitor` (#35).
@@ -232,6 +241,7 @@ actor FileWriter {
         }
 
         self.assetWriter.startSession(atSourceTime: sourceTime)
+        self.sessionSourceTime = sourceTime // captured for first-append diagnostics (#105)
 
         // Restrict the file to owner-read/write after AVAssetWriter creates it.
         try RecordingOutput.setOwnerOnly(file: self.outputURL)
@@ -288,9 +298,25 @@ actor FileWriter {
 
         // append() returns false only after the writer faulted (input is ready here, so not-ready
         // is excluded) — a hard failure, NOT backpressure, so it must NOT feed the drop counter.
+        let videoPTS = CMSampleBufferGetPresentationTimeStamp(sample.sampleBuffer)
+        let videoDTS = CMSampleBufferGetDecodeTimeStamp(sample.sampleBuffer)
         guard self.videoSeam.append(sample.sampleBuffer) else {
+            // diagnostic for #105: include pts/dts the writer rejected
+            self.logger.error(
+                // swiftlint:disable:next line_length
+                "FileWriter video append rejected at pts=\(Self.secStr(videoPTS), privacy: .public)s dts=\(Self.secStr(videoDTS), privacy: .public)s"
+            )
             self.markFaulted(track: "video")
             return
+        }
+
+        // diagnostic for #105: one-shot first-append pts/dts to confirm session timeline alignment
+        if self.firstVideoAppendPending {
+            self.firstVideoAppendPending = false
+            self.logger.notice(
+                // swiftlint:disable:next line_length
+                "first video append: pts=\(Self.secStr(videoPTS), privacy: .public)s dts=\(Self.secStr(videoDTS), privacy: .public)s"
+            )
         }
 
         // Successful append: close any active not-ready episode and count the frame.
@@ -314,9 +340,31 @@ actor FileWriter {
         }
         // append() returns false only after the writer faulted — a hard failure, not backpressure.
         // Audio is NOT surfaced on any drop counter (spec tracks video only), but is logged once.
+        let audioPTS = CMSampleBufferGetPresentationTimeStamp(buffer)
         guard audio.append(buffer) else {
+            // diagnostic for #105: include the PTS that the writer rejected
+            self.logger.error(
+                "FileWriter audio append rejected at pts=\(Self.secStr(audioPTS), privacy: .public)s"
+            )
             self.markFaulted(track: "audio")
             return
+        }
+        // diagnostic for #105: one-shot first-append format summary to identify USB mic mismatches
+        if self.firstAudioAppendPending {
+            self.firstAudioAppendPending = false
+            var sampleRate = 0
+            var channelCount: UInt32 = 0
+            var formatID: UInt32 = 0
+            if let info = Self.audioFormatInfo(from: buffer) {
+                sampleRate = info.sampleRate
+                channelCount = info.channelCount
+                formatID = info.formatID
+            }
+            let fmtTag = Self.fourCC(formatID)
+            self.logger.notice(
+                // swiftlint:disable:next line_length
+                "first audio append: rate=\(sampleRate, privacy: .public) ch=\(channelCount, privacy: .public) fmt=\(fmtTag, privacy: .public) pts=\(Self.secStr(audioPTS), privacy: .public)s t0=\(Self.secStr(self.sessionSourceTime), privacy: .public)s"
+            )
         }
     }
 
@@ -353,9 +401,68 @@ actor FileWriter {
         self.isFaulted = true
         let status = self.assetWriter.status.rawValue
         let underlying = String(describing: self.assetWriter.error)
+        // .public on all interpolations so the NSError details survive privacy redaction (#105).
         self.logger.error(
-            "FileWriter \(track) append failed (writer faulted) — status \(status): \(underlying)"
+            // swiftlint:disable:next line_length
+            "FileWriter \(track, privacy: .public) append failed (writer faulted) — status \(status, privacy: .public): \(underlying, privacy: .public)"
         )
+    }
+
+    // MARK: - Helpers
+
+    /// Extracts sample rate, channel count, and format ID from a `CMSampleBuffer`'s ASBD.
+    /// Returns `nil` when no format description is available — diagnostic for #105.
+    private struct AudioFormatInfo {
+        let sampleRate: Int
+        let channelCount: UInt32
+        let formatID: UInt32
+    }
+
+    private static func audioFormatInfo(from buffer: CMSampleBuffer) -> AudioFormatInfo? {
+        guard let fmtDesc = CMSampleBufferGetFormatDescription(buffer) else { return nil }
+        guard let asbd = unsafe CMAudioFormatDescriptionGetStreamBasicDescription(fmtDesc) else {
+            return nil
+        }
+        return AudioFormatInfo(
+            sampleRate: Int(unsafe asbd.pointee.mSampleRate),
+            channelCount: unsafe asbd.pointee.mChannelsPerFrame,
+            formatID: unsafe asbd.pointee.mFormatID
+        )
+    }
+
+    /// Formats a `CMTime` seconds value to three decimal places without `String(format:)`,
+    /// which trips `SWIFT_STRICT_MEMORY_SAFETY` — diagnostic for #105.
+    private static func secStr(_ time: CMTime) -> String {
+        // Round to 3 decimal places using integer arithmetic (same pattern as StageRateAggregator).
+        // swiftlint:disable no_magic_numbers
+        let scaled = Int((CMTimeGetSeconds(time) * 1000).rounded())
+        let whole = scaled / 1000
+        let frac = abs(scaled % 1000)
+        let fracPadded = frac < 10 ? "00\(frac)" : frac < 100 ? "0\(frac)" : "\(frac)"
+        // swiftlint:enable no_magic_numbers
+        return "\(whole).\(fracPadded)"
+    }
+
+    /// Renders a CoreAudio FourCC `UInt32` as a 4-character ASCII tag (e.g. `lpcm`).
+    /// Falls back to hex if any byte is outside printable ASCII — diagnostic for #105.
+    private static func fourCC(_ code: UInt32) -> String {
+        // Named constants to satisfy no_magic_numbers: byte positions and printable ASCII range.
+        let shift3: UInt32 = 24
+        let shift2: UInt32 = 16
+        let shift1: UInt32 = 8
+        let byteMask: UInt32 = 0xFF
+        let asciiPrintableMin: UInt8 = 32
+        let asciiPrintableMax: UInt8 = 127
+        let hexRadix = 16
+        let byte0 = UInt8((code >> shift3) & byteMask)
+        let byte1 = UInt8((code >> shift2) & byteMask)
+        let byte2 = UInt8((code >> shift1) & byteMask)
+        let byte3 = UInt8(code & byteMask)
+        let bytes = [byte0, byte1, byte2, byte3]
+        guard bytes.allSatisfy({ $0 >= asciiPrintableMin && $0 < asciiPrintableMax }) else {
+            return String(code, radix: hexRadix)
+        }
+        return String(bytes: bytes, encoding: .ascii) ?? String(code, radix: hexRadix)
     }
 
     // MARK: - Finish
