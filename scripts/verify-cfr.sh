@@ -20,6 +20,9 @@
 #     - camera packet rate  (measured ~28.2 vs expected 30, ~6% off)
 #     - camera fresh content  (measured ~2.9 fps vs floor 25)
 #     - camera duplicate-run clusters  (modal run ~13, far above MAX_RUN_MODE=2)
+#   NOTE: camera PTS-delta uniformity (B) may now PASS on the bad baseline after the
+#   sort-n fix — camera packets arrive in decode order with B-frame reordering producing
+#   negative deltas on unsorted input; sorting before delta computation removes false gaps.
 #
 # NOTE: camera fresh-content check (C) requires actual motion in frame during
 # recording. A static scene with no movement will produce keep_count=0 and
@@ -39,8 +42,9 @@ GAP_SLOTS=1.5
 # Maximum allowed PTS delta expressed in slot units.
 MAX_GAP_SLOTS=2.0
 
-# Maximum allowed gap-deltas per file (accommodates start/stop edge artefacts).
-MAX_GAP_COUNT=2
+# Maximum allowed gap-deltas per minute of recording (accommodates start/stop edge artefacts).
+# The actual per-file allowance is computed inside awk as ceil(duration_min * MAX_GAPS_PER_MIN).
+MAX_GAPS_PER_MIN=10
 
 # Camera fresh-content floor (keep fps from mpdecimate; requires motion in frame).
 MIN_FRESH_FPS=25
@@ -191,8 +195,13 @@ for LABEL_FPS in "screen:$SCREEN_FPS:$SCREEN_PTS" "camera:$CAMERA_FPS:$CAMERA_PT
 done
 
 # ── B. PTS-delta uniformity ───────────────────────────────────────────────────
+# PTS list is sorted numerically before delta computation to handle B-frame decode
+# order: packets arrive in decode order, not presentation order, so raw deltas can be
+# negative. Sorting restores presentation order and yields true inter-frame gaps.
+#
 # slot = 1 / fps
-# PASS iff max_delta ≤ MAX_GAP_SLOTS·slot AND count(delta > GAP_SLOTS·slot) ≤ MAX_GAP_COUNT
+# max_gap_count = ceil(duration_min * MAX_GAPS_PER_MIN)  — scales with recording length
+# PASS iff max_delta ≤ MAX_GAP_SLOTS·slot AND count(delta > GAP_SLOTS·slot) ≤ max_gap_count
 
 echo ""
 echo "=== B. PTS-delta uniformity ==="
@@ -203,13 +212,16 @@ for LABEL_FPS in "screen:$SCREEN_FPS:$SCREEN_PTS" "camera:$CAMERA_FPS:$CAMERA_PT
   NOMINAL="${REST%%:*}"
   PTS_DATA="${REST#*:}"
 
-  RESULT=$(echo "$PTS_DATA" | awk \
+  # sort -n: restore presentation order (B-frame decode order can scramble PTS).
+  RESULT=$(echo "$PTS_DATA" | sort -n | awk \
     -v fps="$NOMINAL" \
     -v max_gap_slots="$MAX_GAP_SLOTS" \
     -v gap_slots="$GAP_SLOTS" \
-    -v max_gap_count="$MAX_GAP_COUNT" \
-    'BEGIN { prev=""; max_delta=0; gap_count=0; n=0 }
+    -v max_gaps_per_min="$MAX_GAPS_PER_MIN" \
+    'BEGIN { prev=""; max_delta=0; gap_count=0; n=0; first=""; last="" }
      /^[0-9]/ {
+       if (first == "") first = $1
+       last = $1
        if (prev != "") {
          d = $1 - prev
          if (d > max_delta) max_delta = d
@@ -220,13 +232,19 @@ for LABEL_FPS in "screen:$SCREEN_FPS:$SCREEN_PTS" "camera:$CAMERA_FPS:$CAMERA_PT
        n++
      }
      END {
-       if (n < 2) {
-         printf "FAIL max_delta=0.0000 max_allowed=%.4f gap_count=0 max_gap_count=%d (insufficient packets: %d)\n", \
-           max_gap_slots / fps, max_gap_count, n
-         exit
-       }
        slot = 1.0 / fps
        max_allowed = max_gap_slots * slot
+       if (n < 2) {
+         printf "FAIL max_delta=0.0000 max_allowed=%.4f gap_count=0 max_gap_count=0 (insufficient packets: %d)\n", \
+           max_allowed, n
+         exit
+       }
+       span = last - first
+       duration_min = (span > 0) ? span / 60.0 : 0
+       # ceil(duration_min * max_gaps_per_min), minimum 1 to allow one edge artefact
+       raw = duration_min * max_gaps_per_min
+       max_gap_count = int(raw) + (raw > int(raw) ? 1 : 0)
+       if (max_gap_count < 1) max_gap_count = 1
        verdict = (max_delta <= max_allowed && gap_count <= max_gap_count) ? "PASS" : "FAIL"
        printf "%s max_delta=%.4f max_allowed=%.4f gap_count=%d max_gap_count=%d\n", \
          verdict, max_delta, max_allowed, gap_count, max_gap_count

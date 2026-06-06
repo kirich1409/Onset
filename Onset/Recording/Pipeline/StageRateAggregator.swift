@@ -44,6 +44,7 @@ nonisolated struct StageRateAggregator {
     private var encodedReal = 0 // distinct real-frame encodes (encoder stage only)
     private var dropDup = 0 // CFR duplicate / pre-anchor drops (encoder only)
     private var holds = 0 // hold frames submitted (encoder only)
+    private var holdSkip = 0 // hold frames skipped under soft-gate (encoder only)
     private var gateDrop = 0 // backpressure gate drops (encoder only)
     private var vtErr = 0 // VTCompressionSession encode errors (encoder only)
     private var emitCount = 0 // slots actually emitted to encodedSamples (encoder only)
@@ -122,6 +123,11 @@ nonisolated struct StageRateAggregator {
         self.holds += 1
     }
 
+    /// Counts a hold frame skipped by the soft-gate (encoder saturated; pending >= maxPendingFrames - 1).
+    mutating func recordHoldSkip() {
+        self.holdSkip += 1
+    }
+
     /// Counts a backpressure gate drop (pendingFrameCount exceeded maxPendingFrames).
     mutating func recordGateDrop() {
         self.gateDrop += 1
@@ -192,6 +198,12 @@ nonisolated struct StageRateAggregator {
         self.holds
     }
 
+    /// The raw hold-skip count accumulated since the last flush.
+    /// Exposed for L2 tests that verify soft-gate skips are counted separately from gate drops.
+    var holdSkipCount: Int {
+        self.holdSkip
+    }
+
     /// The raw cap-overflow count accumulated since the last flush.
     /// Exposed for L2 tests that verify cappedShort batches are counted.
     var capOverflowCount: Int {
@@ -252,6 +264,7 @@ nonisolated struct StageRateAggregator {
             + " enc_real=\(self.fmt(self.rate(self.encodedReal, over: elapsedSeconds)))"
             + " drop_dup=\(self.fmt(self.rate(self.dropDup, over: elapsedSeconds)))"
             + " holds=\(self.fmt(self.rate(self.holds, over: elapsedSeconds)))"
+            + " hold_skip=\(self.fmt(self.rate(self.holdSkip, over: elapsedSeconds)))"
             + " gate_drop=\(self.fmt(self.rate(self.gateDrop, over: elapsedSeconds)))"
             + " vt_err=\(self.fmt(self.rate(self.vtErr, over: elapsedSeconds)))"
             + " emit_rate=\(self.fmt(self.rate(self.emitCount, over: elapsedSeconds)))"
@@ -296,6 +309,7 @@ nonisolated struct StageRateAggregator {
         self.encodedReal = 0
         self.dropDup = 0
         self.holds = 0
+        self.holdSkip = 0
         self.gateDrop = 0
         self.vtErr = 0
         self.emitCount = 0

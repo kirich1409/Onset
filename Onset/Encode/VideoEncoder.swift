@@ -153,17 +153,30 @@ actor VideoEncoder {
     /// normalizer's `cfrNormalizationDrops`.
     private var encoderBackpressureDrops = 0
 
-    /// Grace window (seconds) given to real frames to arrive before the clock synthesises a hold.
+    /// Source-silence threshold (seconds): the clock waits this long after a slot's midpoint
+    /// before synthesising a hold. A hold is emitted only when no real frame has arrived by
+    /// `slot_midpoint + graceSeconds`, making grace the maximum acceptable frame-delivery latency,
+    /// not a scheduling epsilon.
     ///
-    /// δ must exceed the p95 (not the mean) of the capture→ingest pipeline latency while
-    /// staying below half a slot (8.33 ms @ 60 fps). The 5 ms default was chosen pending an
-    /// L5 measurement of the actual p95; measure with `ffprobe -show_frames` on a real
-    /// recording and tighten if camera-file quality is still degraded at this value.
+    /// Size to ≥ p95 of the capture→ingest pipeline latency for the lane; use
+    /// `defaultGrace(fps:)` (2 slots) as the starting point and tighten once measured.
     private let graceSeconds: Double
 
-    /// Default grace window: 5 ms, chosen to exceed the p95 capture→ingest latency while
-    /// staying below half a slot at 60 fps (8.33 ms). See `graceSeconds` for sizing guidance.
-    static let defaultGraceSeconds = 0.005
+    /// Minimum grace floor: 5 ms, enough to absorb scheduler jitter even at 60 fps (half-slot
+    /// = 8.33 ms). Never go below this regardless of fps.
+    private static let minGraceSeconds = 0.005
+
+    /// Grace expressed as a fraction of the slot duration: 2 slots of silence required before
+    /// a hold is emitted. At 30 fps this is ≈ 66.7 ms; at 60 fps ≈ 33.3 ms.
+    private static let graceSlotMultiplier = 2.0
+
+    /// Derives the fps-dependent default grace window: `max(minGraceSeconds, 2 slots)`.
+    ///
+    /// - Parameter fps: The CFR grid rate (must be > 0).
+    /// - Returns: Grace in seconds.
+    static func defaultGrace(fps: Int) -> Double {
+        max(self.minGraceSeconds, self.graceSlotMultiplier / Double(fps))
+    }
 
     /// Session T0 in seconds, derived once at init from `anchor.anchorTime`.
     /// Avoids repeated `CMTimeGetSeconds` calls in hot paths (`ingest`, `clockTick`, `secondsUntilNextDeadline`).
@@ -220,8 +233,10 @@ actor VideoEncoder {
     ///   - anchor: Session T0. Defaults to `HostTimeAnchor.now()` for standalone use until
     ///     `RecordingSession` (#34) injects a shared anchor.
     ///   - maxPendingFrames: Backpressure bound. Default 4 (≈ a few frames of slack at 30–60fps).
-    ///   - grace: Grace window in seconds given to real frames before the clock synthesises a
-    ///     hold. See `graceSeconds` for sizing guidance. Default: 5 ms.
+    ///   - grace: Source-silence threshold in seconds — the clock waits this long after a slot's
+    ///     midpoint before synthesising a hold. `nil` (default) derives the value from fps via
+    ///     `defaultGrace(fps:)` (2 slots, floored at 5 ms). Pass an explicit value only when
+    ///     overriding the default in tests or production experiments.
     ///   - selfClocked: Whether `start()` spawns the standalone CFR clock. `true` (default) for
     ///     standalone use; `false` when an external coordinator (#34) or a test drives
     ///     `clockTick()`.
@@ -236,7 +251,7 @@ actor VideoEncoder {
         fps: Int,
         anchor: HostTimeAnchor = .now(),
         maxPendingFrames: Int = 4,
-        grace: Double = VideoEncoder.defaultGraceSeconds,
+        grace: Double? = nil,
         selfClocked: Bool = true,
         label: String = "video",
         sessionFactory: @escaping SessionFactory = VideoEncoder.liveSessionFactory
@@ -244,7 +259,7 @@ actor VideoEncoder {
         precondition(fps > 0, "fps must be positive")
         precondition(width > 0 && height > 0, "dimensions must be positive")
         precondition(maxPendingFrames > 0, "maxPendingFrames must be positive")
-        precondition(grace >= 0, "grace must be non-negative")
+        if let grace { precondition(grace >= 0, "grace must be non-negative") }
 
         self.settings = settings
         self.width = width
@@ -253,7 +268,7 @@ actor VideoEncoder {
         self.anchor = anchor
         self.anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
         self.maxPendingFrames = maxPendingFrames
-        self.graceSeconds = grace
+        self.graceSeconds = grace ?? Self.defaultGrace(fps: fps)
         self.selfClocked = selfClocked
         self.label = label
         self.aggregator = StageRateAggregator(lane: label, stage: .encoder, nominalFps: fps)
@@ -291,6 +306,13 @@ actor VideoEncoder {
     /// production contract. Used by L2 tests to verify cappedShort batches are counted.
     var aggregatorCapOverflowCount: Int {
         self.aggregator.capOverflowCount
+    }
+
+    /// Test-only observation accessor for telemetry accounting; not part of the encoder's
+    /// production contract. Used by L2 tests to verify soft-gate hold skips are counted
+    /// separately from hard gate drops.
+    var aggregatorHoldSkipCount: Int {
+        self.aggregator.holdSkipCount
     }
 
     /// Whether the active session uses a hardware encoder (false when not started).
@@ -543,8 +565,17 @@ actor VideoEncoder {
         for slot in emission.slots {
             // All slots from catchUpHolds are isHold==true by contract.
             let pts = self.anchoredPTS(slotIndex: slot.slotIndex)
-            self.submit(pixelBuffer: lastPixelBuffer, slotIndex: slot.slotIndex, pts: pts, detectedAt: pts)
-            self.aggregator.recordHold()
+            let submitted = self.submit(
+                pixelBuffer: lastPixelBuffer,
+                slotIndex: slot.slotIndex,
+                pts: pts,
+                detectedAt: pts,
+                isHold: true
+            )
+            if submitted {
+                self.aggregator.recordHold()
+            }
+            // On !submitted the soft-gate already called recordHoldSkip() inside submit.
         }
     }
 
@@ -616,9 +647,18 @@ actor VideoEncoder {
                     continue
                 }
                 let holdPTS = self.anchoredPTS(slotIndex: slot.slotIndex)
-                self.submit(pixelBuffer: holdBuffer, slotIndex: slot.slotIndex, pts: holdPTS, detectedAt: holdPTS)
-                self.aggregator.recordHold()
-                holdCount += 1
+                let submitted = self.submit(
+                    pixelBuffer: holdBuffer,
+                    slotIndex: slot.slotIndex,
+                    pts: holdPTS,
+                    detectedAt: holdPTS,
+                    isHold: true
+                )
+                if submitted {
+                    self.aggregator.recordHold()
+                    holdCount += 1
+                }
+                // On !submitted the soft-gate already called recordHoldSkip() inside submit.
             } else {
                 // Real frame: update lastPixelBuffer before submitting so subsequent holds
                 // in a future batch (or from the clock) re-use the fresh content.
@@ -628,7 +668,8 @@ actor VideoEncoder {
                     pixelBuffer: frame.pixelBuffer,
                     slotIndex: slot.slotIndex,
                     pts: realPTS,
-                    detectedAt: frame.ptsHostTime
+                    detectedAt: frame.ptsHostTime,
+                    isHold: false
                 )
                 self.aggregator.recordEncodedReal()
             }
@@ -651,19 +692,43 @@ actor VideoEncoder {
     /// The caller is responsible for computing `pts` via `anchoredPTS(slotIndex:)` — this
     /// avoids redundant computation when holds are submitted from `submitEmission`.
     ///
-    /// Backpressure gate (OpAC-4.4): if the session already has `maxPendingFrames` in flight,
-    /// the frame is dropped as `encoderBackpressureDrops` and a `DropEvent` is emitted. This
-    /// counter is SEPARATE from the normalizer's `cfrNormalizationDrops`.
-    private func submit(pixelBuffer: CVPixelBuffer, slotIndex: Int, pts: CMTime, detectedAt: CMTime) {
-        guard let session = self.session else { return }
+    /// Backpressure gates (OpAC-4.4):
+    /// - Hard gate (real frames and holds): pending >= maxPendingFrames → drop, counted as
+    ///   `encoderBackpressureDrops`, a `DropEvent` is emitted.
+    /// - Soft gate (holds only): pending >= maxPendingFrames - 1 → hold skipped, counted as
+    ///   `holdSkip` in the aggregator. Real frames always pass through to the hard gate.
+    ///
+    /// Returns `true` when the frame was submitted (or at least attempted via `encodeFrame`),
+    /// `false` when blocked by a gate. Callers use the return value to decide whether to
+    /// count a `recordHold()` vs `recordHoldSkip()`.
+    @discardableResult
+    private func submit(
+        pixelBuffer: CVPixelBuffer,
+        slotIndex: Int,
+        pts: CMTime,
+        detectedAt: CMTime,
+        isHold: Bool
+    )
+    -> Bool {
+        guard let session = self.session else { return false }
 
-        if session.pendingFrameCount() >= self.maxPendingFrames {
+        let pending = session.pendingFrameCount()
+
+        // Soft gate: hold-only. Skip the hold when the encoder is approaching saturation so
+        // real frames get preference — one slot of headroom avoids a backpressure race where a
+        // real frame arrives a few ms after the hold it would duplicate.
+        if isHold, pending >= self.maxPendingFrames - 1 {
+            self.aggregator.recordHoldSkip()
+            return false
+        }
+
+        if pending >= self.maxPendingFrames {
             self.encoderBackpressureDrops += 1
             self.aggregator.recordGateDrop()
             self.dropsContinuation.yield(
                 DropEvent(reason: .encoderBackpressureDrops, count: 1, detectedAt: detectedAt)
             )
-            return
+            return false
         }
 
         // Slot duration is exactly one grid step.
@@ -684,6 +749,7 @@ actor VideoEncoder {
             // on VT's internal queue and has no access to the actor-isolated aggregator.
             self.aggregator.recordEmit()
         }
+        return true
     }
 
     /// Builds the ABSOLUTE host-time anchored PTS for a CFR slot.
