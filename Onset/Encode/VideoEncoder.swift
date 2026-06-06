@@ -308,13 +308,6 @@ actor VideoEncoder {
         self.aggregator.capOverflowCount
     }
 
-    /// Test-only observation accessor for telemetry accounting; not part of the encoder's
-    /// production contract. Used by L2 tests to verify soft-gate hold skips are counted
-    /// separately from hard gate drops.
-    var aggregatorHoldSkipCount: Int {
-        self.aggregator.holdSkipCount
-    }
-
     /// Whether the active session uses a hardware encoder (false when not started).
     /// Drives the L5 HW assertion.
     var isUsingHardwareEncoder: Bool {
@@ -565,17 +558,8 @@ actor VideoEncoder {
         for slot in emission.slots {
             // All slots from catchUpHolds are isHold==true by contract.
             let pts = self.anchoredPTS(slotIndex: slot.slotIndex)
-            let submitted = self.submit(
-                pixelBuffer: lastPixelBuffer,
-                slotIndex: slot.slotIndex,
-                pts: pts,
-                detectedAt: pts,
-                isHold: true
-            )
-            if submitted {
-                self.aggregator.recordHold()
-            }
-            // On !submitted the soft-gate already called recordHoldSkip() inside submit.
+            self.submit(pixelBuffer: lastPixelBuffer, slotIndex: slot.slotIndex, pts: pts, detectedAt: pts)
+            self.aggregator.recordHold()
         }
     }
 
@@ -647,18 +631,9 @@ actor VideoEncoder {
                     continue
                 }
                 let holdPTS = self.anchoredPTS(slotIndex: slot.slotIndex)
-                let submitted = self.submit(
-                    pixelBuffer: holdBuffer,
-                    slotIndex: slot.slotIndex,
-                    pts: holdPTS,
-                    detectedAt: holdPTS,
-                    isHold: true
-                )
-                if submitted {
-                    self.aggregator.recordHold()
-                    holdCount += 1
-                }
-                // On !submitted the soft-gate already called recordHoldSkip() inside submit.
+                self.submit(pixelBuffer: holdBuffer, slotIndex: slot.slotIndex, pts: holdPTS, detectedAt: holdPTS)
+                self.aggregator.recordHold()
+                holdCount += 1
             } else {
                 // Real frame: update lastPixelBuffer before submitting so subsequent holds
                 // in a future batch (or from the clock) re-use the fresh content.
@@ -668,8 +643,7 @@ actor VideoEncoder {
                     pixelBuffer: frame.pixelBuffer,
                     slotIndex: slot.slotIndex,
                     pts: realPTS,
-                    detectedAt: frame.ptsHostTime,
-                    isHold: false
+                    detectedAt: frame.ptsHostTime
                 )
                 self.aggregator.recordEncodedReal()
             }
@@ -692,43 +666,18 @@ actor VideoEncoder {
     /// The caller is responsible for computing `pts` via `anchoredPTS(slotIndex:)` — this
     /// avoids redundant computation when holds are submitted from `submitEmission`.
     ///
-    /// Backpressure gates (OpAC-4.4):
-    /// - Hard gate (real frames and holds): pending >= maxPendingFrames → drop, counted as
-    ///   `encoderBackpressureDrops`, a `DropEvent` is emitted.
-    /// - Soft gate (holds only): pending >= maxPendingFrames - 1 → hold skipped, counted as
-    ///   `holdSkip` in the aggregator. Real frames always pass through to the hard gate.
-    ///
-    /// Returns `true` when the frame was submitted (or at least attempted via `encodeFrame`),
-    /// `false` when blocked by a gate. Callers use the return value to decide whether to
-    /// count a `recordHold()` vs `recordHoldSkip()`.
-    @discardableResult
-    private func submit(
-        pixelBuffer: CVPixelBuffer,
-        slotIndex: Int,
-        pts: CMTime,
-        detectedAt: CMTime,
-        isHold: Bool
-    )
-    -> Bool {
-        guard let session = self.session else { return false }
+    /// Backpressure gate (OpAC-4.4): pending >= maxPendingFrames → drop as
+    /// `encoderBackpressureDrops`; a `DropEvent` is emitted.
+    private func submit(pixelBuffer: CVPixelBuffer, slotIndex: Int, pts: CMTime, detectedAt: CMTime) {
+        guard let session = self.session else { return }
 
-        let pending = session.pendingFrameCount()
-
-        // Soft gate: hold-only. Skip the hold when the encoder is approaching saturation so
-        // real frames get preference — one slot of headroom avoids a backpressure race where a
-        // real frame arrives a few ms after the hold it would duplicate.
-        if isHold, pending >= self.maxPendingFrames - 1 {
-            self.aggregator.recordHoldSkip()
-            return false
-        }
-
-        if pending >= self.maxPendingFrames {
+        if session.pendingFrameCount() >= self.maxPendingFrames {
             self.encoderBackpressureDrops += 1
             self.aggregator.recordGateDrop()
             self.dropsContinuation.yield(
                 DropEvent(reason: .encoderBackpressureDrops, count: 1, detectedAt: detectedAt)
             )
-            return false
+            return
         }
 
         // Slot duration is exactly one grid step.
@@ -749,7 +698,6 @@ actor VideoEncoder {
             // on VT's internal queue and has no access to the actor-isolated aggregator.
             self.aggregator.recordEmit()
         }
-        return true
     }
 
     /// Builds the ABSOLUTE host-time anchored PTS for a CFR slot.

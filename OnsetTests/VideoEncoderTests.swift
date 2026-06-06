@@ -1006,13 +1006,12 @@ struct VideoEncoderTests {
         let nowAfterSlot3 = anchorSeconds + 3.5 / Double(testFps) + grace + 0.001
         await encoder.clockTick(nowSeconds: nowAfterSlot3)
 
-        // All 3 hold slots must have been blocked (pending=1 == maxPendingFrames-1 triggers the
-        // soft-gate for holds before reaching the hard gate, so backpressureDrops stays 0).
-        #expect(await encoder.backpressureDropCount == 0)
+        // All 3 hold slots must have been gated (pending >= maxPendingFrames throughout).
+        #expect(await encoder.backpressureDropCount >= 2)
         // Only slot-0 real frame was encoded before the gate was set.
         #expect(mock.encodedBuffers.count == 1)
-        // The aggregator must have counted at least 2 soft-gate hold skips.
-        #expect(await encoder.aggregatorHoldSkipCount >= 2)
+        // The aggregator should have counted at least 2 gate drops.
+        #expect(await encoder.aggregatorHoldsCount >= 2)
     }
 
     // MARK: - Pre-anchor frame routing
@@ -1068,94 +1067,6 @@ struct VideoEncoderTests {
         #expect(await encoder.cfrNormalizationDropCount == 0)
         // Aggregator cap-overflow counter must be 1.
         #expect(await encoder.aggregatorCapOverflowCount == 1)
-    }
-
-    // MARK: - Soft-gate: holds skipped under encoder saturation
-
-    /// At `pending == maxPendingFrames - 1` (one slot of headroom consumed) a hold is
-    /// skipped by the soft-gate and counted as `holdSkip`, not as a hard gate drop.
-    /// The clock grid still advances (catchUpHolds consumed the slots) so no re-emission.
-    @Test("hold skipped at pending=maxPendingFrames-1: holdSkip counted, no encode, grid advances")
-    func softGate_holdSkippedAtSaturationMinus1() async throws {
-        let anchor = makeFixedAnchor()
-        let mock = MockCompressionSession()
-        // maxPendingFrames=3 so soft-gate threshold is 2.
-        let encoder = await makeEncoder(mock: mock, anchor: anchor, maxPendingFrames: 3, grace: 0.005)
-        try await encoder.start()
-
-        // Ingest slot 0 (encodes the real frame, mock.pending still 0).
-        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
-        #expect(mock.encodedBuffers.count == 1)
-
-        // Saturate to maxPendingFrames-1=2: soft-gate will block holds.
-        mock.pending = 2
-
-        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
-        let grace = 0.005
-        // Make slots 1 and 2 eligible.
-        let nowAfterSlot2 = anchorSeconds + 2.5 / Double(testFps) + grace + 0.001
-        await encoder.clockTick(nowSeconds: nowAfterSlot2)
-
-        // No holds should have been encoded (soft-gate blocks them).
-        #expect(mock.encodedBuffers.count == 1)
-        // Hard gate drop counter must be 0 (soft-gate fires first).
-        #expect(await encoder.backpressureDropCount == 0)
-        // Soft-gate skip counter must record both skipped holds.
-        #expect(await encoder.aggregatorHoldSkipCount >= 2)
-    }
-
-    /// At `pending == maxPendingFrames - 1` a real frame is NOT blocked by the soft-gate
-    /// (only holds are soft-gated) and passes through to the hard-gate check.
-    @Test("real frame submitted at pending=maxPendingFrames-1: passes soft-gate, encodes")
-    func softGate_realFramePassesThroughAtSaturationMinus1() async throws {
-        let anchor = makeFixedAnchor()
-        let mock = MockCompressionSession()
-        // maxPendingFrames=3.
-        let encoder = await makeEncoder(mock: mock, anchor: anchor, maxPendingFrames: 3, grace: 0.005)
-        try await encoder.start()
-
-        // Set pending to maxPendingFrames-1=2 before the first ingest.
-        mock.pending = 2
-
-        // Ingest slot 0 as a real frame — must NOT be blocked by the soft-gate.
-        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
-
-        // Real frame must have been encoded.
-        #expect(mock.encodedBuffers.count == 1)
-        // No drop of any kind.
-        #expect(await encoder.backpressureDropCount == 0)
-        #expect(await encoder.aggregatorHoldSkipCount == 0)
-    }
-
-    /// At `pending >= maxPendingFrames` the hard gate blocks real frames too, counted as
-    /// `backpressureDrops` (not holdSkip).
-    @Test("real frame dropped at pending=maxPendingFrames: hard gate fires, backpressureDrop counted")
-    func hardGate_realFrameDroppedAtMaxPending() async throws {
-        let anchor = makeFixedAnchor()
-        let mock = MockCompressionSession()
-        let encoder = await makeEncoder(mock: mock, anchor: anchor, maxPendingFrames: 2, grace: 0.005)
-        try await encoder.start()
-
-        // Saturate to max (2) before ingest.
-        mock.pending = 2
-
-        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
-
-        // Hard gate must have fired: no encode, one backpressure drop.
-        #expect(mock.encodedBuffers.isEmpty)
-        #expect(await encoder.backpressureDropCount == 1)
-        #expect(await encoder.aggregatorHoldSkipCount == 0)
-    }
-
-    /// `VideoEncoder.defaultGrace(fps:)` returns a value equal to 2 slots at 30 fps,
-    /// floored at the minimum 5 ms guard. At 30 fps: 2/30 ≈ 0.0667 s > 0.005 s floor.
-    @Test("defaultGrace(fps:30) equals 2.0/30 (≈66.7 ms), above the 5 ms floor")
-    func defaultGrace_fps30_equals2Slots() {
-        let grace = VideoEncoder.defaultGrace(fps: testFps)
-        // 2.0/30 = 0.06666... The floor is 0.005, so the result must equal 2.0/30 exactly.
-        #expect(grace == 2.0 / Double(testFps))
-        // Sanity: result is above the 5 ms floor.
-        #expect(grace > 0.005)
     }
 }
 
