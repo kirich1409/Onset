@@ -30,32 +30,38 @@ import Foundation
 import os
 import VideoToolbox
 
-// file_length is disabled: the actor's length is driven by the lifecycle-contract,
-// KNOWN-LIMITATION, and DEFER documentation required on the one-shot lifecycle and drop paths.
-// The lifecycle state and continuations are genuinely `private` (file-scoped), so the start/stop
-// logic cannot move to a sibling extension file without widening encapsulation — the existing
-// +Configuration / +LiveSession splits work only because they touch `internal` surface.
+// file_length / type_body_length are disabled: the actor's length is driven by the lifecycle-
+// contract, KNOWN-LIMITATION, and DEFER documentation required on the one-shot lifecycle and
+// drop paths. The lifecycle state and continuations are genuinely `private` (file-scoped), so
+// the start/stop logic cannot move to a sibling extension file without widening encapsulation —
+// the existing +Configuration / +LiveSession splits work only because they touch `internal`
+// surface. The catch-up clock + ingest logic requires access to the same private state and
+// cannot be split without the same encapsulation cost.
 // swiftlint:disable file_length
 
 // MARK: - VideoEncoder
 
+// swiftlint:disable type_body_length
 /// A single-stream hardware HEVC encoder.
 ///
 /// One instance encodes exactly one stream (screen OR camera). Frames enter via `ingest`;
-/// the CFR clock (`tick`) fills slot gaps with holds; encoded HEVC samples leave on
+/// the CFR clock fills slot gaps with synthetic holds; encoded HEVC samples leave on
 /// `encodedSamples`; drops are reported on `drops`.
 ///
 /// ### Constant-frame-rate driving (spec §CFR, OpAC-4.2/4.3)
-/// The actor delegates every slot decision to `CFRNormalizer`. `ingest` feeds the frame's
-/// PTS-in-seconds; `tick(slotIndex:)` (wall-clock timer, or tests synchronously) fills a gap
-/// with a hold that re-submits the last `CVPixelBuffer`.
+/// The actor delegates every slot decision to `CFRNormalizer` and its catch-up API.
+/// `ingest` calls `catchUpThenEncode`: it emits synthetic holds for any slots that elapsed
+/// since the last emission and then encodes the real frame — real frames always win their
+/// own slot. `clockTick()` (absolute-deadline loop, or tests via `clockTick(nowSeconds:)`)
+/// calls `catchUpHolds` to fill slots that elapsed with no real frame (source silence /
+/// static screen).
 ///
 /// ### Anchored PTS (Decision #3 — critical)
 /// The PTS handed to `encodeFrame` is the ABSOLUTE host-time value built with exact integer
 /// CMTime math from the normalizer's integer `slotIndex` — see `anchoredPTS(slotIndex:)`.
 ///
 /// ### One-shot lifecycle contract (for #34's author)
-/// The encoder is ONE-SHOT: `init → start() → (ingest / clockTick / tick)* → stop() → discard`.
+/// The encoder is ONE-SHOT: `init → start() → (ingest / clockTick)* → stop() → discard`.
 /// - `start()` succeeds exactly once. A second `start()` — after a successful start, after
 ///   `stop()`, or after a failed (throwing) `start()` — throws `VideoEncoderError.invalidLifecycleState`.
 ///   A thrown `start()` is TERMINAL: the encoder cannot be revived; create a fresh instance.
@@ -111,8 +117,12 @@ actor VideoEncoder {
     /// `true` (default): the encoder self-drives its CFR grid — the wall-clock loop fires
     /// `clockTick()` at `1/fps` so holds (OpAC-4.2) work standalone. `false`: an external
     /// coordinator (`RecordingSession` #34, which owns the shared clock) drives `clockTick()`;
-    /// also used by tests to drive `tick`/`clockTick`/`ingest` deterministically.
+    /// also used by tests to drive `clockTick`/`ingest` deterministically.
     private let selfClocked: Bool
+
+    /// Lane label used in telemetry lines ("screen" / "camera" / "video").
+    /// Additive — callers that do not care pass the default "video".
+    private let label: String
 
     /// `internal` (not `private`): the VideoEncoder+Configuration.swift extension uses it.
     nonisolated let logger = Logger(
@@ -143,9 +153,53 @@ actor VideoEncoder {
     /// normalizer's `cfrNormalizationDrops`.
     private var encoderBackpressureDrops = 0
 
-    /// The standalone CFR clock loop spawned by `start()` and cancelled by `stop()`.
-    /// Drives `clockTick()` at `1/fps`. Replaced by #34's shared clock once it exists.
+    /// Source-silence threshold (seconds): the clock waits this long after a slot's midpoint
+    /// before synthesising a hold. A hold is emitted only when no real frame has arrived by
+    /// `slot_midpoint + graceSeconds`, making grace the maximum acceptable frame-delivery latency,
+    /// not a scheduling epsilon.
+    ///
+    /// Size to ≥ p95 of the capture→ingest pipeline latency for the lane; use
+    /// `defaultGrace(fps:)` (2 slots) as the starting point and tighten once measured.
+    private let graceSeconds: Double
+
+    /// Minimum grace floor: 5 ms, enough to absorb scheduler jitter even at 60 fps (half-slot
+    /// = 8.33 ms). Never go below this regardless of fps.
+    private static let minGraceSeconds = 0.005
+
+    /// Grace expressed as a fraction of the slot duration: 2 slots of silence required before
+    /// a hold is emitted. At 30 fps this is ≈ 66.7 ms; at 60 fps ≈ 33.3 ms.
+    private static let graceSlotMultiplier = 2.0
+
+    /// Derives the fps-dependent default grace window: `max(minGraceSeconds, 2 slots)`.
+    ///
+    /// - Parameter fps: The CFR grid rate (must be > 0).
+    /// - Returns: Grace in seconds.
+    static func defaultGrace(fps: Int) -> Double {
+        max(self.minGraceSeconds, self.graceSlotMultiplier / Double(fps))
+    }
+
+    /// Session T0 in seconds, derived once at init from `anchor.anchorTime`.
+    /// Avoids repeated `CMTimeGetSeconds` calls in hot paths (`ingest`, `clockTick`, `secondsUntilNextDeadline`).
+    private let anchorSeconds: Double
+
+    /// The absolute-deadline CFR clock loop spawned by `start()` and cancelled by `stop()`.
+    /// Drives `clockTick()` against the grid's next hold deadline rather than a fixed relative
+    /// sleep. Replaced by #34's shared clock once it exists.
     private var clockTickTask: Task<Void, Never>?
+
+    // MARK: - Telemetry
+
+    /// Per-stage cadence accumulator. Flushed every ~1 s on the telemetry tick.
+    private var aggregator: StageRateAggregator
+
+    /// ~1 s periodic flush task started in `start()`, cancelled in `stop()`.
+    private var telemetryTask: Task<Void, Never>?
+
+    /// Maximum holds to emit in one batch — capped at 1 second of slots to bound
+    /// synchronous burst work after a late wakeup or system sleep.
+    private var holdCapSlots: Int {
+        self.fps
+    }
 
     // MARK: - Output streams
 
@@ -179,9 +233,15 @@ actor VideoEncoder {
     ///   - anchor: Session T0. Defaults to `HostTimeAnchor.now()` for standalone use until
     ///     `RecordingSession` (#34) injects a shared anchor.
     ///   - maxPendingFrames: Backpressure bound. Default 4 (≈ a few frames of slack at 30–60fps).
+    ///   - grace: Source-silence threshold in seconds — the clock waits this long after a slot's
+    ///     midpoint before synthesising a hold. `nil` (default) derives the value from fps via
+    ///     `defaultGrace(fps:)` (2 slots, floored at 5 ms). Pass an explicit value only when
+    ///     overriding the default in tests or production experiments.
     ///   - selfClocked: Whether `start()` spawns the standalone CFR clock. `true` (default) for
     ///     standalone use; `false` when an external coordinator (#34) or a test drives
     ///     `clockTick()`.
+    ///   - label: Lane label emitted in telemetry lines ("screen", "camera"). Default "video" is
+    ///     safe for standalone / test use; `LiveEncoderFactory` overrides it per pipeline kind.
     ///   - sessionFactory: Injectable seam. Defaults to the live VideoToolbox implementation;
     ///     tests inject a mock.
     init(
@@ -191,20 +251,27 @@ actor VideoEncoder {
         fps: Int,
         anchor: HostTimeAnchor = .now(),
         maxPendingFrames: Int = 4,
+        grace: Double? = nil,
         selfClocked: Bool = true,
+        label: String = "video",
         sessionFactory: @escaping SessionFactory = VideoEncoder.liveSessionFactory
     ) {
         precondition(fps > 0, "fps must be positive")
         precondition(width > 0 && height > 0, "dimensions must be positive")
         precondition(maxPendingFrames > 0, "maxPendingFrames must be positive")
+        if let grace { precondition(grace >= 0, "grace must be non-negative") }
 
         self.settings = settings
         self.width = width
         self.height = height
         self.fps = fps
         self.anchor = anchor
+        self.anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
         self.maxPendingFrames = maxPendingFrames
+        self.graceSeconds = grace ?? Self.defaultGrace(fps: fps)
         self.selfClocked = selfClocked
+        self.label = label
+        self.aggregator = StageRateAggregator(lane: label, stage: .encoder, nominalFps: fps)
         self.sessionFactory = sessionFactory
 
         let (samples, samplesContinuation) = AsyncStream.makeStream(of: EncodedSample.self)
@@ -227,6 +294,18 @@ actor VideoEncoder {
     /// from `cfrNormalizationDropCount`.
     var backpressureDropCount: Int {
         self.encoderBackpressureDrops
+    }
+
+    /// Test-only observation accessor for telemetry accounting; not part of the encoder's
+    /// production contract. Used by L2 tests to verify clock-driven holds are counted.
+    var aggregatorHoldsCount: Int {
+        self.aggregator.holdsCount
+    }
+
+    /// Test-only observation accessor for telemetry accounting; not part of the encoder's
+    /// production contract. Used by L2 tests to verify cappedShort batches are counted.
+    var aggregatorCapOverflowCount: Int {
+        self.aggregator.capOverflowCount
     }
 
     /// Whether the active session uses a hardware encoder (false when not started).
@@ -290,6 +369,7 @@ actor VideoEncoder {
         if self.selfClocked {
             self.startClock()
         }
+        self.startTelemetryTask()
         self.logger.info("VideoEncoder started — \(self.width)×\(self.height)@\(self.fps)fps")
     }
 
@@ -321,6 +401,8 @@ actor VideoEncoder {
     /// THEN are the continuations finished — so no callback ever yields into a finished
     /// continuation.
     func stop() async {
+        self.telemetryTask?.cancel()
+        self.telemetryTask = nil
         if let session = self.session {
             self.clockTickTask?.cancel()
             await self.clockTickTask?.value
@@ -338,56 +420,162 @@ actor VideoEncoder {
 
     // MARK: - CFR clock
 
-    /// Spawns the standalone CFR clock loop.
+    /// Spawns the absolute-deadline CFR clock loop.
     ///
-    /// The loop sleeps `1/fps` and calls `clockTick()` until cancelled. This is the
-    /// production driver that makes holds (OpAC-4.2) actually fire. Once `RecordingSession`
-    /// (#34) exists it owns both the source subscription and the clock and will drive
-    /// `clockTick()` itself; until then this self-clock keeps the unit functional standalone.
+    /// Each iteration sleeps until the next hold-eligible deadline (computed from the grid
+    /// anchor and grace window) and then calls `clockTick()`. Sleeping to an absolute
+    /// deadline eliminates cumulative drift — a late wakeup is harmless because
+    /// `catchUpHolds` emits every slot that elapsed during the overslept period in one
+    /// batch. When the grid is not yet open (`lastEmittedSlot == -1`, no real frame
+    /// ingested), `clockTick()` cannot emit anything; the loop sleeps a fixed `1/fps`
+    /// fallback and retries rather than spinning.
+    ///
+    /// The clock is the fallback emitter for source silence or a static screen. Real frames
+    /// win their own slot via `ingest`; the clock only fills slots that real frames never
+    /// claimed.
+    ///
+    /// Once `RecordingSession` (#34) exists it owns both the source subscription and the
+    /// clock and will drive `clockTick()` itself; until then this self-clock keeps the unit
+    /// functional standalone.
     private func startClock() {
-        let nanosPerSecond = 1_000_000_000
-        let nanosPerTick = UInt64(nanosPerSecond / self.fps)
-        self.clockTickTask = Task { [weak self] in
+        // swiftlint:disable:next no_magic_numbers
+        let fallbackNanos = UInt64(1_000_000_000 / self.fps)
+        // .userInitiated keeps the loop responsive; the clock drives real-time A/V emission.
+        self.clockTickTask = Task(priority: .userInitiated) { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: nanosPerTick)
-                if Task.isCancelled { return }
-                // A deallocated-but-unstopped encoder ends the loop rather than spinning.
                 guard let self else { return }
-                await self.clockTick()
+                let remaining = await self.secondsUntilNextDeadline()
+                if let remaining {
+                    if remaining > 0 {
+                        try? await Task.sleep(for: .seconds(remaining))
+                    }
+                    if Task.isCancelled { return }
+                    await self.clockTick()
+                } else {
+                    // Grid not yet open — no real frame has arrived. Sleep one slot and retry
+                    // rather than spinning. clockTick() would be a no-op here anyway.
+                    try? await Task.sleep(nanoseconds: fallbackNanos)
+                }
             }
         }
     }
 
-    /// One wall-clock CFR tick: hold the current grid slot if it is still empty.
+    /// Spawns the ~1 s telemetry flush task.
     ///
-    /// Reads the present host time, computes the current grid slot, and fires the hold path
-    /// ONLY when that slot is ahead of the last emitted slot. An already-filled slot is a
-    /// silent no-op — it never reaches `CFRNormalizer.processTick`'s defensive drop branch,
-    /// so the standalone clock cannot corrupt `cfrNormalizationDrops`. The read-and-decide is
-    /// atomic: it is synchronous actor-isolated code with no `await` between the slot read and
-    /// the tick.
+    /// Uses `ContinuousClock` to measure the actual elapsed interval (not wall time) so that
+    /// the `win_s` field in the log line reflects the real measurement window.
+    private func startTelemetryTask() {
+        self.telemetryTask = Task { [weak self] in
+            let clock = ContinuousClock()
+            var lastInstant = clock.now
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, !Task.isCancelled else { return }
+                let now = clock.now
+                let elapsedSeconds = (now - lastInstant).totalSeconds
+                lastInstant = now
+                // Hop into the actor's isolation to mutate the aggregator.
+                await self.flushTelemetry(elapsedSeconds: elapsedSeconds)
+            }
+        }
+    }
+
+    private func flushTelemetry(elapsedSeconds: Double) {
+        if let line = self.aggregator.flush(elapsedSeconds: elapsedSeconds) {
+            telemetryLogger.notice("\(line, privacy: .public)")
+        } else {
+            self.logger.debug("flushTelemetry: skipped (elapsed ≤ 0)")
+        }
+    }
+
+    /// Returns the seconds remaining until the next hold-eligible deadline, or `nil` when
+    /// the grid is not yet open (no real frame ingested, `lastEmittedSlot == -1`).
     ///
-    /// Known limitation (accepted for the standalone clock): a tick may fire slot N before
-    /// N's real frame arrives, then `ingest` drops that frame as a duplicate. #34, owning both
-    /// the source and the clock, refines the phase. Not handled here by design.
-    func clockTick() {
-        guard self.lastPixelBuffer != nil else { return }
+    /// A negative or zero return means the deadline has already passed and `clockTick()`
+    /// should be called immediately (catch-up will emit the overdue slots).
+    private func secondsUntilNextDeadline() -> Double? {
+        guard self.normalizer.lastEmittedSlot >= 0 else { return nil }
         let nowSeconds = CMTimeGetSeconds(PipelineClock.currentHostTime())
-        let anchorSeconds = CMTimeGetSeconds(self.anchor.anchorTime)
-        let currentSlot = Int(((nowSeconds - anchorSeconds) * Double(self.fps)).rounded(.down))
-        guard currentSlot > self.normalizer.lastEmittedSlot else { return }
-        self.tick(slotIndex: currentSlot)
+        let deadline = self.normalizer.nextDeadlineSeconds(
+            anchorSeconds: self.anchorSeconds,
+            fps: self.fps,
+            graceSeconds: self.graceSeconds
+        )
+        return deadline - nowSeconds
+    }
+
+    /// One wall-clock CFR tick: batch-emit synthetic holds for all grace-expired slots.
+    ///
+    /// Calls `catchUpHolds` with the current time, emitting holds for every slot whose
+    /// window has closed beyond the grace allowance. The cap is `fps` (one second of slots),
+    /// bounding the synchronous batch for large catch-up bursts (e.g. after a system sleep).
+    /// The read-and-decide is atomic: actor-isolated synchronous code with no `await` inside
+    /// the submission loop, so no new frame can arrive mid-batch.
+    ///
+    /// Real frames win their slot: `ingest` advances `lastEmittedSlot` via `catchUpThenEncode`
+    /// before the clock fires, so the clock never re-covers a slot already filled by a real
+    /// frame. The clock is the fallback emitter for source silence or a static screen.
+    ///
+    /// - Note: A large catch-up batch (e.g. after a late wakeup) submits multiple frames
+    ///   synchronously. The `pendingFrameCount` proxy cannot drain mid-batch, so holds beyond
+    ///   `maxPendingFrames` receive a backpressure drop. Dropping stale holds after a stall is
+    ///   consistent with the "atomic read-and-decide" contract and the cap bound.
+    func clockTick() {
+        let nowSeconds = CMTimeGetSeconds(PipelineClock.currentHostTime())
+        self.clockTick(nowSeconds: nowSeconds)
+    }
+
+    /// Testable overload: inject `nowSeconds` instead of reading the real clock.
+    ///
+    /// The production `clockTick()` calls through with `PipelineClock.currentHostTime()`.
+    /// Tests drive this directly for deterministic, wall-clock-free assertions.
+    func clockTick(nowSeconds: Double) {
+        guard let lastPixelBuffer = self.lastPixelBuffer else { return }
+
+        // Measure tick-lag BEFORE catchUpHolds advances the grid — after, nextDeadlineSeconds
+        // returns the next window's deadline and the lag measurement would be meaningless.
+        if self.normalizer.lastEmittedSlot >= 0 {
+            let deadline = self.normalizer.nextDeadlineSeconds(
+                anchorSeconds: self.anchorSeconds,
+                fps: self.fps,
+                graceSeconds: self.graceSeconds
+            )
+            // swiftlint:disable:next no_magic_numbers
+            let lagMs = abs(nowSeconds - deadline) * 1000
+            self.aggregator.recordTickLag(lagMs: lagMs)
+        }
+
+        let emission = self.normalizer.catchUpHolds(
+            nowSeconds: nowSeconds,
+            anchorSeconds: self.anchorSeconds,
+            fps: self.fps,
+            graceSeconds: self.graceSeconds,
+            cap: self.holdCapSlots
+        )
+        if !emission.slots.isEmpty {
+            self.aggregator.recordCatchupBatch(size: emission.slots.count)
+        }
+        for slot in emission.slots {
+            // All slots from catchUpHolds are isHold==true by contract.
+            let pts = self.anchoredPTS(slotIndex: slot.slotIndex)
+            self.submit(pixelBuffer: lastPixelBuffer, slotIndex: slot.slotIndex, pts: pts, detectedAt: pts)
+            self.aggregator.recordHold()
+        }
     }
 
     // MARK: - Ingest (new frame)
 
     /// Ingests a new captured frame.
     ///
-    /// Drives the CFR normalizer with the frame's PTS-in-seconds. On `.encode` the absolute
-    /// anchored PTS is built from the integer slot index and the frame is submitted (subject
-    /// to the backpressure gate). On `.drop(.cfrNormalizationDrops)` the duplicate-slot frame
-    /// is dropped — `cfrNormalizationDrops` is owned by the normalizer; `encoderBackpressureDrops`
-    /// is NOT touched.
+    /// Routes the frame through the catch-up emission API. Frames that map to a slot already
+    /// emitted (duplicates) or to a negative slot (pre-anchor) are routed through
+    /// `processFrame` solely for its drop-accounting side effect — `cfrNormalizationDrops`
+    /// and pre-anchor accounting stay byte-identical to the old path.
+    ///
+    /// For valid new frames, `catchUpThenEncode` emits any synthetic holds for slots that
+    /// elapsed since the last emission, then emits the real frame. This eliminates the
+    /// hold-beats-real race: the real frame claims its slot atomically here before the clock
+    /// can touch it.
     ///
     /// Input frames always arrive with `isHoldRepeat == false`; this encoder owns the hold
     /// decision via the normalizer.
@@ -399,84 +587,117 @@ actor VideoEncoder {
             return
         }
         let ptsSeconds = CMTimeGetSeconds(frame.ptsHostTime)
-        let anchorSeconds = CMTimeGetSeconds(self.anchor.anchorTime)
-        let decision = self.normalizer.processFrame(
-            ptsSeconds: ptsSeconds,
-            anchorSeconds: anchorSeconds,
-            fps: self.fps
-        )
 
-        switch decision {
-        case let .encode(slotIndex, _, _):
-            self.lastPixelBuffer = frame.pixelBuffer
-            self.submit(pixelBuffer: frame.pixelBuffer, slotIndex: slotIndex, detectedAt: frame.ptsHostTime)
-
-        case .drop:
-            // .cfrNormalizationDrops and .preAnchor are accounted inside the normalizer;
-            // no backpressure counter is touched here.
-            break
-        }
-    }
-
-    // MARK: - CFR tick (hold)
-
-    /// Drives a CFR clock tick for `slotIndex` when no new frame arrived for that slot.
-    ///
-    /// On a hold the LAST `CVPixelBuffer` is re-submitted with the held slot's anchored PTS
-    /// (OpAC-4.2). `cfrNormalizationDrops` is NOT incremented for a hold. Exposed for the
-    /// wall-clock timer AND for synchronous L2 tests (no `Task.sleep` in tests).
-    ///
-    /// - Parameter slotIndex: The CFR grid slot that elapsed with no frame.
-    func tick(slotIndex: Int) {
-        guard let lastPixelBuffer = self.lastPixelBuffer else {
-            // No frame has ever been ingested — nothing to hold. The first real frame will
-            // open the grid.
+        // Route duplicates and pre-anchor frames through processFrame for accounting only.
+        // slotFor uses the same round() mapping as processFrame, so agreement is guaranteed.
+        let slotS = CFRNormalizer.slotFor(ptsSeconds: ptsSeconds, anchorSeconds: self.anchorSeconds, fps: self.fps)
+        if slotS < 0 || slotS <= self.normalizer.lastEmittedSlot {
+            let decision = self.normalizer.processFrame(
+                ptsSeconds: ptsSeconds, anchorSeconds: self.anchorSeconds, fps: self.fps
+            )
+            // Defensive: processFrame must return .drop for frames routed here.
+            // An .encode result would indicate a mapping mismatch — assert rather than silently encode.
+            if case .encode = decision {
+                // Mapping mismatch — slotFor and processFrame must agree on the routing.
+                assertionFailure("ingest: processFrame returned .encode for a frame expected to drop " +
+                    "(slot \(slotS), lastEmitted \(self.normalizer.lastEmittedSlot))")
+            }
+            self.aggregator.recordDropDup()
             return
         }
 
-        let decision = self.normalizer.processTick(slotIndex: slotIndex, fps: self.fps)
-        switch decision {
-        case let .encode(slotIndex, _, _):
-            let pts = self.anchoredPTS(slotIndex: slotIndex)
-            self.submit(pixelBuffer: lastPixelBuffer, slotIndex: slotIndex, detectedAt: pts)
+        // Valid new frame: emit holds for any elapsed slots, then the real frame.
+        self.aggregator.recordFresh()
+        let emission = self.normalizer.catchUpThenEncode(
+            ptsSeconds: ptsSeconds, anchorSeconds: self.anchorSeconds, fps: self.fps, cap: self.holdCapSlots
+        )
+        self.submitEmission(emission, frame: frame, computedSlot: slotS)
+    }
 
-        case .drop:
-            break
+    /// Iterates a `CFREmission` produced by `catchUpThenEncode` and submits each slot.
+    ///
+    /// Hold slots re-submit `lastPixelBuffer`; the terminal real slot updates it first.
+    /// Extracted from `ingest` to stay within the function-body-length limit.
+    private func submitEmission(_ emission: CFREmission, frame: VideoFrame, computedSlot: Int) {
+        var holdCount = 0
+        for slot in emission.slots {
+            if slot.isHold {
+                // Hold: re-submit last known buffer. lastPixelBuffer is non-nil here because
+                // catchUpThenEncode only emits holds when lastEmittedSlot >= 0, which means at
+                // least one real frame has been ingested before this one (stage-(a) contract:
+                // no leading holds on the first frame).
+                guard let holdBuffer = self.lastPixelBuffer else {
+                    assertionFailure("ingest: hold emitted but lastPixelBuffer is nil — stage-(a) contract violated")
+                    continue
+                }
+                let holdPTS = self.anchoredPTS(slotIndex: slot.slotIndex)
+                self.submit(pixelBuffer: holdBuffer, slotIndex: slot.slotIndex, pts: holdPTS, detectedAt: holdPTS)
+                self.aggregator.recordHold()
+                holdCount += 1
+            } else {
+                // Real frame: update lastPixelBuffer before submitting so subsequent holds
+                // in a future batch (or from the clock) re-use the fresh content.
+                self.lastPixelBuffer = frame.pixelBuffer
+                let realPTS = self.anchoredPTS(slotIndex: slot.slotIndex)
+                self.submit(
+                    pixelBuffer: frame.pixelBuffer,
+                    slotIndex: slot.slotIndex,
+                    pts: realPTS,
+                    detectedAt: frame.ptsHostTime
+                )
+                self.aggregator.recordEncodedReal()
+            }
+        }
+        if holdCount > 0 {
+            self.aggregator.recordCatchupBatch(size: holdCount)
+        }
+        if emission.cappedShort {
+            // The hold count exceeded `cap` (fps); the real frame's slot was not included.
+            // Its content is consciously deferred — see catchUpThenEncode stage-(a) contract.
+            self.logger.warning("ingest: catch-up capped short at slot \(computedSlot) — real frame deferred")
+            self.aggregator.recordCapOverflow()
         }
     }
 
     // MARK: - Submission + backpressure
 
-    /// Submits one pixel buffer to the session at the anchored PTS for `slotIndex`.
+    /// Submits one pixel buffer to the session at the pre-computed `pts` for `slotIndex`.
     ///
-    /// Backpressure gate (OpAC-4.4): if the session already has `maxPendingFrames` in flight,
-    /// the frame is dropped as `encoderBackpressureDrops` and a `DropEvent` is emitted. This
-    /// counter is SEPARATE from the normalizer's `cfrNormalizationDrops`.
-    private func submit(pixelBuffer: CVPixelBuffer, slotIndex: Int, detectedAt: CMTime) {
+    /// The caller is responsible for computing `pts` via `anchoredPTS(slotIndex:)` — this
+    /// avoids redundant computation when holds are submitted from `submitEmission`.
+    ///
+    /// Backpressure gate (OpAC-4.4): pending >= maxPendingFrames → the frame is dropped as
+    /// `encoderBackpressureDrops` and a `DropEvent` is emitted. This counter is SEPARATE
+    /// from the normalizer's `cfrNormalizationDrops`.
+    private func submit(pixelBuffer: CVPixelBuffer, slotIndex: Int, pts: CMTime, detectedAt: CMTime) {
         guard let session = self.session else { return }
 
         if session.pendingFrameCount() >= self.maxPendingFrames {
             self.encoderBackpressureDrops += 1
+            self.aggregator.recordGateDrop()
             self.dropsContinuation.yield(
                 DropEvent(reason: .encoderBackpressureDrops, count: 1, detectedAt: detectedAt)
             )
-            self.logger.warning("Encoder backpressure — dropped frame at slot \(slotIndex)")
             return
         }
 
-        let pts = self.anchoredPTS(slotIndex: slotIndex)
         // Slot duration is exactly one grid step.
         let duration = CMTimeMake(value: 1, timescale: Int32(self.fps))
         let status = session.encodeFrame(pixelBuffer: pixelBuffer, pts: pts, duration: duration)
         if status != noErr {
             // F2 / KNOWN LIMITATION: the normalizer already advanced `lastEmittedSlot`, so a
             // non-noErr encode is a permanent invisible gap in the CFR grid. For MVP this is
-            // LOGGED ONLY — surfacing encode-failure to DropMonitor is deferred to #35, which
-            // owns the drop-reason taxonomy. It is deliberately NOT counted on
-            // `encoderBackpressureDrops` (that would corrupt the OpAC-4.3/4.4 counter separation)
-            // and NOT on `cfrNormalizationDrops` (normalizer-owned). A conscious decision, not an
-            // unmarked swallow.
+            // surfaced as a telemetry counter (vt_err) and logged — surfacing to DropMonitor is
+            // deferred to #35, which owns the drop-reason taxonomy. It is deliberately NOT counted
+            // on `encoderBackpressureDrops` (that would corrupt the OpAC-4.3/4.4 counter
+            // separation) and NOT on `cfrNormalizationDrops` (normalizer-owned).
+            self.aggregator.recordVTError()
             self.logger.error("VTCompressionSessionEncodeFrame failed: \(status) at slot \(slotIndex) — frame dropped")
+        } else {
+            // Count successful encodeFrame submissions as emitted slots.
+            // Counted here (actor-isolated) rather than from the VT output callback, which fires
+            // on VT's internal queue and has no access to the actor-isolated aggregator.
+            self.aggregator.recordEmit()
         }
     }
 
@@ -492,4 +713,4 @@ actor VideoEncoder {
     }
 }
 
-// swiftlint:enable file_length
+// swiftlint:enable type_body_length

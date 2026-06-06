@@ -3,6 +3,12 @@ import CoreVideo
 import os
 import ScreenCaptureKit
 
+// file_length is disabled: the telemetry flush task added in the cadence-telemetry change brings
+// ScreenSource over 400 lines. The extra length is inline documentation + the task; splitting
+// the telemetry into a separate file would scatter the lifecycle-cancel coupling (stop /
+// handleTerminalStop cancel the task). The actor + shim are genuinely cohesive here.
+// swiftlint:disable file_length
+
 // MARK: - FrameAction
 
 /// The pipeline decision for a single SCStream sample.
@@ -132,6 +138,15 @@ actor ScreenSource: VideoFrameSource {
     )
     private var captureState: CaptureState = .idle
 
+    // MARK: - Telemetry
+
+    /// Lock shared with `StreamOutputShim` so the shim (running on `sampleHandlerQueue`) and this
+    /// actor's flush tick can both safely access the same `StageRateAggregator` struct.
+    private let captureRateLock: OSAllocatedUnfairLock<StageRateAggregator>
+
+    /// ~1 s periodic flush task started after a successful capture start, cancelled in `stop()`.
+    private var captureTelemetryTask: Task<Void, Never>?
+
     // MARK: - Init
 
     /// Creates a `ScreenSource` for the display described in `plan`.
@@ -156,6 +171,10 @@ actor ScreenSource: VideoFrameSource {
         self.framesContinuation = capturedFrames
         self.eventsContinuation = capturedEvents
         self.dropsContinuation = capturedDrops
+
+        self.captureRateLock = OSAllocatedUnfairLock(
+            initialState: StageRateAggregator(lane: "screen", stage: .capture, nominalFps: plan.screenFps)
+        )
     }
 
     // MARK: - VideoFrameSource
@@ -193,6 +212,7 @@ actor ScreenSource: VideoFrameSource {
             self.captureState = .idle
             throw error
         }
+        self.startCaptureTelemetryTask()
     }
 
     private func discoverDisplay() async throws -> SCDisplay {
@@ -225,7 +245,8 @@ actor ScreenSource: VideoFrameSource {
             dropsContinuation: self.dropsContinuation,
             eventsContinuation: self.eventsContinuation,
             displayID: self.plan.displayID,
-            onTerminalStop: onTerminalStop
+            onTerminalStop: onTerminalStop,
+            rateLock: self.captureRateLock
         )
     }
 
@@ -254,6 +275,8 @@ actor ScreenSource: VideoFrameSource {
     /// ScreenSource has no auto-restart in MVP — any `didStopWithError` is terminal.
     /// Emits the appropriate event, then finishes all streams. Idempotent.
     func handleTerminalStop(error: any Error) async {
+        self.captureTelemetryTask?.cancel()
+        self.captureTelemetryTask = nil
         guard case .running = self.captureState else { return }
         self.captureState = .stopped
         screenSourceLogger.error("SCStream stopped with error: \(error)")
@@ -274,6 +297,8 @@ actor ScreenSource: VideoFrameSource {
 
     /// Stops display capture. Finishes all three streams idempotently.
     func stop() async {
+        self.captureTelemetryTask?.cancel()
+        self.captureTelemetryTask = nil
         defer { self.finishAllStreams() }
         guard case let .running(scStream, shim) = captureState else {
             self.captureState = .stopped
@@ -287,6 +312,25 @@ actor ScreenSource: VideoFrameSource {
             screenSourceLogger.error("stopCapture error (ignored): \(error)")
         }
         screenSourceLogger.info("Capture stopped")
+    }
+
+    private func startCaptureTelemetryTask() {
+        self.captureTelemetryTask = Task { [weak self] in
+            let clock = ContinuousClock()
+            var lastInstant = clock.now
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, !Task.isCancelled else { return }
+                let now = clock.now
+                let elapsedSeconds = (now - lastInstant).totalSeconds
+                lastInstant = now
+                if let line = self.captureRateLock.withLock({ $0.flush(elapsedSeconds: elapsedSeconds) }) {
+                    telemetryLogger.notice("\(line, privacy: .public)")
+                } else {
+                    screenSourceLogger.debug("flushTelemetry: skipped (elapsed ≤ 0)")
+                }
+            }
+        }
     }
 
     private func finishAllStreams() {
@@ -318,6 +362,13 @@ private final class StreamOutputShim: NSObject, SCStreamOutput, SCStreamDelegate
     /// `nonisolated(unsafe)`: confined to `sampleHandlerQueue` (serial). That queue is the lock.
     nonisolated(unsafe) private var didLogStatusAnomaly = false
 
+    /// Per-stage cadence accumulator, shared with the owning `ScreenSource` actor for flushing.
+    ///
+    /// `OSAllocatedUnfairLock` because `StreamOutputShim` runs on `sampleHandlerQueue` (a GCD
+    /// serial queue) while the flush tick runs actor-isolated — two isolation domains. The lock is
+    /// `Sendable`, so storing it as `let` satisfies the `@unchecked Sendable` contract.
+    private let rateLock: OSAllocatedUnfairLock<StageRateAggregator>
+
     // nonisolated: overrides @MainActor inference (SWIFT_DEFAULT_ACTOR_ISOLATION=MainActor)
     // so ScreenSource can construct the shim without an await hop.
     nonisolated init(
@@ -326,7 +377,8 @@ private final class StreamOutputShim: NSObject, SCStreamOutput, SCStreamDelegate
         dropsContinuation: AsyncStream<DropEvent>.Continuation,
         eventsContinuation: AsyncStream<SourceEvent>.Continuation,
         displayID: CGDirectDisplayID,
-        onTerminalStop: @escaping @Sendable (any Error) async -> Void
+        onTerminalStop: @escaping @Sendable (any Error) async -> Void,
+        rateLock: OSAllocatedUnfairLock<StageRateAggregator>
     ) {
         self.sessionStart = sessionStart
         self.framesContinuation = framesContinuation
@@ -334,6 +386,7 @@ private final class StreamOutputShim: NSObject, SCStreamOutput, SCStreamDelegate
         self.eventsContinuation = eventsContinuation
         self.displayID = displayID
         self.onTerminalStop = onTerminalStop
+        self.rateLock = rateLock
     }
 
     // MARK: - SCStreamOutput
@@ -345,7 +398,11 @@ private final class StreamOutputShim: NSObject, SCStreamOutput, SCStreamDelegate
     ) {
         guard type == .screen else { return }
         let status = self.frameStatus(from: sampleBuffer)
-        guard classifyFrameStatus(status) == .process else { return }
+        guard classifyFrameStatus(status) == .process else {
+            // skipStatic callbacks (idle, blank, started, stopped, suspended) are counted as idle.
+            self.rateLock.withLock { $0.recordIdle() }
+            return
+        }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         guard shouldKeepFrame(frameHostTime: pts, sessionStart: self.sessionStart) else { return }
         // A .complete frame with no image buffer is a contract violation — log at .error.
@@ -354,7 +411,15 @@ private final class StreamOutputShim: NSObject, SCStreamOutput, SCStreamDelegate
             return
         }
         let frame = VideoFrame(pixelBuffer: pixelBuffer, ptsHostTime: pts, isHoldRepeat: false)
-        if let dropEvent = backpressureDropEvent(for: self.framesContinuation.yield(frame), pts: pts) {
+        let yieldResult = self.framesContinuation.yield(frame)
+        self.rateLock.withLock { aggregator in
+            if case .dropped = yieldResult {
+                aggregator.recordOverflow()
+            } else {
+                aggregator.recordFresh()
+            }
+        }
+        if let dropEvent = backpressureDropEvent(for: yieldResult, pts: pts) {
             self.dropsContinuation.yield(dropEvent)
         }
     }

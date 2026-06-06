@@ -25,6 +25,14 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
     /// `nonisolated(unsafe)`: confined to `videoQueue` (serial). That queue is the lock.
     nonisolated(unsafe) var didLogBufferAnomaly = false
 
+    /// Per-stage cadence accumulator, shared with the owning `CameraSource` actor for flushing.
+    ///
+    /// `OSAllocatedUnfairLock` because `VideoOutputShim` runs on `videoQueue` (a GCD serial queue)
+    /// while the flush tick runs actor-isolated — two isolation domains accessing the same struct.
+    /// The lock itself is `Sendable` (value type, heap-allocated internally), so storing it as a
+    /// `let` constant satisfies the `@unchecked Sendable` contract.
+    let rateLock: OSAllocatedUnfairLock<StageRateAggregator>
+
     // nonisolated: overrides @MainActor inference (SWIFT_DEFAULT_ACTOR_ISOLATION=MainActor)
     nonisolated init(
         sessionStart: CMTime,
@@ -32,7 +40,8 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         framesContinuation: AsyncStream<VideoFrame>.Continuation,
         dropsContinuation: AsyncStream<DropEvent>.Continuation,
         onDisconnect: @escaping @Sendable () async -> Void,
-        cameraUniqueID: String
+        cameraUniqueID: String,
+        rateLock: OSAllocatedUnfairLock<StageRateAggregator>
     ) {
         self.sessionStart = sessionStart
         self.syncClock = syncClock
@@ -40,6 +49,7 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         self.dropsContinuation = dropsContinuation
         self.onDisconnect = onDisconnect
         self.cameraUniqueID = cameraUniqueID
+        self.rateLock = rateLock
     }
 
     // MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
@@ -64,7 +74,15 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
             return
         }
         let frame = VideoFrame(pixelBuffer: pixelBuffer, ptsHostTime: pts, isHoldRepeat: false)
-        if let dropEvent = cameraBackpressureDropEvent(for: self.framesContinuation.yield(frame), pts: pts) {
+        let yieldResult = self.framesContinuation.yield(frame)
+        self.rateLock.withLock { aggregator in
+            if case .dropped = yieldResult {
+                aggregator.recordOverflow()
+            } else {
+                aggregator.recordFresh()
+            }
+        }
+        if let dropEvent = cameraBackpressureDropEvent(for: yieldResult, pts: pts) {
             self.dropsContinuation.yield(dropEvent)
         }
     }
@@ -76,6 +94,7 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
     ) {
         let rawPts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let pts = toHostTime(pts: rawPts, from: self.syncClock)
+        self.rateLock.withLock { $0.recordCaptureDrop() }
         self.dropsContinuation.yield(captureDropEvent(pts: pts))
         // .info: capture-level drops are production-visible events; .debug is stripped in
         // release builds and leaves sustained backpressure drops invisible in the field.

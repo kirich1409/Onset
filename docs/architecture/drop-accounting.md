@@ -4,6 +4,8 @@
 Дефекты помечены явно и НЕ являются целевым дизайном — целевой дизайн описан в
 `docs/specs/2026-06-02-onset-recording-mvp.md` (AC-8, строки ~139–163).
 
+Механика CFR-часов (абсолютный дедлайн, catch-up эмиссия, grace-окно) обновлена в #102.
+
 ---
 
 ## 1. Обзор пайплайна
@@ -68,7 +70,7 @@ nonisolated enum DropReason {
 | Case | Семантика | Кто эмитит | Штатный / аварийный |
 |------|-----------|------------|---------------------|
 | `.captureDrop` | Аппаратный дроп — AVCapture не успел доставить кадр в pipeline | `captureDropEvent()` в `CameraSourceHelpers.swift:52` | Штатный при перегрузке capture-очереди |
-| `.cfrNormalizationDrops` | Дублирующийся кадр попал в уже закрытый CFR-слот; нормализатор отбрасывает лишний | `CFRNormalizer.cfrNormalizationDrops` (счётчик в нормализаторе); `VideoEncoder` передаёт значение в `DropMonitor` | Штатный механизм CFR |
+| `.cfrNormalizationDrops` | Кадр прибыл в уже эмитированный CFR-слот; нормализатор отбрасывает его. После #102 (абсолютный дедлайн + grace-окно 5 ms) встречается редко — только при задержке доставки > grace. Холды повторяют `lastPixelBuffer` и не конкурируют с реальным кадром. | `CFRNormalizer.cfrNormalizationDrops` (счётчик в нормализаторе); `VideoEncoder` передаёт значение в `DropMonitor` | Штатный механизм CFR; редкий при нормальной работе после #102 |
 | `.encoderBackpressureDrops` | Downstream не успевает потреблять — переполнение `AsyncStream` или перегрузка энкодера/диска | Четыре эмиттера (см. раздел 3) | Аварийный — пользователь видит потерю кадров |
 
 ### `CFRDropReason` — локальный enum нормализатора
@@ -78,7 +80,7 @@ nonisolated enum DropReason {
 | Case | Семантика |
 |------|-----------|
 | `.preAnchor` | Кадр с `PTS < sessionStart` — отброшен до начала сессии. Не попадает в `DropMonitor`, не отображается в UI. Счётчика нет. |
-| `.cfrNormalizationDrops` | Дубликат слота — маппится в `DropReason.cfrNormalizationDrops` на уровне `VideoEncoder` |
+| `.cfrNormalizationDrops` | Кадр прибыл в уже эмитированный слот — маппится в `DropReason.cfrNormalizationDrops` на уровне `VideoEncoder`. После #102 встречается редко (только при задержке доставки > grace). |
 
 ---
 
@@ -96,10 +98,30 @@ nonisolated enum DropReason {
 ### Примечание по `CFRNormalizer`
 
 `CFRNormalizer` (`Onset/Encode/CFRNormalizer.swift`) инкрементирует внутренний счётчик
-`cfrNormalizationDrops` (строки 218, 253) — на `.preAnchor` счётчик не трогается.
+`cfrNormalizationDrops` — на `.preAnchor` счётчик не трогается.
 `VideoEncoder` после каждого кадра читает `normalizer.cfrNormalizationDropCount`
 и передаёт дельту в `DropMonitor` через собственный `drops: AsyncStream<DropEvent>`.
 Таким образом, `CFRNormalizer` не создаёт `DropEvent` напрямую — это делает `VideoEncoder`.
+
+**Механика эмиссии слотов (#102).** Каждый CFR-слот эмитируется ровно один раз в порядке
+возрастания через единый гейт `lastEmittedSlot`. Два пути эмиссии:
+
+- **Приём кадра (`catchUpThenEncode`)**: при получении реального кадра нормализатор сначала
+  эмитирует синтетические холды для всех пропущенных слотов с момента последней эмиссии,
+  затем — сам кадр. Реальный кадр атомарно занимает свой слот прежде, чем к нему обратятся часы.
+- **CFR-часы (`catchUpHolds`)**: абсолютный дедлайн (`nextDeadlineSeconds`, вычисляется от
+  якоря сетки); `Task.sleep(for:)` до дедлайна. Поздний пробуд безвреден — catch-up одним
+  пакетом эмитирует все слоты, прошедшие за время oversleep. Часы заполняют только слоты,
+  которые реальные кадры никогда не заняли (тишина источника, статичная картинка).
+
+**Grace-окно**: слот N становится eligible для холда не раньше, чем
+`anchorSeconds + (N + 0.5)/fps + graceSeconds`. Дефолтный `graceSeconds = 0.005` (5 ms) —
+превышает p95-латентность capture→ingest и оставляет запас до половины слота при 60 fps (8.33 ms).
+Благодаря grace реальный кадр гарантированно успевает занять слот до того, как часы выдадут холд.
+
+**Холды** повторяют `lastPixelBuffer` и попадают в AVAssetWriter как синтетические кадры с
+монотонно возрастающим PTS. Реальный кадр, прибывший в уже эмитированный слот, считается
+`cfrNormalizationDrops` (редко после #102 — только при задержке > grace).
 
 ---
 
@@ -235,14 +257,36 @@ Menu bar реагирует на `RecordingState` (`.normal` / `.degraded`), а 
 любой единственный дроп за всю запись приводит к алерту. Скользящее окно (`DropMonitor`)
 влияет на живое `.degraded`-состояние, но не на completion-алерт.
 
-### Дефект 3: отсутствие структурированного логирования стадии дропа (#100)
+### ~~Дефект 3: отсутствие структурированного логирования стадии дропа (#100)~~ — исправлено в #102
 
 **Спека**: источник backpressure логируется с признаком «энкодер vs writer/диск».
 
-**Код**: `FileWriter` логирует `.debug("FileWriter video input not ready (backpressure)…")`,
-что скрывается в release. `ScreenSource` и `CameraSourceHelpers` не логируют дропы вообще.
-Subsystem `dev.androidbroadcast.Onset`, категория `FileWriter` — только для FileWriter.
-По текущему коду невозможно по логам определить, на какой стадии происходит дроп.
+**Было**: `FileWriter` логировал `.debug(…)` (скрывался в release); `ScreenSource` и
+`CameraSourceHelpers` не логировали дропы вообще. По логам нельзя было определить стадию.
+
+**Сейчас**: добавлен `StageRateAggregator` — per-stage телеметрия каждые ~1 с через единый
+логгер `Logger(subsystem: "dev.androidbroadcast.Onset", category: "telemetry")` на уровне
+`.notice` (сохраняется по умолчанию, видно без `--info`/`--debug`). Каждая строка —
+machine-parseable key=value с полями:
+
+```
+lane=camera stage=encoder fresh=29.8 drop_dup=0.1 holds=0.2 gate_drop=0 emit_rate=30.0
+  nominal=30 tick_lag_ms_avg=1.2 tick_lag_ms_max=3.4 catchup_max=2 win_s=1.01
+```
+
+(`fresh` — реальные кадры/с, `drop_dup` — дубликаты-слота/с, `holds` — синтетические холды/с,
+`gate_drop` — backpressure-дропы на гейте энкодера/с, `emit_rate` — суммарная эмиссия/с,
+`tick_lag_ms_avg/max` — запаздывание пробуда часов в мс, `catchup_max` — максимальный
+catch-up за один тик.)
+
+Получить поток телеметрии:
+
+```bash
+log stream --predicate 'subsystem == "dev.androidbroadcast.Onset" and category == "telemetry"'
+```
+
+**Примечание**: телеметрия устраняет диагностическую часть Дефекта 3. Конфляция счётчиков
+(Дефект 1) и некорректная формула `degradedWarning` (Дефект 2) остаются открытыми (#100).
 
 ### Issue #65 — предыстория
 
@@ -259,23 +303,59 @@ Camera capture работает с фиксированным форматом 3
 
 ## 7. Порядок диагностики
 
-### Сегодня (без дополнительного логирования)
+### Per-stage телеметрия (доступна после #102)
 
-По текущему коду определить стадию дропа нельзя — все четыре источника суммируются в один счётчик.
-Доступна только общая цифра `encoderBackpressureDrops` в UI.
+После #102 `StageRateAggregator` логирует per-stage статистику каждые ~1 с в категорию
+`telemetry` на уровне `.notice`. По полям `gate_drop` (backpressure на гейте энкодера),
+`drop_dup` (дубликаты CFR-слота), `holds` (синтетические холды) и `tick_lag_ms_avg/max`
+(запаздывание CFR-часов) можно локализовать доминирующую проблему без сборки в Debug.
 
-Единственный частичный сигнал: `FileWriter` пишет `.debug`-лог при writer-backpressure.
-Чтобы увидеть его в Console.app или `log stream`:
+```bash
+log stream --predicate 'subsystem == "dev.androidbroadcast.Onset" and category == "telemetry"'
+```
+
+Все четыре источника `encoderBackpressureDrops` по-прежнему суммируются в один счётчик в UI
+(Дефект 1, #100 не закрыт). Телеметрия показывает `gate_drop` (гейт энкодера) отдельно,
+но writer-backpressure в отдельное поле не вынесен — полное разделение счётчиков остаётся за #100.
+
+### Устаревшая диагностика через FileWriter
+
+До #102 единственным частичным сигналом был `.debug`-лог `FileWriter` (скрывался в release).
+Для полноты: он пишет `FileWriter video input not ready (backpressure)` в категорию `FileWriter`.
 
 ```bash
 log stream --predicate 'subsystem == "dev.androidbroadcast.Onset"' --level debug
 ```
 
-### После реализации плана логирования (#100)
+### Открытые пункты (#100)
 
-Каждый эмиттер будет логировать `stage` (screenSource | cameraSource | encoder | fileWriter),
-`reason`, количество дропов за окно и PTS последнего дропа. Это позволит по логам найти
-доминирующую стадию и подтвердить или исключить диск как причину.
+`VideoEncoder` пока не логирует encode-латентность слота (время submit → callback).
+`FileWriter` не логирует длительность эпизодов `!isReadyForMoreMediaData`. Оба пункта —
+часть плана #100.
 
-`VideoEncoder` должен логировать глубину очереди (`pendingFrameCount`) и encode-латентность
-слота (время submit → callback). `FileWriter` — длительность эпизодов `!isReadyForMoreMediaData`.
+---
+
+## 8. Верификация CFR-кадров (`scripts/verify-cfr.sh`)
+
+`scripts/verify-cfr.sh <screen.mp4> <camera.mp4> <screen_fps> <camera_fps>` — PASS/FAIL
+скрипт, проверяющий фактические метки времени пакетов (не метаданные `r_frame_rate`/
+`avg_frame_rate`, которым кодек может лгать).
+
+```bash
+scripts/verify-cfr.sh screen.mp4 camera.mp4 60 30
+```
+
+Проверки:
+
+| Проверка | Метод |
+|----------|-------|
+| A — packet rate (fps) | `ffprobe -show_packets`, δPTS; отклонение ≤ 2% от номинала |
+| B — равномерность PTS-дельт | δPTS; ≤ 10 гэпов/мин > 1.5 слота |
+| C — свежесть кадров камеры | `ffmpeg -vf mpdecimate`; keep-fps ≥ 25 fps (требует движения в кадре) |
+| D — длина серий дублей | modal run mode ≤ 2 (до #102: ~13) |
+
+**PTS сортируются** перед вычислением дельт: потоки содержат B-кадры, пакеты приходят в
+decode-порядке, а не в display-порядке — без сортировки появляются ложные отрицательные δ.
+`r_frame_rate` не используется — номинальный fps передаётся явным аргументом.
+
+Коды выхода: 0 — все проверки прошли, 1 — одна или более провалена, 2 — отсутствует зависимость.

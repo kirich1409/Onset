@@ -84,6 +84,18 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
 
     var captureState: CameraCaptureState = .idle
 
+    // MARK: - Telemetry
+
+    /// Lock shared with `VideoOutputShim` so the shim (running on `videoQueue`) and this actor's
+    /// flush tick can both safely access the same `StageRateAggregator` struct.
+    ///
+    /// Created once in `init`; nominalFps is derived from `config.minCameraFps` (the configured
+    /// target; the actual negotiated rate may differ but is unavailable at init time).
+    let captureRateLock: OSAllocatedUnfairLock<StageRateAggregator>
+
+    /// ~1 s periodic flush task started after a successful session start, cancelled in `stop()`.
+    var captureTelemetryTask: Task<Void, Never>?
+
     // MARK: - Init
 
     /// Creates a `CameraSource`.
@@ -136,6 +148,10 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
         self.audioSamplesContinuation = capturedAudio
         self.eventsContinuation = capturedEvents
         self.dropsContinuation = capturedDrops
+
+        self.captureRateLock = OSAllocatedUnfairLock(
+            initialState: StageRateAggregator(lane: "camera", stage: .capture, nominalFps: config.minCameraFps)
+        )
     }
 
     // MARK: - VideoFrameSource + AudioSampleSource
@@ -163,10 +179,13 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
             self.finishAllStreams()
             throw error
         }
+        self.startCaptureTelemetryTask()
     }
 
     /// Stops capture. Finishes all four streams idempotently.
     func stop() async {
+        self.captureTelemetryTask?.cancel()
+        self.captureTelemetryTask = nil
         defer { self.finishAllStreams() }
         guard case let .running(session, shims) = self.captureState else {
             self.captureState = .stopped
@@ -182,6 +201,8 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
 
     /// Called by the delegate shim when the camera device disconnects.
     func handleCameraDisconnect() async {
+        self.captureTelemetryTask?.cancel()
+        self.captureTelemetryTask = nil
         guard case let .running(session, shims) = self.captureState else { return }
         self.captureState = .stopped
         NotificationCenter.default.removeObserver(shims.video)
@@ -202,6 +223,27 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
     func sessionHandle() -> SessionHandle? {
         guard case let .running(session, _) = self.captureState else { return nil }
         return SessionHandle(session: session)
+    }
+
+    // MARK: - Telemetry task
+
+    func startCaptureTelemetryTask() {
+        self.captureTelemetryTask = Task { [weak self] in
+            let clock = ContinuousClock()
+            var lastInstant = clock.now
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, !Task.isCancelled else { return }
+                let now = clock.now
+                let elapsedSeconds = (now - lastInstant).totalSeconds
+                lastInstant = now
+                if let line = self.captureRateLock.withLock({ $0.flush(elapsedSeconds: elapsedSeconds) }) {
+                    telemetryLogger.notice("\(line, privacy: .public)")
+                } else {
+                    cameraSourceLogger.debug("flushTelemetry: skipped (elapsed ≤ 0)")
+                }
+            }
+        }
     }
 
     // MARK: - Stream teardown

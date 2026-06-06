@@ -64,36 +64,36 @@ import SwiftUI
             self.microphoneStatus = microphone
         }
     }
-#endif
 
-#Preview("Cold start 0/3") {
-    OnboardingView(
-        viewModel: OnboardingViewModel(permissions: PreviewPermissionsService())
-    ) {}
-}
+    #Preview("Cold start 0/3") {
+        OnboardingView(
+            viewModel: OnboardingViewModel(permissions: PreviewPermissionsService())
+        ) {}
+    }
 
-#Preview("Waiting 2/3 — screen awaiting") {
-    // Shows the 2/3 state with "Ожидание…" chip active (isAwaitingScreen = true).
-    let viewModel = OnboardingViewModel(
-        permissions: PreviewPermissionsService(
-            screen: .notDetermined,
-            camera: .authorized,
-            microphone: .authorized
-        )
-    )
-    // Simulate the awaiting state that activates after tapping "Открыть настройки".
-    viewModel.requestScreenRecording()
-    return OnboardingView(viewModel: viewModel) {}
-}
-
-#Preview("Mic remaining 2/3") {
-    OnboardingView(
-        viewModel: OnboardingViewModel(
+    #Preview("Waiting 2/3 — screen awaiting") {
+        // Shows the 2/3 state with "Ожидание…" chip active (isAwaitingScreen = true).
+        let viewModel = OnboardingViewModel(
             permissions: PreviewPermissionsService(
-                screen: .authorized,
+                screen: .notDetermined,
                 camera: .authorized,
-                microphone: .notDetermined
+                microphone: .authorized
             )
         )
-    ) {}
-}
+        // Simulate the awaiting state that activates after tapping "Открыть настройки".
+        viewModel.requestScreenRecording()
+        return OnboardingView(viewModel: viewModel) {}
+    }
+
+    #Preview("Mic remaining 2/3") {
+        OnboardingView(
+            viewModel: OnboardingViewModel(
+                permissions: PreviewPermissionsService(
+                    screen: .authorized,
+                    camera: .authorized,
+                    microphone: .notDetermined
+                )
+            )
+        ) {}
+    }
+#endif

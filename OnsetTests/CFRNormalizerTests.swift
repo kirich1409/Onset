@@ -56,48 +56,6 @@ struct CFRNormalizerEvenCadenceTests {
     }
 }
 
-// MARK: - Skipped slot (hold)
-
-@Suite("CFRNormalizer — hold (skipped slot)")
-struct CFRNormalizerHoldTests {
-    private let anchor = 0.0
-    private let fps = 30
-
-    @Test("tick for a gap slot emits encode(isHold:true), no drop increment")
-    func tick_missedSlot_emitsHold() {
-        var norm = CFRNormalizer()
-
-        // Establish slot 0 via a real frame
-        _ = norm.processFrame(ptsSeconds: self.anchor, anchorSeconds: self.anchor, fps: self.fps)
-
-        // Slot 1 has no frame — clock drives a tick
-        let decision = norm.processTick(slotIndex: 1, fps: self.fps)
-        #expect(decision == .encode(slotIndex: 1, snappedPTS: 1.0 / Double(self.fps), isHold: true))
-        #expect(norm.cfrNormalizationDrops == 0)
-        #expect(norm.lastEmittedSlot == 1)
-    }
-
-    @Test("hold does NOT increment cfrNormalizationDrops")
-    func hold_doesNotIncrementDropCounter() {
-        var norm = CFRNormalizer()
-        _ = norm.processFrame(ptsSeconds: self.anchor, anchorSeconds: self.anchor, fps: self.fps)
-        _ = norm.processTick(slotIndex: 1, fps: self.fps)
-        _ = norm.processTick(slotIndex: 2, fps: self.fps)
-        #expect(norm.cfrNormalizationDrops == 0)
-    }
-
-    @Test("after hold, next real frame continues from next slot")
-    func afterHold_nextFrameEncodesCorrectly() {
-        var norm = CFRNormalizer()
-        _ = norm.processFrame(ptsSeconds: self.anchor, anchorSeconds: self.anchor, fps: self.fps) // slot 0
-        _ = norm.processTick(slotIndex: 1, fps: self.fps) // hold slot 1
-        let pts2 = self.anchor + 2.0 / Double(self.fps)
-        let decision = norm.processFrame(ptsSeconds: pts2, anchorSeconds: self.anchor, fps: self.fps)
-        #expect(decision == .encode(slotIndex: 2, snappedPTS: 2.0 / Double(self.fps), isHold: false))
-        #expect(norm.cfrNormalizationDrops == 0)
-    }
-}
-
 // MARK: - Two frames into one slot (drop)
 
 @Suite("CFRNormalizer — duplicate slot drop")

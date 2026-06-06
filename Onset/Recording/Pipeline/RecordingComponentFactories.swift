@@ -162,7 +162,8 @@ nonisolated struct LiveEncoderFactory: EncoderFactory {
             height: Int32(height),
             fps: fps,
             anchor: anchor,
-            selfClocked: true
+            selfClocked: true,
+            label: kind == .screen ? "screen" : "camera"
         )
     }
 }
@@ -214,7 +215,8 @@ nonisolated struct LiveWriterFactory: WriterFactory {
             outputURL: self.urlProvider(kind),
             configuration: self.configuration,
             includeAudio: includeAudio,
-            sourceFormatHint: sourceFormatHint
+            sourceFormatHint: sourceFormatHint,
+            label: kind == .screen ? "screen" : "camera"
         )
     }
 }
