@@ -178,6 +178,23 @@ jobs:
             | xcpretty --color
 
   # ─────────────────────────────────────────────
+  # privacy-manifest
+  # Static lint of Onset/PrivacyInfo.xcprivacy — no build required, so it runs
+  # in parallel with build/lint/unit. Fatal: fails the PR if the manifest is
+  # missing, declares no UserDefaults reasons, or uses a non-Apple reason code.
+  # ─────────────────────────────────────────────
+  privacy-manifest:
+    name: Privacy Manifest Lint
+    runs-on: macos-26
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Lint PrivacyInfo.xcprivacy (static, source)
+        run: scripts/check-privacy-manifest.sh Onset/PrivacyInfo.xcprivacy
+
+  # ─────────────────────────────────────────────
   # artifact-checks
   # Downstream of build — depends on the uploaded .app artifact.
   # Checks entitlements and absence of network framework linkage on the
@@ -217,7 +234,10 @@ jobs:
       - name: Check no-network (static)
         run: scripts/check-no-network.sh "${{ steps.locate.outputs.app_path }}"
 
-      - name: Lint PrivacyInfo.xcprivacy
+      # Verifies PrivacyInfo.xcprivacy is present in the built .app bundle, then
+      # runs the same content lint as the parallel privacy-manifest job against
+      # the shipped copy.
+      - name: Lint PrivacyInfo.xcprivacy (bundled)
         run: |
           PRIVACY_MANIFEST=$(find "${{ steps.locate.outputs.app_path }}" -name "PrivacyInfo.xcprivacy" | head -1)
           if [ -z "$PRIVACY_MANIFEST" ]; then
@@ -225,4 +245,4 @@ jobs:
             exit 1
           fi
           echo "Found PrivacyInfo.xcprivacy at: $PRIVACY_MANIFEST"
-          plutil -lint "$PRIVACY_MANIFEST" && echo "PrivacyInfo.xcprivacy is valid"
+          scripts/check-privacy-manifest.sh "$PRIVACY_MANIFEST"
