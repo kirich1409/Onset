@@ -210,6 +210,16 @@ extension CameraSource {
 
         if self.micDevice != nil {
             let audioOutput = AVCaptureAudioDataOutput()
+            // Pin the capture output to a fixed LPCM format. Without this, some USB microphones
+            // (e.g. MX Brio) deliver the first few buffers in the device's native int16 interleaved
+            // format, then CoreAudio switches mid-stream to float32 non-interleaved. The mid-stream
+            // format change faults AVAssetWriterInput (AAC) with -12737 / -11800, killing both
+            // writers. Pinning here prevents the switch; values mirror FileWriter's AAC target
+            // for consistency by construction. See #105.
+            audioOutput.audioSettings = Self.audioOutputSettings(
+                sampleRate: self.config.audioSampleRate,
+                channelCount: self.config.audioChannelCount
+            )
             guard session.canAddOutput(audioOutput) else {
                 cameraSourceLogger.error("Cannot add audio data output to session")
                 throw RecordingError.captureSetupFailed(CameraSourceError.cannotAddAudioOutput)

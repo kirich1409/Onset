@@ -604,3 +604,89 @@ nonisolated private func assertAudioSamples(_ samples: [AudioSample], anchor: Ho
         #expect(CMTimeCompare(sample.ptsHostTime, anchor.anchorTime) >= 0)
     }
 }
+
+// MARK: - audioOutputSettings builder tests
+
+@Suite("CameraSource — audioOutputSettings builder")
+struct CameraSourceAudioSettingsTests {
+    // swiftlint:disable:next no_magic_numbers
+    private let sampleRate: Double = 48000
+    private let channelCount: Int = 1
+
+    @Test("format ID is kAudioFormatLinearPCM")
+    func formatID_isLPCM() {
+        let settings = CameraSource.audioOutputSettings(
+            sampleRate: self.sampleRate,
+            channelCount: self.channelCount
+        )
+        let formatID = settings[AVFormatIDKey] as? AudioFormatID
+        #expect(formatID == kAudioFormatLinearPCM)
+    }
+
+    @Test("sample rate matches config")
+    func sampleRate_matchesConfig() {
+        let settings = CameraSource.audioOutputSettings(
+            sampleRate: self.sampleRate,
+            channelCount: self.channelCount
+        )
+        let rate = settings[AVSampleRateKey] as? Double
+        #expect(rate == self.sampleRate)
+    }
+
+    @Test("channel count matches config")
+    func channelCount_matchesConfig() {
+        let settings = CameraSource.audioOutputSettings(
+            sampleRate: self.sampleRate,
+            channelCount: self.channelCount
+        )
+        let count = settings[AVNumberOfChannelsKey] as? Int
+        #expect(count == self.channelCount)
+    }
+
+    @Test("bit depth is 32")
+    func bitDepth_is32() {
+        let settings = CameraSource.audioOutputSettings(
+            sampleRate: self.sampleRate,
+            channelCount: self.channelCount
+        )
+        let depth = settings[AVLinearPCMBitDepthKey] as? Int
+        #expect(depth == 32)
+    }
+
+    @Test("float flag is true (float32, not int)")
+    func floatFlag_isTrue() {
+        let settings = CameraSource.audioOutputSettings(
+            sampleRate: self.sampleRate,
+            channelCount: self.channelCount
+        )
+        let isFloat = settings[AVLinearPCMIsFloatKey] as? Bool
+        #expect(isFloat == true)
+    }
+
+    @Test("non-interleaved flag is false (interleaved)")
+    func nonInterleaved_isFalse() {
+        let settings = CameraSource.audioOutputSettings(
+            sampleRate: self.sampleRate,
+            channelCount: self.channelCount
+        )
+        let nonInterleaved = settings[AVLinearPCMIsNonInterleaved] as? Bool
+        #expect(nonInterleaved == false)
+    }
+
+    @Test("big-endian flag is false (little-endian)")
+    func bigEndian_isFalse() {
+        let settings = CameraSource.audioOutputSettings(
+            sampleRate: self.sampleRate,
+            channelCount: self.channelCount
+        )
+        let bigEndian = settings[AVLinearPCMIsBigEndianKey] as? Bool
+        #expect(bigEndian == false)
+    }
+
+    @Test("stereo channel count propagates correctly")
+    func channelCount_stereoRoundtrips() {
+        let settings = CameraSource.audioOutputSettings(sampleRate: self.sampleRate, channelCount: 2)
+        let count = settings[AVNumberOfChannelsKey] as? Int
+        #expect(count == 2)
+    }
+}
