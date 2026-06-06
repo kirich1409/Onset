@@ -213,7 +213,7 @@ for LABEL_FPS in "screen:$SCREEN_FPS:$SCREEN_PTS" "camera:$CAMERA_FPS:$CAMERA_PT
   PTS_DATA="${REST#*:}"
 
   # sort -n: restore presentation order (B-frame decode order can scramble PTS).
-  RESULT=$(echo "$PTS_DATA" | sort -n | awk \
+  RESULT=$(echo "$PTS_DATA" | LC_ALL=C sort -n | awk \
     -v fps="$NOMINAL" \
     -v max_gap_slots="$MAX_GAP_SLOTS" \
     -v gap_slots="$GAP_SLOTS" \

@@ -666,8 +666,9 @@ actor VideoEncoder {
     /// The caller is responsible for computing `pts` via `anchoredPTS(slotIndex:)` — this
     /// avoids redundant computation when holds are submitted from `submitEmission`.
     ///
-    /// Backpressure gate (OpAC-4.4): pending >= maxPendingFrames → drop as
-    /// `encoderBackpressureDrops`; a `DropEvent` is emitted.
+    /// Backpressure gate (OpAC-4.4): pending >= maxPendingFrames → the frame is dropped as
+    /// `encoderBackpressureDrops` and a `DropEvent` is emitted. This counter is SEPARATE
+    /// from the normalizer's `cfrNormalizationDrops`.
     private func submit(pixelBuffer: CVPixelBuffer, slotIndex: Int, pts: CMTime, detectedAt: CMTime) {
         guard let session = self.session else { return }
 
