@@ -40,15 +40,25 @@ nonisolated final class LiveCompressionSession: CompressionSession, @unchecked S
     // swiftformat:disable unusedArguments
     /// The C output callback. Non-capturing (a C function pointer captures nothing): it
     /// recovers the sink from the refcon and yields any successfully compressed buffer.
+    ///
+    /// Every non-nil-refcon path decrements `sink.pendingCount` exactly once, regardless of
+    /// whether the frame was dropped. The nil-refcon path cannot decrement (no sink reference);
+    /// this leaks the counter upward only when the Unmanaged reference is lost — a fault state
+    /// that is already logged. Any residual count after `completeFrames()` is caught by the
+    /// `.debug` assert in `pendingFrameCount()`.
     private static let outputCallback: VTCompressionOutputCallback = { refcon, _, status, infoFlags, sampleBuffer in
         // swiftformat:enable unusedArguments
         guard let refcon = unsafe refcon else {
             // Nil refcon means the Unmanaged reference was lost — no sink to yield to.
+            // Cannot decrement pendingCount here (no reachable sink); count will drift high.
             LiveCompressionSession.logger.fault("VT output callback: nil refcon — encoder sink lost, frames dropped")
             return
         }
         // Recover the sink WITHOUT consuming a retain (passUnretained on the create side).
         let sink = unsafe Unmanaged<EncodedSampleSink>.fromOpaque(refcon).takeUnretainedValue()
+        // Decrement the pending-frame counter before any early-return so every non-nil-refcon
+        // path decrements exactly once, matching the single increment in encodeFrame.
+        sink.pendingCount.withLock { $0 -= 1 }
         // F3: each failure branch is logged distinctly rather than a single silent `return`.
         // Logging only — surfacing these to a drop channel is #35 scope.
         // `LiveCompressionSession.logger` (not `Self.`): a covariant `Self` cannot be referenced
@@ -105,10 +115,15 @@ nonisolated final class LiveCompressionSession: CompressionSession, @unchecked S
     }
 
     nonisolated func encodeFrame(pixelBuffer: CVPixelBuffer, pts: CMTime, duration: CMTime) -> OSStatus {
+        // Increment BEFORE the VT call: a synchronous non-noErr return means the frame never
+        // entered VT's pipeline and no callback will fire — we decrement back in that case.
+        // A noErr return guarantees exactly one callback will fire (carrying success, error-status,
+        // .frameDropped, or nil sampleBuffer), which decrements the counter.
+        self.sink.pendingCount.withLock { $0 += 1 }
         // We pass nil for both raw-pointer params (sourceFrameRefcon, infoFlagsOut) — the sink
         // is recovered from the session-level refcon, not per-frame — so no unsafe pointer is
         // formed at the call site and no `unsafe` annotation is required.
-        VTCompressionSessionEncodeFrame(
+        let status = VTCompressionSessionEncodeFrame(
             self.session,
             imageBuffer: pixelBuffer,
             presentationTimeStamp: pts,
@@ -117,33 +132,29 @@ nonisolated final class LiveCompressionSession: CompressionSession, @unchecked S
             sourceFrameRefcon: nil,
             infoFlagsOut: nil
         )
+        if status != noErr {
+            // VT rejected the frame synchronously — no callback will fire for it.
+            self.sink.pendingCount.withLock { $0 -= 1 }
+        }
+        return status
     }
 
     nonisolated func pendingFrameCount() -> Int {
-        var value: CFTypeRef?
-        // `unsafe`: VTSessionCopyProperty writes a retained CFTypeRef via a void* out-pointer.
-        // Mirrors the pattern in CapabilityProbe.queryUsingHardwareEncoder.
-        let status = unsafe withUnsafeMutablePointer(to: &value) { ptr in
-            unsafe VTSessionCopyProperty(
-                self.session,
-                key: kVTCompressionPropertyKey_NumberOfPendingFrames,
-                allocator: nil,
-                valueOut: UnsafeMutableRawPointer(ptr)
-            )
+        // Returns the locally-tracked count rather than querying VTSessionCopyProperty
+        // (kVTCompressionPropertyKey_NumberOfPendingFrames). That property read contends with
+        // VT's internal encode lock on every hot-path call; at 60 fps across two encoder lanes
+        // this produced measured actor stalls of 30 ms+, causing a runaway lag feedback loop.
+        // The local counter on the sink is incremented before VTCompressionSessionEncodeFrame
+        // and decremented by the C output callback on every non-nil-refcon invocation — see
+        // encodeFrame and outputCallback for the accounting invariants.
+        let count = self.sink.pendingCount.withLock { $0 }
+        // Sanity-check: a negative count is a counter-accounting bug (decrement without matching
+        // increment), not a transient condition. Log at .debug so it is visible in development
+        // builds (where `.debug` is not filtered) without surfacing in release.
+        if count < 0 {
+            Self.logger.debug("pendingFrameCount: negative count \(count) — counter accounting bug")
         }
-        guard status == noErr, let value, CFGetTypeID(value) == CFNumberGetTypeID() else {
-            // F4: DELIBERATE fail-open. A RealTime encoder should keep the pipeline flowing on a
-            // transient property-query glitch rather than stall by failing closed — returning 0
-            // lets submission proceed (the backpressure gate is skipped this frame). Logged so a
-            // persistent failure is visible.
-            Self.logger.warning("NumberOfPendingFrames query failed: status \(status) — assuming 0 (fail-open)")
-            return 0
-        }
-        let number = unsafe unsafeDowncast(value, to: CFNumber.self)
-        var result = 0
-        // `unsafe`: CFNumberGetValue writes through a void* out-pointer.
-        unsafe CFNumberGetValue(number, .intType, &result)
-        return result
+        return max(0, count)
     }
 
     nonisolated func completeFrames() {

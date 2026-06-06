@@ -1,5 +1,6 @@
 import CoreMedia
 import CoreVideo
+import os
 import VideoToolbox
 
 // MARK: - EncodedSampleSink
@@ -8,14 +9,27 @@ import VideoToolbox
 ///
 /// The `VTCompressionOutputCallback` is a C function pointer that fires on VideoToolbox's
 /// internal encode queue. It receives an opaque `refcon`; this sink is what the refcon points
-/// at. The sink holds ONLY the stream continuation — never the actor and never the
-/// `VTCompressionSessionRef` — so it is trivially safe to touch from VT's thread:
-/// `AsyncStream.Continuation.yield` is documented thread-safe from any context.
+/// at. The sink holds the stream continuation and a pending-frame counter — never the actor
+/// and never the `VTCompressionSessionRef` — so it is safe to touch from VT's thread.
+/// `AsyncStream.Continuation.yield` is documented thread-safe from any context; the counter
+/// is protected by an `OSAllocatedUnfairLock`, which is `Sendable`.
 ///
-/// `@unchecked Sendable` rationale: the single stored property is an immutable `let`
-/// continuation whose `yield` is itself thread-safe. Nothing mutable is shared.
+/// `@unchecked Sendable` rationale: both stored properties are immutable `let`s — the
+/// continuation and an `OSAllocatedUnfairLock<Int>` wrapping the pending-frame counter.
+/// `OSAllocatedUnfairLock` is itself `Sendable`; the continuation's `yield` is thread-safe.
+/// Nothing unsafely mutable is shared across isolation domains.
 final class EncodedSampleSink: @unchecked Sendable {
     private let continuation: AsyncStream<EncodedSample>.Continuation
+    /// Tracks frames accepted by `VTCompressionSessionEncodeFrame` but not yet delivered
+    /// via the output callback. Incremented in `encodeFrame` before the VT call; decremented
+    /// exactly once per callback invocation in every non-nil-refcon path.
+    ///
+    /// Lives here (not on `LiveCompressionSession`) because this is the only object reachable
+    /// from the C callback's refcon — the refcon is a passUnretained pointer to the sink, not
+    /// to the session wrapper. Querying `VTSessionCopyProperty(NumberOfPendingFrames)` instead
+    /// contends with VT's internal encode lock on every hot-path call; measured actor stalls of
+    /// 30 ms+ at 60 fps drove this local-counter approach.
+    let pendingCount = OSAllocatedUnfairLock(initialState: 0)
 
     nonisolated init(continuation: AsyncStream<EncodedSample>.Continuation) {
         self.continuation = continuation
