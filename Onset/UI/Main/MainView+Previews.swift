@@ -89,66 +89,66 @@ import SwiftUI
             discoverMicrophones: { _ in microphones }
         )
     }
+
+    #Preview("No permissions — empty state") {
+        let model = makePreviewModel(
+            screen: .notDetermined,
+            camera: .notDetermined,
+            microphone: .notDetermined
+        )
+        return MainView(model: model) {}
+    }
+
+    #Preview("Screen only — 1 display auto-selected") {
+        let display = Display(displayID: 1, pixelWidth: 1920, pixelHeight: 1080, refreshHz: 60)
+        let model = makePreviewModel(
+            screen: .authorized,
+            camera: .notDetermined,
+            microphone: .notDetermined,
+            displays: [display]
+        )
+        return MainView(model: model) {}
+    }
+
+    #Preview("Full — screen + camera + mic") {
+        let display = Display(displayID: 1, pixelWidth: 2560, pixelHeight: 1440, refreshHz: 60)
+        let camera = CameraDevice(uniqueID: "camera-1", formats: [
+            CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30, maxFps: 60),
+        ])
+        let mic = MicrophoneDevice(uniqueID: "mic-1")
+        let model = makePreviewModel(
+            screen: .authorized,
+            camera: .authorized,
+            microphone: .authorized,
+            displays: [display],
+            cameras: [camera],
+            microphones: [mic]
+        )
+        return MainView(model: model) {}
+    }
+
+    #Preview("Mic available but unselected — record disabled AC-2b") {
+        let display = Display(displayID: 1, pixelWidth: 1920, pixelHeight: 1080, refreshHz: 0)
+        let mic = MicrophoneDevice(uniqueID: "mic-1")
+        let model = makePreviewModel(
+            screen: .authorized,
+            camera: .notDetermined,
+            microphone: .authorized,
+            displays: [display],
+            microphones: [mic]
+        )
+        // selectedMicID stays nil (no auto-select) — shows disabled reason
+        return MainView(model: model) {}
+    }
+
+    #Preview("No mic — record without audio AC-2c") {
+        let display = Display(displayID: 1, pixelWidth: 1920, pixelHeight: 1080, refreshHz: 0)
+        let model = makePreviewModel(
+            screen: .authorized,
+            camera: .notDetermined,
+            microphone: .denied,
+            displays: [display]
+        )
+        return MainView(model: model) {}
+    }
 #endif
-
-#Preview("No permissions — empty state") {
-    let model = makePreviewModel(
-        screen: .notDetermined,
-        camera: .notDetermined,
-        microphone: .notDetermined
-    )
-    return MainView(model: model) {}
-}
-
-#Preview("Screen only — 1 display auto-selected") {
-    let display = Display(displayID: 1, pixelWidth: 1920, pixelHeight: 1080, refreshHz: 60)
-    let model = makePreviewModel(
-        screen: .authorized,
-        camera: .notDetermined,
-        microphone: .notDetermined,
-        displays: [display]
-    )
-    return MainView(model: model) {}
-}
-
-#Preview("Full — screen + camera + mic") {
-    let display = Display(displayID: 1, pixelWidth: 2560, pixelHeight: 1440, refreshHz: 60)
-    let camera = CameraDevice(uniqueID: "camera-1", formats: [
-        CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30, maxFps: 60),
-    ])
-    let mic = MicrophoneDevice(uniqueID: "mic-1")
-    let model = makePreviewModel(
-        screen: .authorized,
-        camera: .authorized,
-        microphone: .authorized,
-        displays: [display],
-        cameras: [camera],
-        microphones: [mic]
-    )
-    return MainView(model: model) {}
-}
-
-#Preview("Mic available but unselected — record disabled AC-2b") {
-    let display = Display(displayID: 1, pixelWidth: 1920, pixelHeight: 1080, refreshHz: 0)
-    let mic = MicrophoneDevice(uniqueID: "mic-1")
-    let model = makePreviewModel(
-        screen: .authorized,
-        camera: .notDetermined,
-        microphone: .authorized,
-        displays: [display],
-        microphones: [mic]
-    )
-    // selectedMicID stays nil (no auto-select) — shows disabled reason
-    return MainView(model: model) {}
-}
-
-#Preview("No mic — record without audio AC-2c") {
-    let display = Display(displayID: 1, pixelWidth: 1920, pixelHeight: 1080, refreshHz: 0)
-    let model = makePreviewModel(
-        screen: .authorized,
-        camera: .notDetermined,
-        microphone: .denied,
-        displays: [display]
-    )
-    return MainView(model: model) {}
-}
