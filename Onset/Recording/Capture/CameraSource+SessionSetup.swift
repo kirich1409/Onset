@@ -16,22 +16,6 @@ extension CameraSource {
         // has adopted whatever clock it will use (commonly the audio device clock).
         let syncClock = session.synchronizationClock ?? CMClockGetHostTimeClock()
 
-        // TEMP-LOG: #105 — verify syncClock identity (nil session clock → host clock fallback
-        // means USB-mic PTS may drift relative to expected host-time anchor).
-        let syncClockIsNil = session.synchronizationClock == nil
-        let hostClock = CMClockGetHostTimeClock()
-        // CFEqual compares CoreFoundation object identity/equality; used instead of === because
-        // CMClock is a CF type bridged to Swift as a class — direct pointer compare may differ.
-        let syncIsHost = CFEqual(syncClock, hostClock)
-        let syncTime = CMClockGetTime(syncClock)
-        let hostTime = CMClockGetTime(hostClock)
-        // swiftlint:disable:next no_magic_numbers
-        let clockDeltaMicros = Int((CMTimeGetSeconds(syncTime) - CMTimeGetSeconds(hostTime)) * 1_000_000)
-        cameraSourceLogger.notice(
-            // swiftlint:disable:next line_length
-            "[audio#105-clk] sessionSyncClockNil=\(syncClockIsNil, privacy: .public) syncIsHostClock=\(syncIsHost, privacy: .public) clockDeltaMicros=\(clockDeltaMicros, privacy: .public)"
-        )
-
         let onDisconnect: @Sendable () async -> Void = { [weak self] in
             await self?.handleCameraDisconnect()
         }

@@ -99,13 +99,14 @@ actor DualFileOutputStage {
     /// Cumulative count of pending-audio buffers dropped on overflow (observability, FIX-2).
     private(set) var pendingAudioDropped = 0
 
-    // MARK: - Diagnostics (#105 TEMP-LOG state)
+    // MARK: - Audio format canary (#105)
 
-    /// Running index of audio buffers seen in `routeAudio` — for TEMP-LOG #105 only.
-    private var audioRouteIdx = 0
-    /// PTS of the most recent buffer (host-time domain), in seconds — for dPts computation.
-    private var audioPrevPtsSec: Double?
-    /// Format description of the most recent buffer — for fmtChg detection.
+    /// Format description of the most recent audio buffer — for mid-stream format-change detection.
+    ///
+    /// The canary log below fires when this changes: after the Commit-1 LPCM fix the format must
+    /// be stable for the entire session. A change here means the fix regressed or a new device
+    /// sends formats outside the pinned LPCM spec. Permanent — a format change is a class-#105
+    /// regression and must not silently pass.
     private var audioPrevFmtDesc: CMFormatDescription?
 
     // MARK: - Init
@@ -245,113 +246,38 @@ actor DualFileOutputStage {
     func routeAudio( // swiftlint:disable:this function_body_length cyclomatic_complexity
         _ sample: AudioSample
     ) async {
-        // TEMP-LOG: #105 — instrument audio buffer fields not inspected by retime()
-        let diagIdx = self.audioRouteIdx
-        self.audioRouteIdx &+= 1
-
-        let rawPts = CMSampleBufferGetPresentationTimeStamp(sample.sampleBuffer)
-        let rawPtsSec = CMTimeGetSeconds(rawPts)
-
-        // dPts in µs relative to previous buffer; 0 for the first buffer.
-        // swiftlint:disable:next no_magic_numbers
-        let dPtsMicros: Int = self.audioPrevPtsSec.map { Int(((rawPtsSec - $0) * 1_000_000).rounded()) } ?? 0
-
         let buf = sample.sampleBuffer
-        let nSamples = CMSampleBufferGetNumSamples(buf)
-        let nBytes = CMSampleBufferGetTotalSampleSize(buf)
-        let isReady = CMSampleBufferDataIsReady(buf)
-
-        // Two-pass size queries: entryCount=0 / arrayToFill=nil asks CoreMedia how many entries
-        // exist. Returns kCMSampleBufferError_ArrayTooSmall — expected for a count-only query.
-        // The filled `entriesNeededOut` is valid regardless of the OSStatus return.
-        var tEn: CMItemCount = 0
-        // `unsafe`: out-pointer under SWIFT_STRICT_MEMORY_SAFETY = YES (same pattern as retime()).
-        _ = unsafe CMSampleBufferGetSampleTimingInfoArray(buf, entryCount: 0, arrayToFill: nil, entriesNeededOut: &tEn)
-        var sEn: CMItemCount = 0
-        // `unsafe`: out-pointer under SWIFT_STRICT_MEMORY_SAFETY = YES (same pattern as retime()).
-        _ = unsafe CMSampleBufferGetSampleSizeArray(buf, entryCount: 0, arrayToFill: nil, entriesNeededOut: &sEn)
-
         let curFmt = CMSampleBufferGetFormatDescription(buf)
-        let fmtChg: Bool = if let prev = self.audioPrevFmtDesc, let cur = curFmt {
-            !CMFormatDescriptionEqual(cur, otherFormatDescription: prev)
-        } else {
-            false
-        }
 
-        // Attachment keys (propagate-mode); "-" when absent.
-        let attKeys: String = if let attDict = CMCopyDictionaryOfAttachments(
-            allocator: nil,
-            target: buf,
-            attachmentMode: kCMAttachmentMode_ShouldPropagate
-        ) as? [String: Any], !attDict.isEmpty {
-            attDict.keys.sorted().joined(separator: ",")
-        } else {
-            "-"
-        }
-
-        // Sample-level attachments present?
-        let hasSampleAtt: Bool = if let arr = CMSampleBufferGetSampleAttachmentsArray(buf, createIfNecessary: false) {
-            CFArrayGetCount(arr) > 0
-        } else {
-            false
-        }
-
-        // Anomaly detection for post-20 buffers (any field outside expected range).
-        // dPts expected ≈ n/48000 s = n*1_000_000/48000 µs; tolerance ±1000 µs (1 ms).
-        // swiftlint:disable:next no_magic_numbers
-        let expectedDptsMicros = nSamples * 1_000_000 / 48000
-        // swiftlint:disable:next no_magic_numbers
-        let dPtsAnomaly = diagIdx > 0 && abs(dPtsMicros - expectedDptsMicros) > 1000
-        let isAnomaly = nSamples == 0 || !isReady || sEn > 1 || tEn > 1 || fmtChg || dPtsAnomaly || attKeys != "-"
-
-        // swiftlint:disable:next no_magic_numbers
-        let shouldLog = diagIdx < 20 || isAnomaly
-        if shouldLog {
-            // TEMP-LOG: #105 — one line per buffer (first 20 + anomalies)
+        // Permanent canary: after the Commit-1 LPCM fix the audio format must not change
+        // mid-stream. A change means the fix regressed or a new device sends variable formats.
+        // `unsafe`: CMAudioFormatDescriptionGetStreamBasicDescription returns UnsafePointer;
+        // SWIFT_STRICT_MEMORY_SAFETY = YES requires the annotation at call sites (#105 pattern).
+        if let prevFmt = self.audioPrevFmtDesc, let curFmt, !CMFormatDescriptionEqual(curFmt, otherFormatDescription: prevFmt) {
+            var prevRate = -1; var prevCh = -1; var prevBits = -1; var prevFlags = "?"; var prevBpf = -1
+            if let p = unsafe CMAudioFormatDescriptionGetStreamBasicDescription(prevFmt) {
+                prevRate = unsafe Int(p.pointee.mSampleRate)
+                prevCh = unsafe Int(p.pointee.mChannelsPerFrame)
+                prevBits = unsafe Int(p.pointee.mBitsPerChannel)
+                prevFlags = unsafe String(format: "0x%08x", p.pointee.mFormatFlags)
+                prevBpf = unsafe Int(p.pointee.mBytesPerFrame)
+            }
+            var curRate = -1; var curCh = -1; var curBits = -1; var curFlags = "?"; var curBpf = -1
+            if let c = unsafe CMAudioFormatDescriptionGetStreamBasicDescription(curFmt) {
+                curRate = unsafe Int(c.pointee.mSampleRate)
+                curCh = unsafe Int(c.pointee.mChannelsPerFrame)
+                curBits = unsafe Int(c.pointee.mBitsPerChannel)
+                curFlags = unsafe String(format: "0x%08x", c.pointee.mFormatFlags)
+                curBpf = unsafe Int(c.pointee.mBytesPerFrame)
+            }
+            // Mid-stream audio format change: should never happen with the pinned LPCM capture
+            // settings (CameraSource.audioOutputSettings). If this fires it is a regression of
+            // the class-#105 bug and will cause AVAssetWriterInput to fault with -12737.
             self.logger.notice(
                 // swiftlint:disable:next line_length
-                "[audio#105] idx=\(diagIdx, privacy: .public) rawPts=\(Self.pts6(rawPts), privacy: .public)s hostPts=\(Self.pts6(sample.ptsHostTime), privacy: .public)s dPts=\(dPtsMicros, privacy: .public)µs n=\(nSamples, privacy: .public) bytes=\(nBytes, privacy: .public) ready=\(isReady, privacy: .public) tEn=\(tEn, privacy: .public) sEn=\(sEn, privacy: .public) fmtChg=\(fmtChg, privacy: .public) att=\(attKeys, privacy: .public) sAtt=\(hasSampleAtt, privacy: .public)"
+                "Audio format changed mid-stream (#105 regression): prev rate=\(prevRate, privacy: .public) ch=\(prevCh, privacy: .public) bits=\(prevBits, privacy: .public) flags=\(prevFlags, privacy: .public) bpf=\(prevBpf, privacy: .public) → cur rate=\(curRate, privacy: .public) ch=\(curCh, privacy: .public) bits=\(curBits, privacy: .public) flags=\(curFlags, privacy: .public) bpf=\(curBpf, privacy: .public)"
             )
         }
-        if fmtChg, let prevFmt = self.audioPrevFmtDesc, let curFmt {
-            // TEMP-LOG: #105 — log both ASBDs when format changes between consecutive buffers
-            // `unsafe`: UnsafePointer out-params under SWIFT_STRICT_MEMORY_SAFETY = YES.
-            // Direct pointee reads outside closures so the unsafe annotation is on the expression,
-            // not on a closure parameter (closures cannot be individually marked unsafe).
-            // `unsafe`: CMAudioFormatDescriptionGetStreamBasicDescription returns UnsafePointer.
-            // Separate if-let bindings avoid force-unwrap while keeping the unsafe scope tight.
-            var prevRate = -1
-            var prevCh = -1
-            var prevBits = -1
-            var prevFlags = "?"
-            var prevBpf = -1
-            if let prevDesc = unsafe CMAudioFormatDescriptionGetStreamBasicDescription(prevFmt) {
-                prevRate = unsafe Int(prevDesc.pointee.mSampleRate)
-                prevCh = unsafe Int(prevDesc.pointee.mChannelsPerFrame)
-                prevBits = unsafe Int(prevDesc.pointee.mBitsPerChannel)
-                prevFlags = unsafe String(format: "0x%08x", prevDesc.pointee.mFormatFlags)
-                prevBpf = unsafe Int(prevDesc.pointee.mBytesPerFrame)
-            }
-            var curRate = -1
-            var curCh = -1
-            var curBits = -1
-            var curFlags = "?"
-            var curBpf = -1
-            if let curDesc = unsafe CMAudioFormatDescriptionGetStreamBasicDescription(curFmt) {
-                curRate = unsafe Int(curDesc.pointee.mSampleRate)
-                curCh = unsafe Int(curDesc.pointee.mChannelsPerFrame)
-                curBits = unsafe Int(curDesc.pointee.mBitsPerChannel)
-                curFlags = unsafe String(format: "0x%08x", curDesc.pointee.mFormatFlags)
-                curBpf = unsafe Int(curDesc.pointee.mBytesPerFrame)
-            }
-            self.logger.notice(
-                // swiftlint:disable:next line_length
-                "[audio#105] idx=\(diagIdx, privacy: .public) FMT CHANGE prev: rate=\(prevRate, privacy: .public) ch=\(prevCh, privacy: .public) bits=\(prevBits, privacy: .public) flags=\(prevFlags, privacy: .public) bpf=\(prevBpf, privacy: .public) → cur: rate=\(curRate, privacy: .public) ch=\(curCh, privacy: .public) bits=\(curBits, privacy: .public) flags=\(curFlags, privacy: .public) bpf=\(curBpf, privacy: .public)"
-            )
-        }
-
-        // Update per-buffer state ALWAYS, not only when logging (so dPts/fmtChg stay accurate).
-        self.audioPrevPtsSec = rawPtsSec
         self.audioPrevFmtDesc = curFmt
 
         guard self.includeAudio else { return }
@@ -613,32 +539,6 @@ actor DualFileOutputStage {
         return result
     }
 
-    // MARK: - Helpers (#105 TEMP-LOG)
-
-    /// Formats a `CMTime` seconds value to 6 decimal places without `String(format:)`,
-    /// which trips `SWIFT_STRICT_MEMORY_SAFETY` — TEMP-LOG helper for #105.
-    private static func pts6(_ time: CMTime) -> String {
-        // Integer arithmetic: scale ×1_000_000 for microsecond precision (6 fractional digits).
-        // swiftlint:disable no_magic_numbers
-        let scaled = Int((CMTimeGetSeconds(time) * 1_000_000).rounded())
-        let whole = scaled / 1_000_000
-        let frac = abs(scaled % 1_000_000)
-        let fracPadded = if frac < 10 {
-            "00000\(frac)"
-        } else if frac < 100 {
-            "0000\(frac)"
-        } else if frac < 1000 {
-            "000\(frac)"
-        } else if frac < 10000 {
-            "00\(frac)"
-        } else if frac < 100_000 {
-            "0\(frac)"
-        } else {
-            "\(frac)"
-        }
-        // swiftlint:enable no_magic_numbers
-        return "\(whole).\(fracPadded)"
-    }
 }
 
 // swiftlint:enable type_body_length
