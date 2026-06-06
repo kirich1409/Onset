@@ -107,6 +107,12 @@ actor FileWriter {
     nonisolated let drops: AsyncStream<DropEvent>
     private let dropsContinuation: AsyncStream<DropEvent>.Continuation
 
+    /// Hard-fault signal — emits once when the writer faults, then finishes (#105 fail-fast).
+    ///
+    /// Finished (without yielding) in `markFinished()` and `deinit` so consumers never hang.
+    nonisolated let faults: AsyncStream<Void>
+    private let faultsContinuation: AsyncStream<Void>.Continuation
+
     // MARK: - Logger
 
     nonisolated let logger = Logger(
@@ -205,14 +211,19 @@ actor FileWriter {
         let (stream, continuation) = AsyncStream.makeStream(of: DropEvent.self)
         self.drops = stream
         self.dropsContinuation = continuation
+
+        let (faultStream, faultContinuation) = AsyncStream.makeStream(of: Void.self)
+        self.faults = faultStream
+        self.faultsContinuation = faultContinuation
     }
 
     deinit {
         // Best-effort safety net: if the writer is released without `markFinished()`, finish
-        // the continuation so a consumer's `for await` on `drops` doesn't hang indefinitely.
+        // both continuations so consumers' `for await` loops don't hang indefinitely.
         // Mirrors `DropMonitor.deinit`. `markFinished()` is the primary, ordered terminator;
         // double-finishing a continuation is a documented no-op.
         self.dropsContinuation.finish()
+        self.faultsContinuation.finish()
     }
 
     // MARK: - Lifecycle
@@ -422,6 +433,11 @@ actor FileWriter {
             // swiftlint:disable:next line_length
             "FileWriter \(track, privacy: .public) append failed (writer faulted) — status \(status, privacy: .public): \(underlying, privacy: .public)"
         )
+        // Signal the fault immediately so DualFileOutputStage can stop the recording without
+        // waiting for the user to press Stop (#105 fail-fast). Yield then finish: one value
+        // tells observers the fault occurred; finish prevents hangs if nobody consumes it yet.
+        self.faultsContinuation.yield(())
+        self.faultsContinuation.finish()
     }
 
     // MARK: - Helpers
@@ -449,6 +465,9 @@ actor FileWriter {
     /// Formats a `CMTime` seconds value to three decimal places without `String(format:)`,
     /// which trips `SWIFT_STRICT_MEMORY_SAFETY` — diagnostic for #105.
     private static func secStr(_ time: CMTime) -> String {
+        // Guard against invalid/indefinite CMTime (.invalid, .indefinite) whose
+        // CMTimeGetSeconds returns NaN/Inf — Int(NaN) crashes at runtime.
+        guard time.isValid, time.isNumeric else { return "invalid" }
         // Round to 3 decimal places using integer arithmetic (same pattern as StageRateAggregator).
         // swiftlint:disable no_magic_numbers
         let scaled = Int((CMTimeGetSeconds(time) * 1000).rounded())
@@ -493,6 +512,9 @@ actor FileWriter {
         self.rawVideoInput.markAsFinished()
         self.rawAudioInput?.markAsFinished()
         self.dropsContinuation.finish()
+        // Safety finish: prevents `for await writer.faults` from hanging if the writer
+        // completed normally (no fault). Double-finish is a documented no-op.
+        self.faultsContinuation.finish()
         self.logger.info("FileWriter inputs marked as finished")
     }
 

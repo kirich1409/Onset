@@ -227,12 +227,18 @@ private final class SessionFakeWriter: WriterControlling, @unchecked Sendable {
     nonisolated let drops: AsyncStream<DropEvent>
     private let dropsContinuation: AsyncStream<DropEvent>.Continuation
 
+    nonisolated let faults: AsyncStream<Void>
+    private let faultsContinuation: AsyncStream<Void>.Continuation
+
     init(kind: RecordingPipelineKind) {
         self.kind = kind
         self.finishResult = .completed(url: URL(fileURLWithPath: "/tmp/onset-session-fake-\(kind).mp4"))
         let (drops, dropsContinuation) = AsyncStream.makeStream(of: DropEvent.self)
         self.drops = drops
         self.dropsContinuation = dropsContinuation
+        let (faults, faultsContinuation) = AsyncStream.makeStream(of: Void.self)
+        self.faults = faults
+        self.faultsContinuation = faultsContinuation
     }
 
     func start(atSourceTime sourceTime: CMTime) throws {
@@ -250,6 +256,7 @@ private final class SessionFakeWriter: WriterControlling, @unchecked Sendable {
     func markFinished() {
         self.markFinishedCalled = true
         self.dropsContinuation.finish()
+        self.faultsContinuation.finish()
     }
 
     func finish() async -> FinishResult {

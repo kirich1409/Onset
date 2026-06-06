@@ -59,6 +59,23 @@ actor DualFileOutputStage {
     /// Called once per writer at creation so its `drops` channel is registered with `DropMonitor`.
     private let onWriterCreated: @Sendable (any WriterControlling) async -> Void
 
+    /// Called once when ALL currently-live writers have faulted — triggers immediate stop (#105).
+    ///
+    /// Invoked from fault-observer tasks started at writer creation. The callback is expected
+    /// to call `RecordingSession.stop()`, which is idempotent (memoised via `stopTask`).
+    private let onAllWritersFaulted: @Sendable () async -> Void
+
+    /// Observer tasks started per writer to watch for faults. Cancelled in `finishAll()` and
+    /// `finalizePipeline(_:)` once the writer is no longer live — prevents a late delivery on a
+    /// gracefully stopped writer from firing the callback erroneously.
+    private var faultObserverTasks: [RecordingPipelineKind: Task<Void, Never>] = [:]
+
+    /// Pipelines whose writers have signalled a hard fault via `writer.faults`.
+    ///
+    /// Maintained by fault-observer tasks inside this actor's isolation. When this set
+    /// covers all live (non-early-finalised) writers, `onAllWritersFaulted` is called.
+    private var faultedWriterKinds: Set<RecordingPipelineKind> = []
+
     // MARK: - Per-pipeline writer state
 
     /// A writer plus its terminal status, tracked so an early-finalised pipeline (AC-12) still
@@ -100,18 +117,22 @@ actor DualFileOutputStage {
     ///   - includeAudio: Whether a mic audio track is muxed into the file(s).
     ///   - writerFactory: Builds writers lazily from `(kind, sourceFormatHint, includeAudio)`.
     ///   - onWriterCreated: Registers a new writer's `drops` channel with `DropMonitor`.
+    ///   - onAllWritersFaulted: Called when every live writer has faulted — expected to stop the
+    ///     session immediately. Defaults to a no-op so existing tests need no changes.
     init(
         sessionT0: CMTime,
         expectedPipelines: Set<RecordingPipelineKind>,
         includeAudio: Bool,
         writerFactory: any WriterFactory,
-        onWriterCreated: @escaping @Sendable (any WriterControlling) async -> Void
+        onWriterCreated: @escaping @Sendable (any WriterControlling) async -> Void,
+        onAllWritersFaulted: @escaping @Sendable () async -> Void = {}
     ) {
         self.sessionT0 = sessionT0
         self.expectedKinds = expectedPipelines
         self.includeAudio = includeAudio
         self.writerFactory = writerFactory
         self.onWriterCreated = onWriterCreated
+        self.onAllWritersFaulted = onAllWritersFaulted
     }
 
     // MARK: - Video routing
@@ -174,11 +195,47 @@ actor DualFileOutputStage {
         // lazily-created writer's drops would be silently unobserved.
         await self.onWriterCreated(writer)
 
+        // Start a fault-observer task for this writer (#105 fail-fast). The task reads the
+        // writer's `faults` stream (at most one value) and calls back into this actor to record
+        // the fault and — when all live writers have faulted — trigger an immediate stop. The task
+        // is cancelled in `finalizePipeline` / `finishAll` so a graceful stop does not fire it.
+        let faultsStream = writer.faults // capture nonisolated property before the actor hop
+        let faultTask = Task { [weak self] in
+            for await _ in faultsStream {
+                await self?.recordFault(for: kind)
+            }
+        }
+        self.faultObserverTasks[kind] = faultTask
+
         await self.drainPendingAudio(into: writer)
         self.releasePendingIfAllWritersCreated()
 
         self.logger.info("Created \(String(describing: kind)) writer")
         return pipelineWriter
+    }
+
+    /// Records that `kind`'s writer has faulted and calls `onAllWritersFaulted` when every
+    /// live (non-early-finalised) writer is now in the faulted set.
+    ///
+    /// Called exclusively from the per-writer fault-observer `Task` — runs on this actor.
+    private func recordFault(for kind: RecordingPipelineKind) async {
+        self.faultedWriterKinds.insert(kind)
+
+        let liveKinds = Set(
+            self.writers.compactMap { key, value in value.finishResult == nil ? key : nil }
+        )
+        guard !liveKinds.isEmpty else { return }
+
+        if liveKinds.isSubset(of: self.faultedWriterKinds) {
+            self.logger.error(
+                "All live writers faulted — stopping recording immediately (#105)"
+            )
+            await self.onAllWritersFaulted()
+        } else {
+            self.logger.error(
+                "\(String(describing: kind), privacy: .public) writer faulted; other pipeline still live"
+            )
+        }
     }
 
     // MARK: - Audio routing (#33 fan-out + retiming)
@@ -480,6 +537,12 @@ actor DualFileOutputStage {
         guard var pipelineWriter = self.writers[kind], pipelineWriter.finishResult == nil else {
             return
         }
+        // Cancel the fault-observer task before markFinished() so the faults stream finishing
+        // (via markFinished → faultsContinuation.finish) does not trigger onAllWritersFaulted
+        // on a gracefully stopped pipeline.
+        self.faultObserverTasks[kind]?.cancel()
+        self.faultObserverTasks[kind] = nil
+
         await pipelineWriter.writer.markFinished()
         let result = await pipelineWriter.writer.finish()
         pipelineWriter.finishResult = result
@@ -505,6 +568,14 @@ actor DualFileOutputStage {
     /// `markFinished()` is called on every still-open writer first (so all inputs are sealed),
     /// then both `finish()` calls run concurrently.
     func finishAll() async -> [RecordingPipelineKind: FinishResult] {
+        // Cancel all fault-observer tasks before marking writers finished. markFinished()
+        // calls faultsContinuation.finish(), which would otherwise make the observer task
+        // fire on a graceful stop — producing a spurious onAllWritersFaulted call.
+        for (kind, task) in self.faultObserverTasks {
+            task.cancel()
+            self.faultObserverTasks[kind] = nil
+        }
+
         // Seal every still-open writer's inputs before finishing.
         for (kind, pipelineWriter) in self.writers where pipelineWriter.finishResult == nil {
             await pipelineWriter.writer.markFinished()

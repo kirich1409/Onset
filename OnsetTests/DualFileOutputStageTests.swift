@@ -70,12 +70,18 @@ private final class FakeWriter: WriterControlling, @unchecked Sendable {
     nonisolated let drops: AsyncStream<DropEvent>
     private let dropsContinuation: AsyncStream<DropEvent>.Continuation
 
+    nonisolated let faults: AsyncStream<Void>
+    private let faultsContinuation: AsyncStream<Void>.Continuation
+
     init(kind: RecordingPipelineKind) {
         self.kind = kind
         self.finishResult = .completed(url: URL(fileURLWithPath: "/tmp/onset-fake-\(kind).mp4"))
         let (stream, continuation) = AsyncStream.makeStream(of: DropEvent.self)
         self.drops = stream
         self.dropsContinuation = continuation
+        let (faultStream, faultContinuation) = AsyncStream.makeStream(of: Void.self)
+        self.faults = faultStream
+        self.faultsContinuation = faultContinuation
     }
 
     func start(atSourceTime sourceTime: CMTime) throws {
@@ -93,11 +99,18 @@ private final class FakeWriter: WriterControlling, @unchecked Sendable {
     func markFinished() {
         self.markFinishedCalled = true
         self.dropsContinuation.finish()
+        self.faultsContinuation.finish()
     }
 
     func finish() async -> FinishResult {
         self.finishCalled = true
         return self.finishResult
+    }
+
+    /// Simulates a hard writer fault (as `AVAssetWriter.append()` returning `false`).
+    func simulateFault() {
+        self.faultsContinuation.yield(())
+        self.faultsContinuation.finish()
     }
 }
 
@@ -240,15 +253,18 @@ private enum StageTestError: Error {
 private func makeStage(
     factory: FakeWriterFactory,
     expected: Set<RecordingPipelineKind>,
-    includeAudio: Bool
+    includeAudio: Bool,
+    onAllWritersFaulted: @escaping @Sendable () async -> Void = {}
 )
 -> DualFileOutputStage {
     DualFileOutputStage(
         sessionT0: SampleFactory.sessionT0,
         expectedPipelines: expected,
         includeAudio: includeAudio,
-        writerFactory: factory
-    ) { _ in }
+        writerFactory: factory,
+        onWriterCreated: { _ in },
+        onAllWritersFaulted: onAllWritersFaulted
+    )
 }
 
 // MARK: - Retiming (AC-7, #33)
@@ -502,6 +518,93 @@ struct DualFileOutputStageFinishTests {
         let results = await stage.finishAll()
         #expect(results[.camera] != nil)
         #expect(results[.screen] != nil)
+    }
+}
+
+// MARK: - Fail-fast (#105)
+
+@Suite("DualFileOutputStage — fail-fast on writer fault (#105)")
+struct DualFileOutputStageFaultTests {
+    // MARK: Both writers fault → callback fires
+
+    @Test("all writers faulted → onAllWritersFaulted is called")
+    func allWritersFaulted_callbackFires() async throws {
+        let factory = FakeWriterFactory()
+        var callbackFired = false
+        // Use a protected box to cross the @unchecked Sendable boundary safely.
+        // (Same pattern as FakeRecordingControlling in RecordingCoordinatorTests.)
+        final class Box: @unchecked Sendable { var value = false }
+        let box = Box()
+
+        let stage = makeStage(
+            factory: factory,
+            expected: [.screen, .camera],
+            includeAudio: false
+        ) { box.value = true }
+
+        // Trigger writer creation for both pipelines.
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .camera), from: .camera)
+
+        // Fault both writers.
+        factory.screenWriter.simulateFault()
+        factory.cameraWriter.simulateFault()
+
+        // Give the observer tasks a chance to run.
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        callbackFired = box.value
+        #expect(callbackFired, "onAllWritersFaulted must fire when all writers are faulted")
+    }
+
+    // MARK: Only one writer faults → callback does NOT fire
+
+    @Test("one of two writers faulted → onAllWritersFaulted is NOT called")
+    func oneWriterFaulted_callbackDoesNotFire() async throws {
+        let factory = FakeWriterFactory()
+        final class Box: @unchecked Sendable { var value = false }
+        let box = Box()
+
+        let stage = makeStage(
+            factory: factory,
+            expected: [.screen, .camera],
+            includeAudio: false
+        ) { box.value = true }
+
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .camera), from: .camera)
+
+        // Fault only the screen writer.
+        factory.screenWriter.simulateFault()
+
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(!box.value, "onAllWritersFaulted must NOT fire when only one writer is faulted")
+    }
+
+    // MARK: Graceful finishAll does not fire callback
+
+    @Test("graceful finishAll cancels observer tasks — callback does NOT fire")
+    func finishAll_doesNotFireFaultCallback() async throws {
+        let factory = FakeWriterFactory()
+        final class Box: @unchecked Sendable { var value = false }
+        let box = Box()
+
+        let stage = makeStage(
+            factory: factory,
+            expected: [.screen, .camera],
+            includeAudio: false
+        ) { box.value = true }
+
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .camera), from: .camera)
+
+        // Normal stop path — finishAll cancels observer tasks before markFinished.
+        _ = await stage.finishAll()
+
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(!box.value, "graceful finishAll must not trigger the fault callback")
     }
 }
 

@@ -294,11 +294,18 @@ actor RecordingSession {
             sessionT0: sessionT0,
             expectedPipelines: expectedKinds,
             includeAudio: startPlan.includeAudio,
-            writerFactory: self.writerFactory
-        ) { [weak monitor] writer in
-            // Register each lazily-created writer's backpressure channel (AC-8/AC-9).
-            await monitor?.observe(writer.drops)
-        }
+            writerFactory: self.writerFactory,
+            onWriterCreated: { [weak monitor] writer in
+                // Register each lazily-created writer's backpressure channel (AC-8/AC-9).
+                await monitor?.observe(writer.drops)
+            },
+            onAllWritersFaulted: { [weak self] in
+                // All writers have faulted mid-recording — stop immediately so the user gets
+                // the write-failure alert without having to press Stop (#105 fail-fast).
+                // `stop()` is idempotent via its memoised `stopTask`.
+                _ = await self?.stop()
+            }
+        )
         self.stage = stage
         return stage
     }
