@@ -91,6 +91,8 @@ actor FileWriter {
     private var firstAudioAppendPending = true
     /// One-shot: true until the first successful video append has been logged (#105).
     private var firstVideoAppendPending = true
+    /// Running index of audio appends for TEMP-LOG first-20 instrumentation (#105).
+    private var audioAppendIdx = 0
 
     // MARK: - Output streams
 
@@ -341,7 +343,21 @@ actor FileWriter {
         // append() returns false only after the writer faulted — a hard failure, not backpressure.
         // Audio is NOT surfaced on any drop counter (spec tracks video only), but is logged once.
         let audioPTS = CMSampleBufferGetPresentationTimeStamp(buffer)
-        guard audio.append(buffer) else {
+        // Capture append result once — TEMP-LOG reads `appended` before the fault guard below (#105).
+        let appended = audio.append(buffer)
+
+        // TEMP-LOG: #105 — log first 20 audio appends per writer to trace early-buffer faults
+        // swiftlint:disable:next no_magic_numbers
+        if self.audioAppendIdx < 20 {
+            let writerStatus = self.assetWriter.status.rawValue
+            self.logger.notice(
+                // swiftlint:disable:next line_length
+                "[audio#105-fw] idx=\(self.audioAppendIdx, privacy: .public) pts=\(Self.secStr(audioPTS), privacy: .public)s ok=\(appended, privacy: .public) st=\(writerStatus, privacy: .public)"
+            )
+        }
+        self.audioAppendIdx += 1
+
+        guard appended else {
             // diagnostic for #105: include the PTS that the writer rejected
             self.logger.error(
                 "FileWriter audio append rejected at pts=\(Self.secStr(audioPTS), privacy: .public)s"
