@@ -255,8 +255,7 @@ private func makeStage(
     expected: Set<RecordingPipelineKind>,
     includeAudio: Bool,
     onAllWritersFaulted: @escaping @Sendable () async -> Void = {}
-)
--> DualFileOutputStage {
+) -> DualFileOutputStage {
     DualFileOutputStage(
         sessionT0: SampleFactory.sessionT0,
         expectedPipelines: expected,

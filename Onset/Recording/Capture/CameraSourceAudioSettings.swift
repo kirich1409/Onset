@@ -3,6 +3,9 @@ import AVFoundation
 // MARK: - CameraSource audio output settings builder
 
 extension CameraSource {
+    /// 32-bit float depth for the pinned LPCM capture format (matches FileWriter's AAC target).
+    private static let lpcmBitDepth = 32
+
     /// Builds the `audioSettings` dictionary for `AVCaptureAudioDataOutput`.
     ///
     /// A fixed LPCM format is mandated because `AVCaptureAudioDataOutput` with `audioSettings = nil`
@@ -18,18 +21,16 @@ extension CameraSource {
     /// Parameters are sourced from `RecordingConfiguration` (the same values `FileWriter` uses for
     /// its AAC encoder target) so the capture format and the mux format remain consistent
     /// by construction.
-    // swiftlint:disable:next no_magic_numbers
-    private static let lpcmBitDepth = 32
-
     nonisolated static func audioOutputSettings(
         sampleRate: Double,
         channelCount: Int
-    ) -> [String: Any] {
+    )
+    -> [String: Any] {
         [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: sampleRate,
             AVNumberOfChannelsKey: channelCount,
-            AVLinearPCMBitDepthKey: Self.lpcmBitDepth,
+            AVLinearPCMBitDepthKey: self.lpcmBitDepth,
             AVLinearPCMIsFloatKey: true,
             // Interleaved (false = non-interleaved/planar). Keeping interleaved even for mono:
             // consistent across stereo post-MVP, and avoids the int16-planar mid-stream switch.

@@ -243,7 +243,7 @@ actor DualFileOutputStage {
 
     /// Retimes one mic sample to absolute host-time ONCE, then fans the SAME buffer reference into
     /// every live writer. If a writer does not yet exist, the retimed buffer is buffered for replay.
-    func routeAudio( // swiftlint:disable:this function_body_length cyclomatic_complexity
+    func routeAudio( // swiftlint:disable:this function_body_length
         _ sample: AudioSample
     ) async {
         let buf = sample.sampleBuffer
@@ -253,22 +253,33 @@ actor DualFileOutputStage {
         // mid-stream. A change means the fix regressed or a new device sends variable formats.
         // `unsafe`: CMAudioFormatDescriptionGetStreamBasicDescription returns UnsafePointer;
         // SWIFT_STRICT_MEMORY_SAFETY = YES requires the annotation at call sites (#105 pattern).
-        if let prevFmt = self.audioPrevFmtDesc, let curFmt, !CMFormatDescriptionEqual(curFmt, otherFormatDescription: prevFmt) {
-            var prevRate = -1; var prevCh = -1; var prevBits = -1; var prevFlags = "?"; var prevBpf = -1
-            if let p = unsafe CMAudioFormatDescriptionGetStreamBasicDescription(prevFmt) {
-                prevRate = unsafe Int(p.pointee.mSampleRate)
-                prevCh = unsafe Int(p.pointee.mChannelsPerFrame)
-                prevBits = unsafe Int(p.pointee.mBitsPerChannel)
-                prevFlags = unsafe String(format: "0x%08x", p.pointee.mFormatFlags)
-                prevBpf = unsafe Int(p.pointee.mBytesPerFrame)
+        let fmtChanged = self.audioPrevFmtDesc.map { prevFmt in
+            curFmt.map { !CMFormatDescriptionEqual($0, otherFormatDescription: prevFmt) } ?? false
+        } ?? false
+        if fmtChanged, let prevFmt = self.audioPrevFmtDesc, let curFmt {
+            var prevRate = -1
+            var prevCh = -1
+            var prevBits = -1
+            var prevFlags = "?"
+            var prevBpf = -1
+            if let prevDesc = unsafe CMAudioFormatDescriptionGetStreamBasicDescription(prevFmt) {
+                prevRate = unsafe Int(prevDesc.pointee.mSampleRate)
+                prevCh = unsafe Int(prevDesc.pointee.mChannelsPerFrame)
+                prevBits = unsafe Int(prevDesc.pointee.mBitsPerChannel)
+                prevFlags = unsafe String(format: "0x%08x", prevDesc.pointee.mFormatFlags)
+                prevBpf = unsafe Int(prevDesc.pointee.mBytesPerFrame)
             }
-            var curRate = -1; var curCh = -1; var curBits = -1; var curFlags = "?"; var curBpf = -1
-            if let c = unsafe CMAudioFormatDescriptionGetStreamBasicDescription(curFmt) {
-                curRate = unsafe Int(c.pointee.mSampleRate)
-                curCh = unsafe Int(c.pointee.mChannelsPerFrame)
-                curBits = unsafe Int(c.pointee.mBitsPerChannel)
-                curFlags = unsafe String(format: "0x%08x", c.pointee.mFormatFlags)
-                curBpf = unsafe Int(c.pointee.mBytesPerFrame)
+            var curRate = -1
+            var curCh = -1
+            var curBits = -1
+            var curFlags = "?"
+            var curBpf = -1
+            if let curDesc = unsafe CMAudioFormatDescriptionGetStreamBasicDescription(curFmt) {
+                curRate = unsafe Int(curDesc.pointee.mSampleRate)
+                curCh = unsafe Int(curDesc.pointee.mChannelsPerFrame)
+                curBits = unsafe Int(curDesc.pointee.mBitsPerChannel)
+                curFlags = unsafe String(format: "0x%08x", curDesc.pointee.mFormatFlags)
+                curBpf = unsafe Int(curDesc.pointee.mBytesPerFrame)
             }
             // Mid-stream audio format change: should never happen with the pinned LPCM capture
             // settings (CameraSource.audioOutputSettings). If this fires it is a regression of
@@ -538,7 +549,6 @@ actor DualFileOutputStage {
         }
         return result
     }
-
 }
 
 // swiftlint:enable type_body_length

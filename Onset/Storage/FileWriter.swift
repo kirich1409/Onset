@@ -91,6 +91,7 @@ actor FileWriter {
     private var firstAudioAppendPending = true
     /// One-shot: true until the first successful video append has been logged (#105).
     private var firstVideoAppendPending = true
+
     // MARK: - Output streams
 
     /// Writer-side backpressure drop events for `DropMonitor` (#35).
@@ -143,7 +144,7 @@ actor FileWriter {
     ///     is safe for standalone / test use; `LiveWriterFactory` overrides it per pipeline kind.
     ///   - nominalFps: The pipeline's target frame rate for telemetry. Default 0 when unknown.
     /// - Throws: `CocoaError` if `AVAssetWriter(url:fileType:)` fails (disk full, bad path).
-    init(
+    init( // swiftlint:disable:this function_body_length
         outputURL: URL,
         configuration: RecordingConfiguration,
         includeAudio: Bool,

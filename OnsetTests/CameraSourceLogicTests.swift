@@ -609,9 +609,8 @@ nonisolated private func assertAudioSamples(_ samples: [AudioSample], anchor: Ho
 
 @Suite("CameraSource — audioOutputSettings builder")
 struct CameraSourceAudioSettingsTests {
-    // swiftlint:disable:next no_magic_numbers
     private let sampleRate: Double = 48000
-    private let channelCount: Int = 1
+    private let channelCount = 1
 
     @Test("format ID is kAudioFormatLinearPCM")
     func formatID_isLPCM() {
