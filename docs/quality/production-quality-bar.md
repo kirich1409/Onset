@@ -87,13 +87,13 @@
 | Критерий | Порог | Метод | Статус |
 |---|---|---|---|
 | Выживаемость enc_real | ≥ 95% поданных кадров | телеметрия `enc_real / capture` | ❌ ~84% (enc_real 20.0 / capture 23.8 при тихом прогоне, `cfr-clock-acceptance.md`) |
-| Fresh-content rate (mpdecimate) | ≥ 95% номинала (≥ 28.5 fps при 30, ≥ 57 fps при 60) | `verify-cfr.sh` ассерт C + mpdecimate | ❌ **~43% номинала** (12.4–13.5 fps из 30; 3 прогона 2026-06-07 при дневном свете — [#112](https://github.com/kirich1409/Onset/issues/112)) — **блокер релиза** |
-| Capture overflow | ≈ 0/с | телеметрия `capture_overflow` | ❌ 12–15/с (стенд 2026-06-07, [#112](https://github.com/kirich1409/Onset/issues/112)) |
-| tick_lag (camera-актор) | медиана ≤ 10 мс, max ≤ 50 мс | телеметрия `tick_lag_ms` | ❌ avg 33–40 мс, max до 133 мс (2026-06-07, [#112](https://github.com/kirich1409/Onset/issues/112)) |
+| Fresh-content rate (mpdecimate) | ≥ 95% номинала (≥ 28.5 fps при 30, ≥ 57 fps при 60) | `verify-cfr.sh` ассерт C + mpdecimate | ⏳ **pending** — требуется верификация при дневном свете с движением в кадре. В тёмной сцене AE ограничивает вход камеры (~23.4 fps) — фундаментальное ограничение устройства, не пайплайна. CFR-сетка теперь без потерь (ассерт B PASS, gap_count=0 после #112). Ранее: ~43% номинала до фикса B-frames |
+| Capture overflow | ≈ 0/с | телеметрия `capture_overflow` | ⏳ 0/с на стенде (idle-машина, 2026-06-07 после #112); верификация под рабочей нагрузкой — pending. Ранее: 12–15/с до фикса B-frames ([#112](https://github.com/kirich1409/Onset/issues/112)) |
+| tick_lag (camera-актор) | медиана ≤ 10 мс, max ≤ 50 мс | телеметрия `tick_lag_ms` | ✅ avg ≈ 2.3 мс, max ≈ 9 мс (стенд 2026-06-07 после #112). Исторические значения 33–40 мс avg / до 133 мс max — артефакт измерения: старая семантика `tick_lag` фиксировала ~slot-период (33 мс) на здоровом пайплайне; новая (wake-latency) — реальную задержку пробуждения актора |
 | Серии дублей — мода | ≤ 2 кадра | `verify-cfr.sh` ассерт D: `MAX_RUN_MODE=2` | ✅ закрыто #102 (до: ~13, после: ≤2) |
 | Серии дублей — нет длинных | ни одна серия длиной ≥ 5 не повторяется ≥ 10 раз | `verify-cfr.sh` `LONG_RUN_LEN=5, LONG_RUN_MAX=10` | ✅ закрыто #102 |
-| Пакетный rate (файл pkt/s) | отклонение ≤ 2% от номинала | `verify-cfr.sh` ассерт A: `RATE_TOL_PCT=2` | ❌ 25–27 pkt/s из 30 (~83–90%; замер 2026-06-07, [#112](https://github.com/kirich1409/Onset/issues/112)); ранее: ~67% (20.0/30, тихий прогон, `cfr-clock-acceptance.md`) |
-| Равномерность PTS-дельт | ≤ 10 гэпов/мин > 1.5 слота | `verify-cfr.sh` ассерт B | ✅ закрыто #102 (B-frame sorting fix) |
+| Пакетный rate (файл pkt/s) | отклонение ≤ 2% от номинала | `verify-cfr.sh` ассерт A: `RATE_TOL_PCT=2` | ✅ 30.00 pkt/s (`verify-cfr` ассерт A PASS; стенд 2026-06-07 после #112: B-frames → структурные gate-дропы устранены, gate_drop=0.00/с, pending_max=2.0–2.5). Ранее: 25–27 pkt/s до фикса |
+| Равномерность PTS-дельт | ≤ 10 гэпов/мин > 1.5 слота | `verify-cfr.sh` ассерт B | ✅ закрыто #102 (B-frame sorting fix); подтверждено #112: gap_count=0 после отключения B-frames |
 | Пиксельный формат | 420v (`kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange`) | `ffprobe -show_streams` `pix_fmt` | ✅ `RecordingConfiguration.mvpDefault`: pixelFormat=[.biPlanar420v, .biPlanar420f]; 420v — первый/приоритетный |
 | Кодек видео | HEVC / hvc1 | `ffprobe -show_streams` `codec_name`, `codec_tag_string` | ✅ `mvpDefault`: codec=HEVC, sampleEntry=hvc1 (h264 в спеках не заявлен) |
 
@@ -173,9 +173,9 @@ Baseline записи с багом (до #102): camera 2.88 fps fresh, screen 4
 
 | Разрыв | Issue | Приоритет | Суть |
 |---|---|---|---|
-| Потери кадров камеры — 43% номинала | [#112](https://github.com/kirich1409/Onset/issues/112) | 🔴 блокер релиза | capture overflow 12–15/с + tick_lag до 133 мс → fresh content 12.4–13.5 fps из 30; данные: 3 прогона 2026-06-07 при дневном свете |
+| ~~Потери кадров камеры — 43% номинала~~ | [#112](https://github.com/kirich1409/Onset/issues/112) | ✅ закрыто | Корень — B-frames (`AllowFrameReordering=true`): reorder window держал `NumberOfPendingFrames` ≥ 4, структурно достигая backpressure gate. Фикс: `allowFrameReordering=false` в `mvpDefault`. После фикса: gate_drop=0.00/с, пакетный rate=30.00 pkt/s (ассерт A PASS, gap_count=0). Fresh-content rate при дневном свете — ⏳ pending ре-верификации |
 | Поддержка режимов камеры (4K30 / 1080p60 / встроенная) | [#113](https://github.com/kirich1409/Onset/issues/113) | 🔴 блокер релиза | 4K30 не тестировался; 1080p60 недостижим; встроенная камера не проверена; ручного выбора нет |
-| VT-потолок / кросс-полосная конкуренция | [#104](https://github.com/kirich1409/Onset/issues/104) | 🔴 блокер | Screen encoder ~20–42 fps (4K); camera страдает косвенно (tick_lag_ms_avg 38 мс); корень проблемы #112 (H-A) |
+| VT-потолок / кросс-полосная конкуренция | [#104](https://github.com/kirich1409/Onset/issues/104) | 🔴 блокер | Screen encoder ~20–42 fps (4K); camera страдает косвенно; #112 закрыт отдельно |
 | Конфляция источников дропов | [#100](https://github.com/kirich1409/Onset/issues/100) | 🟠 важный | Backpressure-gate drops, capture drops и CFR-normalization drops суммируются в `encoderBackpressureDrops`; честная атрибуция не реализована |
 | EngineBudgetCap требует калибровки | [#97](https://github.com/kirich1409/Onset/issues/97) / [#98](https://github.com/kirich1409/Onset/issues/98) | 🟡 | `EngineBudgetCap` (995M px/s) — плейсхолдер; `CapabilityResolver` молча применяет downscale без user-visible сигнала |
 | Персистенция выбора устройств | [#109](https://github.com/kirich1409/Onset/issues/109) | 🟡 | Камера и микрофон сбрасываются на значения по умолчанию при каждом перезапуске |

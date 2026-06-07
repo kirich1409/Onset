@@ -120,7 +120,7 @@ Key integration points:
 `VTCompressionSession` HEVC со свойствами (из research v2.1):
 - `kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder = true` (детект HW; падение = нет HW → ошибка пользователю).
 - `ProfileLevel = HEVC_Main_AutoLevel`, 8-bit, color SDR Rec.709.
-- `RealTime = true`; `AllowFrameReordering = true` (B-кадры, лучше сжатие — файл не стриминг).
+- `RealTime = true`; `AllowFrameReordering = false` (B-кадры отключены: reorder window держит `NumberOfPendingFrames` ≥ 4, что структурно достигает порога backpressure gate в `VideoEncoder`; потеря ~17% слотов камеры и ~40% экрана — #112).
 - Rate control: VBR — `AverageBitRate` + `DataRateLimits` (peak-cap). Целевые средние битрейты — диапазонами под разрешение/fps (калибровать; см. Open Questions).
 - `MaxKeyFrameInterval` — стабильный (для CFR/seek), разумный GOP.
 

@@ -50,7 +50,7 @@ platform: [desktop]
 | AC ref | AC-4, AC-5 |
 | Preconditions | — |
 | Steps | Создать `RecordingConfiguration.mvpDefault`; проверить все поля |
-| Expected Result | codec=HEVC, container=.mp4, sampleEntry=hvc1, profileLevel=MainAutoLevel, colorPrimaries=Rec709, bitDepth=8, maxScreenFps=60, minCameraFps=30, pixelFormat=420v, allowFrameReordering=true, movieFragmentInterval=4s, outputDir=…/Movies/Onset |
+| Expected Result | codec=HEVC, container=.mp4, sampleEntry=hvc1, profileLevel=MainAutoLevel, colorPrimaries=Rec709, bitDepth=8, maxScreenFps=60, minCameraFps=30, pixelFormat=420v, allowFrameReordering=false, movieFragmentInterval=4s, outputDir=…/Movies/Onset |
 | Platform | Apple Silicon, macOS 26.x |
 | Source | Spec §AC-4/AC-5; `RecordingConfigurationTests.swift` (mvpDefault_* тесты) |
 

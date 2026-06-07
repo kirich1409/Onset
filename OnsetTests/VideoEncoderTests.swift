@@ -960,7 +960,8 @@ struct VideoEncoderTests {
             props[kVTCompressionPropertyKey_AllowFrameReordering as String],
             "AllowFrameReordering must be applied to the session"
         )
-        #expect(CFEqual(allowReorder, kCFBooleanTrue), "AllowFrameReordering must be true (B-frames)")
+        // B-frames disabled: reorder window pins NumberOfPendingFrames ≥ 4, hitting the backpressure gate (#112).
+        #expect(CFEqual(allowReorder, kCFBooleanFalse), "AllowFrameReordering must be false")
 
         let profileLevel = try #require(
             props[kVTCompressionPropertyKey_ProfileLevel as String],

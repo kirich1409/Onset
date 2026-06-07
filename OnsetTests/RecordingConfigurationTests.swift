@@ -77,9 +77,9 @@ struct RecordingConfigurationTests {
 
     // MARK: - GOP / Reordering
 
-    @Test("mvpDefault — allowFrameReordering is true (B-frames; not live stream)")
-    func mvpDefault_allowFrameReordering_true() {
-        #expect(self.sut.allowFrameReordering == true)
+    @Test("mvpDefault — allowFrameReordering is false (reorder window pins pending≥4, hits backpressure gate; #112)")
+    func mvpDefault_allowFrameReordering_false() {
+        #expect(self.sut.allowFrameReordering == false)
     }
 
     // MARK: - Movie Fragment Interval

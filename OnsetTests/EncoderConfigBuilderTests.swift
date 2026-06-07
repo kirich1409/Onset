@@ -37,7 +37,7 @@ struct EncoderConfigBuilderTests {
         let settings = EncoderConfigBuilder.build(config: self.config, width: 3840, height: 2160, fps: 60)
 
         #expect(settings.profileLevel == .mainAutoLevel)
-        #expect(settings.allowFrameReordering == true)
+        #expect(settings.allowFrameReordering == false)
         #expect(settings.realTime == true)
     }
 
@@ -71,7 +71,7 @@ struct EncoderConfigBuilderTests {
         let settings = EncoderConfigBuilder.build(config: self.config, width: 1920, height: 1080, fps: 30)
 
         #expect(settings.profileLevel == .mainAutoLevel)
-        #expect(settings.allowFrameReordering == true)
+        #expect(settings.allowFrameReordering == false)
         #expect(settings.realTime == true)
     }
 
@@ -111,7 +111,7 @@ struct EncoderConfigBuilderTests {
         let settings = EncoderConfigBuilder.build(config: self.config, width: 1280, height: 720, fps: 30)
 
         #expect(settings.profileLevel == .mainAutoLevel)
-        #expect(settings.allowFrameReordering == true)
+        #expect(settings.allowFrameReordering == false)
         #expect(settings.realTime == true)
         #expect(settings.bitDepth == 8)
         #expect(settings.colorPrimaries == .rec709)
