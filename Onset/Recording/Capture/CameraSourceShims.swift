@@ -93,7 +93,7 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
                 aggregator.recordFresh()
                 if let prev = previousDelivery {
                     // swiftlint:disable:next no_magic_numbers
-                    aggregator.recordDeliveryGap(durationMs: (ptsSeconds - prev) * 1_000)
+                    aggregator.recordDeliveryGap(durationMs: (ptsSeconds - prev) * 1000)
                 }
             }
         }
