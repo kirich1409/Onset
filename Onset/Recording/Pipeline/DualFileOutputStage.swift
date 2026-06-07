@@ -59,6 +59,23 @@ actor DualFileOutputStage {
     /// Called once per writer at creation so its `drops` channel is registered with `DropMonitor`.
     private let onWriterCreated: @Sendable (any WriterControlling) async -> Void
 
+    /// Called once when ALL currently-live writers have faulted — triggers immediate stop (#105).
+    ///
+    /// Invoked from fault-observer tasks started at writer creation. The callback is expected
+    /// to call `RecordingSession.stop()`, which is idempotent (memoised via `stopTask`).
+    private let onAllWritersFaulted: @Sendable () async -> Void
+
+    /// Observer tasks started per writer to watch for faults. Cancelled in `finishAll()` and
+    /// `finalizePipeline(_:)` once the writer is no longer live — prevents a late delivery on a
+    /// gracefully stopped writer from firing the callback erroneously.
+    private var faultObserverTasks: [RecordingPipelineKind: Task<Void, Never>] = [:]
+
+    /// Pipelines whose writers have signalled a hard fault via `writer.faults`.
+    ///
+    /// Maintained by fault-observer tasks inside this actor's isolation. When this set
+    /// covers all live (non-early-finalised) writers, `onAllWritersFaulted` is called.
+    private var faultedWriterKinds: Set<RecordingPipelineKind> = []
+
     // MARK: - Per-pipeline writer state
 
     /// A writer plus its terminal status, tracked so an early-finalised pipeline (AC-12) still
@@ -82,6 +99,16 @@ actor DualFileOutputStage {
     /// Cumulative count of pending-audio buffers dropped on overflow (observability, FIX-2).
     private(set) var pendingAudioDropped = 0
 
+    // MARK: - Audio format canary (#105)
+
+    /// Format description of the most recent audio buffer — for mid-stream format-change detection.
+    ///
+    /// The canary log below fires when this changes: after the Commit-1 LPCM fix the format must
+    /// be stable for the entire session. A change here means the fix regressed or a new device
+    /// sends formats outside the pinned LPCM spec. Permanent — a format change is a class-#105
+    /// regression and must not silently pass.
+    private var audioPrevFmtDesc: CMFormatDescription?
+
     // MARK: - Init
 
     /// - Parameters:
@@ -91,18 +118,22 @@ actor DualFileOutputStage {
     ///   - includeAudio: Whether a mic audio track is muxed into the file(s).
     ///   - writerFactory: Builds writers lazily from `(kind, sourceFormatHint, includeAudio)`.
     ///   - onWriterCreated: Registers a new writer's `drops` channel with `DropMonitor`.
+    ///   - onAllWritersFaulted: Called when every live writer has faulted — expected to stop the
+    ///     session immediately.
     init(
         sessionT0: CMTime,
         expectedPipelines: Set<RecordingPipelineKind>,
         includeAudio: Bool,
         writerFactory: any WriterFactory,
-        onWriterCreated: @escaping @Sendable (any WriterControlling) async -> Void
+        onWriterCreated: @escaping @Sendable (any WriterControlling) async -> Void,
+        onAllWritersFaulted: @escaping @Sendable () async -> Void
     ) {
         self.sessionT0 = sessionT0
         self.expectedKinds = expectedPipelines
         self.includeAudio = includeAudio
         self.writerFactory = writerFactory
         self.onWriterCreated = onWriterCreated
+        self.onAllWritersFaulted = onAllWritersFaulted
     }
 
     // MARK: - Video routing
@@ -165,6 +196,19 @@ actor DualFileOutputStage {
         // lazily-created writer's drops would be silently unobserved.
         await self.onWriterCreated(writer)
 
+        // Start a fault-observer task for this writer (#105 fail-fast). The task reads the
+        // writer's `faults` stream (at most one value) and calls back into this actor to record
+        // the fault and — when all live writers have faulted — trigger an immediate stop. The task
+        // is cancelled in `finalizePipeline` / `finishAll` so a graceful stop does not fire it.
+        let faultsStream = writer.faults // capture nonisolated property before the actor hop
+        let faultTask = Task { [weak self] in
+            for await _ in faultsStream {
+                await self?.recordFault(for: kind)
+                break // at-most-once: the stream yields exactly one value then finishes
+            }
+        }
+        self.faultObserverTasks[kind] = faultTask
+
         await self.drainPendingAudio(into: writer)
         self.releasePendingIfAllWritersCreated()
 
@@ -172,12 +216,90 @@ actor DualFileOutputStage {
         return pipelineWriter
     }
 
+    /// Records that `kind`'s writer has faulted and calls `onAllWritersFaulted` when every
+    /// live (non-early-finalised) writer is now in the faulted set.
+    ///
+    /// Called exclusively from the per-writer fault-observer `Task` — runs on this actor.
+    /// Writers not yet created (lazy — no video frame yet) are not considered live and don't
+    /// block the callback.
+    private func recordFault(for kind: RecordingPipelineKind) async {
+        self.faultedWriterKinds.insert(kind)
+
+        let liveKinds = Set(self.writers.filter { $0.value.finishResult == nil }.keys)
+        guard !liveKinds.isEmpty else { return }
+
+        if liveKinds.isSubset(of: self.faultedWriterKinds) {
+            self.logger.error(
+                "All live writers faulted — stopping recording immediately (#105)"
+            )
+            await self.onAllWritersFaulted()
+        } else {
+            self.logger.error(
+                "\(String(describing: kind), privacy: .public) writer faulted; other pipeline still live"
+            )
+        }
+    }
+
     // MARK: - Audio routing (#33 fan-out + retiming)
 
     /// Retimes one mic sample to absolute host-time ONCE, then fans the SAME buffer reference into
     /// every live writer. If a writer does not yet exist, the retimed buffer is buffered for replay.
-    func routeAudio(_ sample: AudioSample) async {
+    func routeAudio( // swiftlint:disable:this function_body_length
+        _ sample: AudioSample
+    ) async {
+        let buf = sample.sampleBuffer
+        let curFmt = CMSampleBufferGetFormatDescription(buf)
+
         guard self.includeAudio else { return }
+
+        // Permanent canary: after the Commit-1 LPCM fix the audio format must not change
+        // mid-stream. A change means the fix regressed or a new device sends variable formats.
+        // Placed after the includeAudio guard: when audio is disabled there is no writer to
+        // fault, so the comparison is irrelevant and skipped entirely.
+        // `unsafe`: CMAudioFormatDescriptionGetStreamBasicDescription returns UnsafePointer;
+        // SWIFT_STRICT_MEMORY_SAFETY = YES requires the annotation at call sites (#105 pattern).
+        let fmtChanged = if let prev = self.audioPrevFmtDesc, let cur = curFmt {
+            !CMFormatDescriptionEqual(cur, otherFormatDescription: prev)
+        } else {
+            false
+        }
+        if fmtChanged, let prevFmt = self.audioPrevFmtDesc, let curFmt {
+            var prevRate = -1
+            var prevCh = -1
+            var prevBits = -1
+            var prevFlags = "?"
+            var prevBpf = -1
+            if let prevDesc = unsafe CMAudioFormatDescriptionGetStreamBasicDescription(prevFmt) {
+                prevRate = unsafe Int(prevDesc.pointee.mSampleRate)
+                prevCh = unsafe Int(prevDesc.pointee.mChannelsPerFrame)
+                prevBits = unsafe Int(prevDesc.pointee.mBitsPerChannel)
+                prevFlags = Self.hexFlags(unsafe prevDesc.pointee.mFormatFlags)
+                prevBpf = unsafe Int(prevDesc.pointee.mBytesPerFrame)
+            }
+            var curRate = -1
+            var curCh = -1
+            var curBits = -1
+            var curFlags = "?"
+            var curBpf = -1
+            if let curDesc = unsafe CMAudioFormatDescriptionGetStreamBasicDescription(curFmt) {
+                curRate = unsafe Int(curDesc.pointee.mSampleRate)
+                curCh = unsafe Int(curDesc.pointee.mChannelsPerFrame)
+                curBits = unsafe Int(curDesc.pointee.mBitsPerChannel)
+                curFlags = Self.hexFlags(unsafe curDesc.pointee.mFormatFlags)
+                curBpf = unsafe Int(curDesc.pointee.mBytesPerFrame)
+            }
+            // Mid-stream audio format change: should never happen with the pinned LPCM capture
+            // settings (CameraSource.audioOutputSettings). If this fires it is a regression of
+            // the class-#105 bug and will cause AVAssetWriterInput to fault with -12737.
+            // .error: any format change after the fix is a regression — must not be filtered out.
+            self.logger.error(
+                // swiftlint:disable:next line_length
+                "Audio format changed mid-stream (#105 regression): prev rate=\(prevRate, privacy: .public) ch=\(prevCh, privacy: .public) bits=\(prevBits, privacy: .public) flags=\(prevFlags, privacy: .public) bpf=\(prevBpf, privacy: .public) → cur rate=\(curRate, privacy: .public) ch=\(curCh, privacy: .public) bits=\(curBits, privacy: .public) flags=\(curFlags, privacy: .public) bpf=\(curBpf, privacy: .public)"
+            )
+        }
+        // Update baseline only when curFmt is non-nil: a nil format description (degenerate
+        // buffer) must not reset the baseline and mask the next real format change.
+        if let curFmt { self.audioPrevFmtDesc = curFmt }
 
         guard let retimed = self.retime(sample) else {
             // Retiming failed (degenerate buffer) — drop this sample rather than write a
@@ -187,8 +309,7 @@ actor DualFileOutputStage {
 
         let carrier = RetimedAudioBuffer(buffer: retimed)
 
-        let liveWriters = self.liveWriters()
-        if liveWriters.isEmpty {
+        guard self.writers.contains(where: { $0.value.finishResult == nil }) else {
             self.bufferPendingAudio(carrier)
             return
         }
@@ -196,8 +317,8 @@ actor DualFileOutputStage {
         // Same retimed buffer reference handed to every writer (carrier wraps one CMSampleBuffer —
         // retain, no second copy). Each writer actor serialises its own appendAudio behind its
         // readiness gate.
-        for writer in liveWriters {
-            await writer.appendAudio(carrier)
+        for (_, pipelineWriter) in self.writers where pipelineWriter.finishResult == nil {
+            await pipelineWriter.writer.appendAudio(carrier)
         }
 
         // If not every expected writer exists yet, the just-created-late writer must still receive
@@ -343,11 +464,6 @@ actor DualFileOutputStage {
         self.expectedKinds.allSatisfy { self.writers[$0] != nil }
     }
 
-    /// The writers currently eligible to receive media (created and not early-finalised).
-    private func liveWriters() -> [any WriterControlling] {
-        self.writers.values.compactMap { $0.finishResult == nil ? $0.writer : nil }
-    }
-
     // MARK: - Finalize
 
     /// Finalises ONE pipeline (AC-12): marks its writer finished, finishes it, records the result,
@@ -360,6 +476,12 @@ actor DualFileOutputStage {
         guard var pipelineWriter = self.writers[kind], pipelineWriter.finishResult == nil else {
             return
         }
+        // Cancel the fault-observer task before markFinished() so the faults stream finishing
+        // (via markFinished → faultsContinuation.finish) does not trigger onAllWritersFaulted
+        // on a gracefully stopped pipeline.
+        self.faultObserverTasks[kind]?.cancel()
+        self.faultObserverTasks[kind] = nil
+
         await pipelineWriter.writer.markFinished()
         let result = await pipelineWriter.writer.finish()
         pipelineWriter.finishResult = result
@@ -385,6 +507,12 @@ actor DualFileOutputStage {
     /// `markFinished()` is called on every still-open writer first (so all inputs are sealed),
     /// then both `finish()` calls run concurrently.
     func finishAll() async -> [RecordingPipelineKind: FinishResult] {
+        // Cancel all fault-observer tasks before marking writers finished. markFinished()
+        // calls faultsContinuation.finish(), which would otherwise make the observer task
+        // fire on a graceful stop — producing a spurious onAllWritersFaulted call.
+        self.faultObserverTasks.values.forEach { $0.cancel() }
+        self.faultObserverTasks.removeAll()
+
         // Seal every still-open writer's inputs before finishing.
         for (kind, pipelineWriter) in self.writers where pipelineWriter.finishResult == nil {
             await pipelineWriter.writer.markFinished()
@@ -420,6 +548,19 @@ actor DualFileOutputStage {
             )
         }
         return result
+    }
+
+    // MARK: - Private helpers
+
+    /// Formats a `UInt32` format-flags field as a zero-padded 8-digit lowercase hex string,
+    /// e.g. `0x0000000c`. Uses radix arithmetic (no Foundation/CVarArg) consistent with the
+    /// `String(_:radix:)` pattern used elsewhere in the codebase.
+    private static func hexFlags(_ flags: UInt32) -> String {
+        // swiftlint:disable no_magic_numbers
+        // 16: hex radix; 8: digits in a 32-bit hex word (UInt32 max = 0xFFFFFFFF).
+        let hex = String(flags, radix: 16, uppercase: false)
+        return "0x" + String(repeating: "0", count: max(0, 8 - hex.count)) + hex
+        // swiftlint:enable no_magic_numbers
     }
 }
 

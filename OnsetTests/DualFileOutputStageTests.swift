@@ -21,7 +21,29 @@
 import AVFoundation
 import CoreMedia
 @testable import Onset
+import os
 import Testing
+
+// MARK: - Helpers
+
+/// A thread-safe boolean flag backed by `OSAllocatedUnfairLock`.
+///
+/// Replaces the bare `@unchecked Sendable` box pattern used in fault-suite callbacks:
+/// the callback mutates the flag from `DualFileOutputStage`'s actor context while the
+/// test reads it from its own async context, which is a formal data race under Swift 6
+/// strict concurrency. Using `withLock` on both sides eliminates the race without
+/// changing the observable test semantics.
+private final class FlagBox: Sendable {
+    private let lock = OSAllocatedUnfairLock(initialState: false)
+
+    func set() {
+        self.lock.withLock { $0 = true }
+    }
+
+    var value: Bool {
+        self.lock.withLock { $0 }
+    }
+}
 
 // MARK: - Fakes
 
@@ -70,12 +92,18 @@ private final class FakeWriter: WriterControlling, @unchecked Sendable {
     nonisolated let drops: AsyncStream<DropEvent>
     private let dropsContinuation: AsyncStream<DropEvent>.Continuation
 
+    nonisolated let faults: AsyncStream<Void>
+    private let faultsContinuation: AsyncStream<Void>.Continuation
+
     init(kind: RecordingPipelineKind) {
         self.kind = kind
         self.finishResult = .completed(url: URL(fileURLWithPath: "/tmp/onset-fake-\(kind).mp4"))
         let (stream, continuation) = AsyncStream.makeStream(of: DropEvent.self)
         self.drops = stream
         self.dropsContinuation = continuation
+        let (faultStream, faultContinuation) = AsyncStream.makeStream(of: Void.self)
+        self.faults = faultStream
+        self.faultsContinuation = faultContinuation
     }
 
     func start(atSourceTime sourceTime: CMTime) throws {
@@ -93,11 +121,18 @@ private final class FakeWriter: WriterControlling, @unchecked Sendable {
     func markFinished() {
         self.markFinishedCalled = true
         self.dropsContinuation.finish()
+        self.faultsContinuation.finish()
     }
 
     func finish() async -> FinishResult {
         self.finishCalled = true
         return self.finishResult
+    }
+
+    /// Simulates a hard writer fault (as `AVAssetWriter.append()` returning `false`).
+    func simulateFault() {
+        self.faultsContinuation.yield(())
+        self.faultsContinuation.finish()
     }
 }
 
@@ -240,15 +275,19 @@ private enum StageTestError: Error {
 private func makeStage(
     factory: FakeWriterFactory,
     expected: Set<RecordingPipelineKind>,
-    includeAudio: Bool
+    includeAudio: Bool,
+    onAllWritersFaulted: @escaping @Sendable () async -> Void = {}
 )
--> DualFileOutputStage {
+    -> DualFileOutputStage
+{ // swiftlint:disable:this opening_brace
     DualFileOutputStage(
         sessionT0: SampleFactory.sessionT0,
         expectedPipelines: expected,
         includeAudio: includeAudio,
-        writerFactory: factory
-    ) { _ in }
+        writerFactory: factory,
+        onWriterCreated: { _ in },
+        onAllWritersFaulted: onAllWritersFaulted
+    )
 }
 
 // MARK: - Retiming (AC-7, #33)
@@ -502,6 +541,131 @@ struct DualFileOutputStageFinishTests {
         let results = await stage.finishAll()
         #expect(results[.camera] != nil)
         #expect(results[.screen] != nil)
+    }
+}
+
+// MARK: - Fail-fast helpers
+
+/// Polls `condition` every 5 ms up to `timeoutMs`. Returns `true` as soon as the condition holds,
+/// `false` if the deadline passes. Replaces fixed `Task.sleep` waits in fault-observer tests so
+/// the suite is robust on slow CI runners where observer Tasks may take longer to be scheduled.
+private func eventually(
+    timeoutMs: Int = 2000,
+    _ condition: @Sendable () async -> Bool
+) async
+-> Bool {
+    let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
+    while Date() < deadline {
+        if await condition() { return true }
+        try? await Task.sleep(nanoseconds: 5_000_000) // 5 ms
+    }
+    return await condition()
+}
+
+// MARK: - Fail-fast (#105)
+
+@Suite("DualFileOutputStage — fail-fast on writer fault (#105)")
+struct DualFileOutputStageFaultTests {
+    // MARK: Both writers fault → callback fires
+
+    @Test("all writers faulted → onAllWritersFaulted is called")
+    func allWritersFaulted_callbackFires() async throws {
+        let factory = FakeWriterFactory()
+        let box = FlagBox()
+
+        let stage = makeStage(
+            factory: factory,
+            expected: [.screen, .camera],
+            includeAudio: false
+        ) { box.set() }
+
+        // Trigger writer creation for both pipelines.
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .camera), from: .camera)
+
+        // Fault both writers.
+        factory.screenWriter.simulateFault()
+        factory.cameraWriter.simulateFault()
+
+        // Wait until the observer task inside DualFileOutputStage fires the callback.
+        // `eventually` polls every 5 ms (up to 2 s) so the test is robust on slow CI runners
+        // where scheduling a background Task may take significantly longer than 50 ms.
+        let fired = await eventually { box.value }
+        #expect(fired, "onAllWritersFaulted must fire when all writers are faulted")
+    }
+
+    // MARK: Only the created writer faults (second not yet created) → callback fires
+
+    @Test("fault of the only CREATED writer, second not yet created → callback fires")
+    func onlyCreatedWriterFaults_secondNotYetCreated_callbackFires() async throws {
+        let factory = FakeWriterFactory()
+        let box = FlagBox()
+
+        // Both .screen and .camera are expected, but only .screen will be created.
+        let stage = makeStage(
+            factory: factory,
+            expected: [.screen, .camera],
+            includeAudio: false
+        ) { box.set() }
+
+        // Route a video sample only for .screen — camera writer is never created.
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
+
+        // Fault the only created writer. liveKinds = created writers (not expectedPipelines),
+        // so one created writer faulting satisfies the "all live writers faulted" condition.
+        factory.screenWriter.simulateFault()
+
+        // Poll until the callback fires — same rationale as allWritersFaulted_callbackFires.
+        let fired = await eventually { box.value }
+        #expect(fired && box.value, "onAllWritersFaulted must fire when the only created writer faults")
+    }
+
+    // MARK: Only one writer faults → callback does NOT fire
+
+    @Test("one of two writers faulted → onAllWritersFaulted is NOT called")
+    func oneWriterFaulted_callbackDoesNotFire() async throws {
+        let factory = FakeWriterFactory()
+        let box = FlagBox()
+
+        let stage = makeStage(
+            factory: factory,
+            expected: [.screen, .camera],
+            includeAudio: false
+        ) { box.set() }
+
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .camera), from: .camera)
+
+        // Fault only the screen writer.
+        factory.screenWriter.simulateFault()
+
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(!box.value, "onAllWritersFaulted must NOT fire when only one writer is faulted")
+    }
+
+    // MARK: Graceful finishAll does not fire callback
+
+    @Test("graceful finishAll cancels observer tasks — callback does NOT fire")
+    func finishAll_doesNotFireFaultCallback() async throws {
+        let factory = FakeWriterFactory()
+        let box = FlagBox()
+
+        let stage = makeStage(
+            factory: factory,
+            expected: [.screen, .camera],
+            includeAudio: false
+        ) { box.set() }
+
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .camera), from: .camera)
+
+        // Normal stop path — finishAll cancels observer tasks before markFinished.
+        _ = await stage.finishAll()
+
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(!box.value, "graceful finishAll must not trigger the fault callback")
     }
 }
 

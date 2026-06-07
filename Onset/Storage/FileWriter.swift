@@ -83,6 +83,15 @@ actor FileWriter {
     /// `appendVideo`/`appendAudio` short-circuit them and keep the failure logged exactly once.
     private var isFaulted = false
 
+    // MARK: - Diagnostics (#105)
+
+    /// Source time passed to `startSession(atSourceTime:)` — captured for first-append logging (#105).
+    private var sessionSourceTime: CMTime = .invalid
+    /// One-shot: true until the first successful audio append has been logged (#105).
+    private var firstAudioAppendPending = true
+    /// One-shot: true until the first successful video append has been logged (#105).
+    private var firstVideoAppendPending = true
+
     // MARK: - Output streams
 
     /// Writer-side backpressure drop events for `DropMonitor` (#35).
@@ -95,6 +104,12 @@ actor FileWriter {
     /// `DropMonitor`. Placing the stream here keeps the type contract stable across waves.
     nonisolated let drops: AsyncStream<DropEvent>
     private let dropsContinuation: AsyncStream<DropEvent>.Continuation
+
+    /// Hard-fault signal — emits once when the writer faults, then finishes (#105 fail-fast).
+    ///
+    /// Finished (without yielding) in `markFinished()` and `deinit` so consumers never hang.
+    nonisolated let faults: AsyncStream<Void>
+    private let faultsContinuation: AsyncStream<Void>.Continuation
 
     // MARK: - Logger
 
@@ -129,7 +144,7 @@ actor FileWriter {
     ///     is safe for standalone / test use; `LiveWriterFactory` overrides it per pipeline kind.
     ///   - nominalFps: The pipeline's target frame rate for telemetry. Default 0 when unknown.
     /// - Throws: `CocoaError` if `AVAssetWriter(url:fileType:)` fails (disk full, bad path).
-    init(
+    init( // swiftlint:disable:this function_body_length
         outputURL: URL,
         configuration: RecordingConfiguration,
         includeAudio: Bool,
@@ -194,14 +209,19 @@ actor FileWriter {
         let (stream, continuation) = AsyncStream.makeStream(of: DropEvent.self)
         self.drops = stream
         self.dropsContinuation = continuation
+
+        let (faultStream, faultContinuation) = AsyncStream.makeStream(of: Void.self)
+        self.faults = faultStream
+        self.faultsContinuation = faultContinuation
     }
 
     deinit {
         // Best-effort safety net: if the writer is released without `markFinished()`, finish
-        // the continuation so a consumer's `for await` on `drops` doesn't hang indefinitely.
+        // both continuations so consumers' `for await` loops don't hang indefinitely.
         // Mirrors `DropMonitor.deinit`. `markFinished()` is the primary, ordered terminator;
         // double-finishing a continuation is a documented no-op.
         self.dropsContinuation.finish()
+        self.faultsContinuation.finish()
     }
 
     // MARK: - Lifecycle
@@ -232,6 +252,7 @@ actor FileWriter {
         }
 
         self.assetWriter.startSession(atSourceTime: sourceTime)
+        self.sessionSourceTime = sourceTime // captured for first-append diagnostics (#105)
 
         // Restrict the file to owner-read/write after AVAssetWriter creates it.
         try RecordingOutput.setOwnerOnly(file: self.outputURL)
@@ -288,9 +309,25 @@ actor FileWriter {
 
         // append() returns false only after the writer faulted (input is ready here, so not-ready
         // is excluded) — a hard failure, NOT backpressure, so it must NOT feed the drop counter.
+        let videoPTS = CMSampleBufferGetPresentationTimeStamp(sample.sampleBuffer)
+        let videoDTS = CMSampleBufferGetDecodeTimeStamp(sample.sampleBuffer)
         guard self.videoSeam.append(sample.sampleBuffer) else {
+            // diagnostic for #105: include pts/dts the writer rejected
+            self.logger.error(
+                // swiftlint:disable:next line_length
+                "FileWriter video append rejected at pts=\(Self.secStr(videoPTS), privacy: .public)s dts=\(Self.secStr(videoDTS), privacy: .public)s"
+            )
             self.markFaulted(track: "video")
             return
+        }
+
+        // diagnostic for #105: one-shot first-append pts/dts to confirm session timeline alignment
+        if self.firstVideoAppendPending {
+            self.firstVideoAppendPending = false
+            self.logger.notice(
+                // swiftlint:disable:next line_length
+                "first video append: pts=\(Self.secStr(videoPTS), privacy: .public)s dts=\(Self.secStr(videoDTS), privacy: .public)s"
+            )
         }
 
         // Successful append: close any active not-ready episode and count the frame.
@@ -314,9 +351,26 @@ actor FileWriter {
         }
         // append() returns false only after the writer faulted — a hard failure, not backpressure.
         // Audio is NOT surfaced on any drop counter (spec tracks video only), but is logged once.
-        guard audio.append(buffer) else {
+        let audioPTS = CMSampleBufferGetPresentationTimeStamp(buffer)
+        let appended = audio.append(buffer)
+
+        guard appended else {
+            // diagnostic for #105: include the PTS that the writer rejected
+            self.logger.error(
+                "FileWriter audio append rejected at pts=\(Self.secStr(audioPTS), privacy: .public)s"
+            )
             self.markFaulted(track: "audio")
             return
+        }
+        // diagnostic for #105: one-shot first-append format summary to identify USB mic mismatches
+        if self.firstAudioAppendPending {
+            self.firstAudioAppendPending = false
+            let info = Self.audioFormatInfo(from: buffer)
+            let fmtTag = Self.fourCC(info?.formatID ?? 0)
+            self.logger.notice(
+                // swiftlint:disable:next line_length
+                "first audio append: rate=\(info?.sampleRate ?? 0, privacy: .public) ch=\(info?.channelCount ?? 0, privacy: .public) fmt=\(fmtTag, privacy: .public) pts=\(Self.secStr(audioPTS), privacy: .public)s t0=\(Self.secStr(self.sessionSourceTime), privacy: .public)s"
+            )
         }
     }
 
@@ -353,9 +407,67 @@ actor FileWriter {
         self.isFaulted = true
         let status = self.assetWriter.status.rawValue
         let underlying = String(describing: self.assetWriter.error)
+        // .public on all interpolations so the NSError details survive privacy redaction (#105).
         self.logger.error(
-            "FileWriter \(track) append failed (writer faulted) — status \(status): \(underlying)"
+            // swiftlint:disable:next line_length
+            "FileWriter \(track, privacy: .public) append failed (writer faulted) — status \(status, privacy: .public): \(underlying, privacy: .public)"
         )
+        // Signal the fault immediately so DualFileOutputStage can stop the recording without
+        // waiting for the user to press Stop (#105 fail-fast). Yield then finish: one value
+        // tells observers the fault occurred; finish prevents hangs if nobody consumes it yet.
+        self.faultsContinuation.yield(())
+        self.faultsContinuation.finish()
+    }
+
+    // MARK: - Helpers
+
+    private struct AudioFormatInfo {
+        let sampleRate: Int
+        let channelCount: UInt32
+        let formatID: UInt32
+    }
+
+    /// Extracts sample rate, channel count, and format ID from a `CMSampleBuffer`'s ASBD.
+    /// Returns `nil` when no format description is available — diagnostic for #105.
+    private static func audioFormatInfo(from buffer: CMSampleBuffer) -> AudioFormatInfo? {
+        guard let fmtDesc = CMSampleBufferGetFormatDescription(buffer) else { return nil }
+        guard let asbd = unsafe CMAudioFormatDescriptionGetStreamBasicDescription(fmtDesc) else {
+            return nil
+        }
+        return AudioFormatInfo(
+            sampleRate: Int(unsafe asbd.pointee.mSampleRate),
+            channelCount: unsafe asbd.pointee.mChannelsPerFrame,
+            formatID: unsafe asbd.pointee.mFormatID
+        )
+    }
+
+    /// Formats a `CMTime` seconds value to three decimal places without `String(format:)`,
+    /// which trips `SWIFT_STRICT_MEMORY_SAFETY` — diagnostic for #105.
+    private static func secStr(_ time: CMTime) -> String {
+        // Guard against invalid/indefinite CMTime (.invalid, .indefinite) whose
+        // CMTimeGetSeconds returns NaN/Inf — Int(NaN) crashes at runtime.
+        guard time.isValid, time.isNumeric else { return "invalid" }
+        // Round to 3 decimal places using integer arithmetic (same pattern as StageRateAggregator).
+        // swiftlint:disable no_magic_numbers
+        let scaled = Int((CMTimeGetSeconds(time) * 1000).rounded())
+        let whole = scaled / 1000
+        let frac = abs(scaled % 1000)
+        let fracPadded = frac < 10 ? "00\(frac)" : frac < 100 ? "0\(frac)" : "\(frac)"
+        // swiftlint:enable no_magic_numbers
+        return "\(whole).\(fracPadded)"
+    }
+
+    /// Renders a CoreAudio FourCC `UInt32` as a 4-character ASCII tag (e.g. `lpcm`).
+    /// Falls back to hex if any byte is outside printable ASCII — diagnostic for #105.
+    /// `internal` (not `private`) so tests can reuse it directly.
+    static func fourCC(_ code: UInt32) -> String {
+        // swiftlint:disable no_magic_numbers
+        let bytes = [24, 16, 8, 0].map { UInt8((code >> $0) & 0xFF) }
+        guard bytes.allSatisfy({ $0 >= 32 && $0 < 127 }) else {
+            return String(code, radix: 16)
+        }
+        return String(bytes: bytes, encoding: .ascii) ?? String(code, radix: 16)
+        // swiftlint:enable no_magic_numbers
     }
 
     // MARK: - Finish
@@ -370,6 +482,9 @@ actor FileWriter {
         self.rawVideoInput.markAsFinished()
         self.rawAudioInput?.markAsFinished()
         self.dropsContinuation.finish()
+        // Safety finish: prevents `for await writer.faults` from hanging if the writer
+        // completed normally (no fault). Double-finish is a documented no-op.
+        self.faultsContinuation.finish()
         self.logger.info("FileWriter inputs marked as finished")
     }
 
