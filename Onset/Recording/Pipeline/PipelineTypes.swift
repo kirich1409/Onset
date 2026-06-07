@@ -458,3 +458,32 @@ extension RecordingRevocation {
         }
     }
 }
+
+// MARK: - CaptureRole
+
+/// Which lifecycle a `CameraSource` serves: full recording, or a lightweight preview.
+///
+/// `rawValue` is the wire-format token emitted in the `role=` field of every capture
+/// telemetry line. Keep these stable — log analysis depends on the exact strings.
+///
+/// Role-conditional behavior lives in two guard sites: `CameraSource.start()` (telemetry task)
+/// and `CameraSource+SessionSetup.attachOutputs(to:shims:)` (data outputs). Add a third
+/// gate in both places if a new role-specific behavior is needed.
+nonisolated enum CaptureRole: String, Equatable {
+    /// Live preview: session runs for the preview layer only; no data outputs, no telemetry task.
+    case preview
+    /// Full recording: video data output attached, frames yielded, telemetry flushed.
+    case record
+}
+
+extension CaptureRole {
+    /// Manual `nonisolated` implementation.
+    ///
+    /// Under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, synthesised conformances are inferred
+    /// `@MainActor` (`InferIsolatedConformances`). Providing an explicit manual witness with
+    /// `nonisolated` overrides the synthesised form so `==` is callable from actor-isolated code
+    /// and from nonisolated contexts (same pattern as `RecordingState` / `DropReason`).
+    nonisolated static func == (lhs: CaptureRole, rhs: CaptureRole) -> Bool {
+        lhs.rawValue == rhs.rawValue
+    }
+}

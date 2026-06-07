@@ -446,6 +446,40 @@ struct CameraSourceLiveTests {
         assertVideoFrames(result.frames, anchor: setup.anchor, format: setup.format)
         assertAudioSamples(result.samples, anchor: setup.anchor)
     }
+
+    @Test(
+        "preview role starts successfully and produces no frames within 1s",
+        .enabled(if: l5CaptureEnabled())
+    )
+    func previewRole_producesNoFrames() async throws {
+        let setup = try makeLiveCaptureSource(role: .preview)
+        try await setup.source.start(anchoredTo: setup.anchor)
+
+        // Positive: session must have started — a nil handle means start() silently failed.
+        #expect(await setup.source.sessionHandle() != nil)
+        // Role-gating: preview must not launch the telemetry flush task.
+        #expect(await setup.source.captureTelemetryTask == nil)
+
+        // Race a frame-wait task against a 1s timeout; the timeout winning is the expected path.
+        let gotFrame = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await _ in setup.source.frames {
+                    return true
+                }
+                return false
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(1))
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+
+        await setup.source.stop()
+        #expect(gotFrame == false, "Preview CameraSource must not yield frames (issue #119)")
+    }
 }
 
 // MARK: - L5 setup helper
@@ -456,11 +490,17 @@ private struct LiveCaptureSetup {
     let anchor: HostTimeAnchor
 }
 
-/// Builds and configures a `CameraSource` from the first available built-in camera and
-/// default microphone. Returns the configured source, the selected format, and a fresh anchor.
+// swiftlint:disable function_body_length
+/// Builds and configures a `CameraSource` from the first available built-in camera.
+/// For `.record` role also acquires the default microphone; for `.preview` passes `nil`
+/// (preview never attaches a data output, so mic hardware is irrelevant).
+/// Returns the configured source, the selected format, and a fresh anchor.
+///
+/// - Parameter role: Which lifecycle the source serves (default `.record`).
+///   Pass `.preview` to build a source that suppresses data outputs and telemetry.
 ///
 /// Extracted to keep `liveCapture_producesFramesAndSamples` within `function_body_length`.
-private func makeLiveCaptureSource() throws -> LiveCaptureSetup {
+private func makeLiveCaptureSource(role: CaptureRole = .record) throws -> LiveCaptureSetup {
     guard let avDevice = AVCaptureDevice.default(
         .builtInWideAngleCamera,
         for: .video,
@@ -468,8 +508,17 @@ private func makeLiveCaptureSource() throws -> LiveCaptureSetup {
     ) else {
         throw L5SetupError.noCamera
     }
-    guard let avMic = AVCaptureDevice.default(for: .audio) else {
-        throw L5SetupError.noMicrophone
+
+    let micDevice: MicrophoneDevice?
+    switch role {
+    case .record:
+        guard let avMic = AVCaptureDevice.default(for: .audio) else {
+            throw L5SetupError.noMicrophone
+        }
+        micDevice = MicrophoneDevice(uniqueID: avMic.uniqueID)
+
+    case .preview:
+        micDevice = nil
     }
 
     let formats: [CameraFormat] = avDevice.formats.compactMap { fmt in
@@ -491,15 +540,17 @@ private func makeLiveCaptureSource() throws -> LiveCaptureSetup {
     )
 
     let cameraDevice = CameraDevice(uniqueID: avDevice.uniqueID, formats: formats)
-    let micDevice = MicrophoneDevice(uniqueID: avMic.uniqueID)
     let source = CameraSource(
         cameraDevice: cameraDevice,
         format: selectedFormat,
         micDevice: micDevice,
-        config: config
+        config: config,
+        role: role
     )
     return LiveCaptureSetup(source: source, format: selectedFormat, anchor: HostTimeAnchor.now())
 }
+
+// swiftlint:enable function_body_length
 
 // MARK: - L5 error types
 

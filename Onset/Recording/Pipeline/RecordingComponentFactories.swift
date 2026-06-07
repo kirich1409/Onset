@@ -285,7 +285,8 @@ nonisolated struct LiveSourceFactory: SourceFactory {
             cameraDevice: cameraDevice,
             format: format,
             micDevice: micDevice,
-            config: config
+            config: config,
+            role: .record
         )
     }
 }

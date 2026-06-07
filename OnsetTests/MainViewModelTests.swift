@@ -277,4 +277,24 @@ struct MainViewModelTests {
 
         #expect(label == "1920×1080 @ 60 Гц")
     }
+
+    // MARK: - Production preview wiring
+
+    /// Verifies the production default `makeCameraSource` closure always produces a `.preview`-role
+    /// source. This guards against accidental reversion — if the default were changed to `.record`,
+    /// a data output would be attached during preview and this test would fail.
+    ///
+    /// The `MainViewModel` is constructed WITHOUT a custom `makeCameraSource` injection so the
+    /// production default closure runs, not a test double. No hardware is accessed — constructing
+    /// a `CameraSource` actor does not start a capture session.
+    @Test("Default makeCameraSource closure produces a .preview-role CameraSource (production wiring)")
+    func defaultMakeCameraSource_producesPreviewRole() async {
+        let (sut, _) = self.makeSUT()
+        let format = CameraFormat(pixelWidth: 1280, pixelHeight: 720, minFps: 30.0, maxFps: 60.0)
+        let device = CameraDevice(uniqueID: "test-camera", formats: [format])
+
+        let source = sut.makeCameraSource(device, format, nil, .mvpDefault)
+
+        #expect(await source.role == .preview)
+    }
 }

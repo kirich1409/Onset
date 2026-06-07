@@ -43,6 +43,7 @@ C callback → EncodedSampleSink
 
 | Поле | Стадия | Семантика |
 |---|---|---|
+| `role` | capture | `preview\|record` — идентификатор роли источника; preview не подключает data output и не запускает telemetry task |
 | `fresh` | capture | пакеты со свежим содержимым (не hold-repeat) |
 | `overflow` | capture | выселений из bounded stream |
 | `gap_ms` | capture | средний интервал между реальными кадрами |
@@ -254,7 +255,13 @@ UVC-камеры (включая MX Brio) снижают фактическую 
 overflow 12–15/с (2026-06-07, issue #112). На тихой машине overflow ≈ 0/с.
 Потолок дренажа framesTask не воспроизведён в изолированных условиях.
 
-Кандидаты на фикс (отложены до дискриминирующего замера):
+Показания overflow 12–15/с были атрибутированы превью-экземпляру `CameraSource`
+(создаётся в `MainViewModel.makeCameraSource`): он подключал `AVCaptureVideoDataOutput`,
+но `frames`-stream никто не дренировал — результат постоянное переполнение буфера.
+Исправлено в issue #119: preview-экземпляр создаётся с `role: .preview` и не
+подключает data output.
+
+Кандидаты на фикс остаточного overflow (отложены до дискриминирующего замера):
 - Повышение приоритета framesTask (Task priority bump).
 - Увеличение буфера `.bufferingNewest(4 → 8)`.
 

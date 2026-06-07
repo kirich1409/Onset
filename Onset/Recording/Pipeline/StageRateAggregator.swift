@@ -3,7 +3,9 @@ import os
 // file_length is disabled: StageRateAggregator is a single-concern pure value type whose
 // line count includes the DurationAccumulator helper, identity/cadence/episode/clock-health/
 // duration fields, and the flush-line contract. Splitting would obscure the contract.
-// swiftlint:disable file_length
+// type_body_length is disabled: same single-concern rationale as file_length above.
+// The struct body includes a `role` property added for capture telemetry disambiguation.
+// swiftlint:disable file_length type_body_length
 
 // MARK: - TelemetryStage
 
@@ -65,6 +67,8 @@ nonisolated struct StageRateAggregator {
     let lane: String // "screen" / "camera"
     let stage: TelemetryStage
     let nominalFps: Int
+    /// Which lifecycle the owning source serves; emitted as `role=` in capture telemetry lines.
+    let role: CaptureRole
 
     // MARK: - Cadence counters
 
@@ -124,10 +128,13 @@ nonisolated struct StageRateAggregator {
     ///   - lane: "screen" or "camera" (passed from the owning component).
     ///   - stage: Which pipeline stage this aggregator represents.
     ///   - nominalFps: The target frame rate for the lane; used as a sanity signal in the line.
-    nonisolated init(lane: String, stage: TelemetryStage, nominalFps: Int) {
+    ///   - role: Which lifecycle the owning source serves (default `.record`; pass `.preview` for
+    ///     preview-only sources so log lines are unambiguous).
+    nonisolated init(lane: String, stage: TelemetryStage, nominalFps: Int, role: CaptureRole = .record) {
         self.lane = lane
         self.stage = stage
         self.nominalFps = nominalFps
+        self.role = role
     }
 
     // MARK: - Increment API (capture stage)
@@ -320,7 +327,7 @@ nonisolated struct StageRateAggregator {
         let freshRate = self.rate(self.fresh, over: elapsedSeconds)
         let dropRate = self.rate(self.didDrop, over: elapsedSeconds)
         let overflowRate = self.rate(self.overflow, over: elapsedSeconds)
-        let base = "lane=\(self.lane) stage=\(self.stage.rawValue)"
+        let base = "lane=\(self.lane) stage=\(self.stage.rawValue) role=\(self.role.rawValue)"
             + " fresh=\(self.fmt(freshRate))"
             + " didDrop=\(self.fmt(dropRate))"
             + " overflow=\(self.fmt(overflowRate))"
@@ -413,6 +420,8 @@ nonisolated struct StageRateAggregator {
         self.gapMs = .init()
     }
 }
+
+// swiftlint:enable type_body_length
 
 // MARK: - Telemetry logger
 

@@ -270,11 +270,17 @@ Menu bar реагирует на `RecordingState` (`.normal` / `.degraded`), а 
 machine-parseable key=value с полями:
 
 ```
+lane=camera stage=capture role=record fresh=29.8 didDrop=0.0 overflow=0.0
+  gap_ms_avg=33.2 gap_ms_max=40.1 nominal=30 win_s=1.01
 lane=camera stage=encoder fresh=29.8 drop_dup=0.1 holds=0.2 gate_drop=0 emit_rate=30.0
   nominal=30 tick_lag_ms_avg=1.2 tick_lag_ms_max=3.4 catchup_max=2 win_s=1.01
 ```
 
-(`fresh` — реальные кадры/с, `drop_dup` — дубликаты-слота/с, `holds` — синтетические холды/с,
+(`role` — идентификатор роли источника: `record` (запись, data output подключён) или `preview`
+(только preview layer, data output не подключён, telemetry task не запущен — строки capture не
+эмитируются). До issue #119 превью-экземпляр `CameraSource` подключал data output и эмитировал
+overflow ~20/с постоянно, загрязняя overflow-счётчик записи.
+`fresh` — реальные кадры/с, `drop_dup` — дубликаты-слота/с, `holds` — синтетические холды/с,
 `gate_drop` — backpressure-дропы на гейте энкодера/с, `emit_rate` — суммарная эмиссия/с,
 `tick_lag_ms_avg/max` — запаздывание пробуда часов в мс, `catchup_max` — максимальный
 catch-up за один тик.)

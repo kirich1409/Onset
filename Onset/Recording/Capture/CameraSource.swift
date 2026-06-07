@@ -68,6 +68,8 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
     let format: CameraFormat
     let micDevice: MicrophoneDevice?
     let config: RecordingConfiguration
+    /// Which lifecycle this source serves; controls data-output attachment and telemetry.
+    let role: CaptureRole
     let framesContinuation: AsyncStream<VideoFrame>.Continuation
     let audioSamplesContinuation: AsyncStream<AudioSample>.Continuation
     let eventsContinuation: AsyncStream<SourceEvent>.Continuation
@@ -108,16 +110,20 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
     ///   - format: The pre-selected best format (from `CameraFormatSelector`).
     ///   - micDevice: Optional microphone device. When `nil`, `audioSamples` never delivers.
     ///   - config: Recording policy (fps target from `config.minCameraFps`).
+    ///   - role: Which lifecycle this source serves (default `.record`; pass `.preview` for
+    ///     preview-only instances that must not attach a data output or run telemetry).
     init(
         cameraDevice: CameraDevice,
         format: CameraFormat,
         micDevice: MicrophoneDevice?,
-        config: RecordingConfiguration
+        config: RecordingConfiguration,
+        role: CaptureRole = .record
     ) {
         self.cameraDevice = cameraDevice
         self.format = format
         self.micDevice = micDevice
         self.config = config
+        self.role = role
 
         var capturedFrames: AsyncStream<VideoFrame>.Continuation!
         var capturedAudio: AsyncStream<AudioSample>.Continuation!
@@ -150,7 +156,12 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
         self.dropsContinuation = capturedDrops
 
         self.captureRateLock = OSAllocatedUnfairLock(
-            initialState: StageRateAggregator(lane: "camera", stage: .capture, nominalFps: config.minCameraFps)
+            initialState: StageRateAggregator(
+                lane: "camera",
+                stage: .capture,
+                nominalFps: config.minCameraFps,
+                role: role
+            )
         )
     }
 
@@ -179,7 +190,10 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
             self.finishAllStreams()
             throw error
         }
-        self.startCaptureTelemetryTask()
+        // Preview emits no frames — an all-zero line every second is log noise.
+        if self.role == .record {
+            self.startCaptureTelemetryTask()
+        }
     }
 
     /// Stops capture. Finishes all four streams idempotently.
