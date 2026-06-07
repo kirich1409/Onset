@@ -94,9 +94,11 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
                 aggregator.recordOverflow()
             } else {
                 aggregator.recordFresh()
-                if let prev = previousDelivery {
-                    // swiftlint:disable:next no_magic_numbers
-                    aggregator.recordDeliveryGap(durationMs: (ptsSeconds - prev) * 1000)
+                if let gapMs = cameraDeliveryGapMs(
+                    previousDeliverySec: previousDelivery,
+                    currentDeliverySec: ptsSeconds
+                ) {
+                    aggregator.recordDeliveryGap(durationMs: gapMs)
                 }
             }
         }

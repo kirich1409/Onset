@@ -519,7 +519,7 @@ struct StageRateAggregatorDeliveryGapTests {
 
 @Suite("Duration.totalSeconds — ms conversion")
 struct DurationTotalSecondsMsTests {
-    // Tolerance of 1 µs (0.001 ms) — floating-point conversion of attoseconds.
+    /// Tolerance of 1 µs (0.001 ms) — floating-point conversion of attoseconds.
     private static let toleranceMs = 0.001
 
     @Test("5 ms duration converts to ≈ 5.0 ms via totalSeconds * 1000")

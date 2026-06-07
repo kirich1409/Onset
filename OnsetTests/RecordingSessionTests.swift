@@ -1175,14 +1175,18 @@ private func l5KeepOutput() -> Bool {
 /// Recording duration in seconds for L5 tests.
 ///
 /// Reads `ONSET_L5_DURATION_SECONDS` from the environment. Falls back to 5 when
-/// unset, empty, or not a positive integer. The suite `.timeLimit(.minutes(2))` is
-/// the hard ceiling — set a duration well below ~115 s or the test will time out.
+/// unset or empty (silent). Logs a warning and falls back to 5 when the value is set
+/// but is not a positive integer (e.g. "30s", "0") so the misconfiguration is visible.
+/// The suite `.timeLimit(.minutes(2))` is the hard ceiling — set a duration well
+/// below ~115 s or the test will time out.
 private func l5DurationSeconds() -> Int {
     guard let raw = ProcessInfo.processInfo.environment["ONSET_L5_DURATION_SECONDS"],
-          !raw.isEmpty,
-          let parsed = Int(raw),
-          parsed > 0
+          !raw.isEmpty
     else { return 5 }
+    guard let parsed = Int(raw), parsed > 0 else {
+        l5Logger.warning("ONSET_L5_DURATION_SECONDS='\(raw)' is not a positive integer — using default 5s")
+        return 5
+    }
     return parsed
 }
 
@@ -1190,7 +1194,7 @@ private func l5DurationSeconds() -> Int {
 ///
 /// Reads `ONSET_L5_CAMERA_NAME` from the environment. When unset or empty the
 /// first discovered camera is used (same behaviour as before this knob existed).
-/// When set but no camera name contains the substring, falls back to first.
+/// When set but no camera name contains the substring, the test fails via `try #require`.
 /// Example: `ONSET_L5_CAMERA_NAME=MX Brio` pins the Logitech MX Brio.
 private func l5CameraName() -> String? {
     guard let raw = ProcessInfo.processInfo.environment["ONSET_L5_CAMERA_NAME"],
@@ -1200,7 +1204,9 @@ private func l5CameraName() -> String? {
 }
 
 /// Picks a camera from `cameras` whose `AVCaptureDevice.localizedName` contains
-/// `nameFilter` (case-insensitive), falling back to `cameras.first` when no match.
+/// `nameFilter` (case-insensitive). Returns `nil` when no match is found — the caller
+/// must handle this (typically via `try #require`) so a mismatched filter fails loudly
+/// instead of silently verifying the wrong device.
 ///
 /// The filter uses `AVCaptureDevice` directly for the name comparison because
 /// `CameraDevice` stores only `uniqueID`/`formats` (no display name — PII policy).
@@ -1209,7 +1215,7 @@ private func l5CameraName() -> String? {
 /// - Parameters:
 ///   - cameras: Pre-enumerated `CameraDevice` snapshots (same list as the session uses).
 ///   - nameFilter: Case-insensitive substring to match against `localizedName`.
-/// - Returns: The first matching camera, or `cameras.first` when no match is found.
+/// - Returns: The first matching camera, or `nil` when no match is found.
 ///   Logs whether the filter matched (boolean flag only — no name in the log).
 private func pickCamera(from cameras: [CameraDevice], nameFilter: String) -> CameraDevice? {
     let discoverySession = AVCaptureDevice.DiscoverySession(
@@ -1221,14 +1227,12 @@ private func pickCamera(from cameras: [CameraDevice], nameFilter: String) -> Cam
         .first { $0.localizedName.localizedCaseInsensitiveContains(nameFilter) }
         .map(\.uniqueID)
 
-    if let matchedID {
-        if let camera = cameras.first(where: { $0.uniqueID == matchedID }) {
-            l5Logger.notice("L5_CAMERA_PICK name_matched=true")
-            return camera
-        }
+    if let matchedID, let camera = cameras.first(where: { $0.uniqueID == matchedID }) {
+        l5Logger.notice("L5_CAMERA_PICK name_matched=true")
+        return camera
     }
     l5Logger.notice("L5_CAMERA_PICK name_matched=false")
-    return cameras.first
+    return nil
 }
 
 nonisolated private let l5Logger = Logger(
