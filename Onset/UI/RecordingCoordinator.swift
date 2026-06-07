@@ -154,9 +154,15 @@ final class RecordingCoordinator {
     /// stop completes.
     private(set) var lastResult: RecordingResult?
 
-    /// `true` when the most recent finished session carried enough backpressure drops to warrant the
-    /// AC-9 warning. Computed from `RecordingResult.degradedWarning` on stop.
-    private(set) var lastDegradedWarning = false
+    /// `true` when the most recent finished session had encoder-backpressure drops (AC-9 warning).
+    /// Derived from `lastDroppedFrames` — single source of truth, no lockstep pair needed.
+    var lastDegradedWarning: Bool {
+        self.lastDroppedFrames > 0
+    }
+
+    /// Encoder-backpressure drop count from the most recent finished session, frozen at stop time.
+    /// Reset to 0 in `acknowledgeDegradedWarning()` and cleared on every `start()`.
+    private(set) var lastDroppedFrames = 0
 
     /// Non-nil when the most recent session had a hard write failure (e.g. disk full). Contains
     /// the human-readable reason for the error alert. Distinct from `lastDegradedWarning` — a
@@ -298,10 +304,10 @@ final class RecordingCoordinator {
         self.phase = .main
     }
 
-    /// Clears `lastDegradedWarning` after the user has acknowledged the alert (AC-9). Called by
-    /// `MainView` on dismiss so the flag does not persist across subsequent recordings.
+    /// Clears `lastDroppedFrames` (and thereby `lastDegradedWarning`) after the user has acknowledged
+    /// the alert (AC-9). Called by `MainView` on dismiss so the state does not persist across sessions.
     func acknowledgeDegradedWarning() {
-        self.lastDegradedWarning = false
+        self.lastDroppedFrames = 0
     }
 
     /// Clears `lastWriteError` after the user has acknowledged the alert.
@@ -344,8 +350,8 @@ final class RecordingCoordinator {
         // Every source starts live; a graceful revoke (AC-12) flips the affected one(s) during the session.
         self.sourceLiveness = .allLive
         self.isStopping = false
-        // Reset per-session warning flags — structural invariant: every new session starts clean.
-        self.lastDegradedWarning = false
+        // Reset per-session drop counter (drives lastDegradedWarning) — structural invariant: clean start.
+        self.lastDroppedFrames = 0
         self.lastWriteError = nil
         self.phase = .recording
 
@@ -445,7 +451,7 @@ final class RecordingCoordinator {
 
         self.lastResult = result
         self.drops = result.drops
-        self.lastDegradedWarning = result.degradedWarning
+        self.lastDroppedFrames = result.drops.encoderBackpressureDrops
         self.lastWriteError = result.writeFailureReason
         self.session = nil
         self.startedAt = nil

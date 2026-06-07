@@ -83,7 +83,10 @@ struct MainView: View {
         // Write-error supersedes degraded-warning (both can be true simultaneously when
         // the writer fails under heavy backpressure). Priority is enforced in `resolvedAlert`.
         .onAppear {
-            self.pendingAlert = self.resolvedAlert()
+            // Guard prevents a repeated appear (e.g. window re-focus) from overwriting an active alert.
+            if self.pendingAlert == nil {
+                self.pendingAlert = self.resolvedAlert()
+            }
             // Install menu-bar record intent while the main window is visible (#38).
             // [weak model] prevents a retain cycle: coordinator ← closure ← model,
             // while model also holds coordinator.
@@ -106,10 +109,9 @@ struct MainView: View {
                 self.pendingAlert = alert
             }
         }
-        .onChange(of: self.model.coordinator.lastDegradedWarning) { _, newValue in
-            if newValue, self.pendingAlert == nil {
-                self.pendingAlert = self.resolvedAlert()
-            }
+        .onChange(of: self.model.coordinator.lastDroppedFrames) { _, newValue in
+            guard newValue > 0, self.pendingAlert == nil else { return }
+            self.pendingAlert = self.resolvedAlert()
         }
         .alert(item: self.$pendingAlert) { alert in
             self.makeAlert(for: alert)
@@ -123,11 +125,14 @@ struct MainView: View {
     private func resolvedAlert() -> PostStopAlert? {
         PostStopAlert.resolve(
             writeError: self.model.coordinator.lastWriteError,
-            degraded: self.model.coordinator.lastDegradedWarning
+            droppedFrames: self.model.coordinator.lastDroppedFrames
         )
     }
 
     /// Builds the `Alert` for a given `PostStopAlert` case.
+    ///
+    /// Write-error dismiss chains to `resolvedAlert()` to surface any pending degraded-warning
+    /// that was suppressed by the higher-priority write-error (Фикс 2: потеря второго алерта).
     private func makeAlert(for alert: PostStopAlert) -> Alert {
         switch alert {
         case let .writeError(reason):
@@ -136,20 +141,22 @@ struct MainView: View {
                 message: Text(reason),
                 dismissButton: .default(Text("ОК")) {
                     self.model.coordinator.acknowledgeWriteError()
-                    self.pendingAlert = nil
+                    // Chain to the next pending alert (degradedWarning if lastDroppedFrames > 0,
+                    // nil otherwise). Without this, onChange never re-fires for an unchanged
+                    // lastDroppedFrames, so the degraded-warning alert would be lost.
+                    self.pendingAlert = self.resolvedAlert()
                 }
             )
 
         case .degradedWarning:
             Alert(
-                title: Text("Запись завершена с ошибками"),
-                message: Text(
-                    "Во время записи были пропущены кадры из-за перегрузки диска." +
-                        " Видеофайл может содержать пропуски."
-                ),
+                title: Text("Запись завершена"),
+                message: Text(alert.message),
                 dismissButton: .default(Text("ОК")) {
                     self.model.coordinator.acknowledgeDegradedWarning()
-                    self.pendingAlert = nil
+                    // resolvedAlert() returns nil here (lastDroppedFrames is 0 after acknowledge);
+                    // explicit assignment keeps the dismiss path symmetrical with writeError.
+                    self.pendingAlert = self.resolvedAlert()
                 }
             )
         }
@@ -320,11 +327,18 @@ struct CameraPreviewRepresentable: NSViewRepresentable {
 /// Which post-stop alert `MainView` presents after a recording ends.
 ///
 /// `writeError` carries the localized reason for the message body.
-/// Priority ordering is enforced by `resolve(writeError:degraded:)`: write-error supersedes
-/// degraded-warning because a failed write means the file was not saved (higher severity).
+/// `degradedWarning` carries the session's encoder-backpressure drop count so the alert can
+/// display "Пропущено N кадров — возможны рывки." (AC-9).
+///
+/// Priority ordering is enforced by `resolve(writeError:droppedFrames:)`: write-error
+/// supersedes degraded-warning because a failed write means the file was not saved (higher severity).
 enum PostStopAlert: Identifiable {
     case writeError(reason: String)
-    case degradedWarning
+    /// Post-stop warning shown when the session's encoder-backpressure drop count exceeds zero.
+    ///
+    /// `droppedFrames` is `RecordingCoordinator.lastDroppedFrames` — frozen at stop time,
+    /// reset to 0 in `acknowledgeDegradedWarning()` and on every `start()`.
+    case degradedWarning(droppedFrames: Int)
 
     var id: String {
         switch self {
@@ -338,13 +352,31 @@ enum PostStopAlert: Identifiable {
     /// Priority: `.writeError` > `.degradedWarning` > `nil`.
     /// Both flags can be simultaneously true when the writer fails under heavy backpressure;
     /// only the higher-severity alert is shown to avoid competing presentation slots.
-    nonisolated static func resolve(writeError: String?, degraded: Bool) -> Self? {
+    ///
+    /// - Parameters:
+    ///   - writeError:    Human-readable write-failure reason, or `nil` when the file was saved.
+    ///   - droppedFrames: `RecordingCoordinator.lastDroppedFrames` at call time — a non-zero value
+    ///                    means the session had encoder-backpressure drops and the warning is shown.
+    nonisolated static func resolve(writeError: String?, droppedFrames: Int) -> Self? {
         if let reason = writeError {
             return .writeError(reason: reason)
         }
-        if degraded {
-            return .degradedWarning
+        if droppedFrames > 0 {
+            return .degradedWarning(droppedFrames: droppedFrames)
         }
         return nil
+    }
+
+    /// Localized message for the `.degradedWarning` alert body (AC-9).
+    ///
+    /// Examples:
+    /// - `degradedWarning(droppedFrames: 1).message`  → "Пропущен 1 кадр — возможны рывки."
+    /// - `degradedWarning(droppedFrames: 2).message`  → "Пропущено 2 кадра — возможны рывки."
+    /// - `degradedWarning(droppedFrames: 5).message`  → "Пропущено 5 кадров — возможны рывки."
+    nonisolated var message: String {
+        guard case let .degradedWarning(count) = self else { return "" }
+        let verb = RussianPluralForm.select(count: count, one: "Пропущен", few: "Пропущено", many: "Пропущено")
+        let noun = RussianPluralForm.select(count: count, one: "кадр", few: "кадра", many: "кадров")
+        return "\(verb) \(count) \(noun) — возможны рывки."
     }
 }
