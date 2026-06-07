@@ -181,7 +181,7 @@ extension CameraSource {
     func attachOutputs(to session: AVCaptureSession, shims: CameraCaptureShims) throws {
         // Preview renders via AVCaptureVideoPreviewLayer straight from the session input;
         // a data output would yield frames nobody consumes (constant overflow, issue #119).
-        guard case .record = self.role else { return }
+        guard self.role == .record else { return }
         let videoOutput = AVCaptureVideoDataOutput()
         videoOutput.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,

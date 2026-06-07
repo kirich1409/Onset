@@ -53,6 +53,9 @@ final class MainViewModel {
     let discoverMicrophones: (Bool) -> [MicrophoneDevice]
 
     /// Factory seam for `CameraSource` — injectable for tests to avoid hardware calls.
+    ///
+    /// The default closure builds a `.preview`-role source (no data output, no telemetry);
+    /// injected closures in tests may build a `.record`-role source or a fake entirely.
     @ObservationIgnored
     let makeCameraSource:
         (CameraDevice, CameraFormat, MicrophoneDevice?, RecordingConfiguration) -> CameraSource

@@ -4,7 +4,7 @@ import os
 // line count includes the DurationAccumulator helper, identity/cadence/episode/clock-health/
 // duration fields, and the flush-line contract. Splitting would obscure the contract.
 // type_body_length is disabled: same single-concern rationale as file_length above.
-// The struct body grew by one property (role) added for capture telemetry disambiguation.
+// The struct body includes a `role` property added for capture telemetry disambiguation.
 // swiftlint:disable file_length type_body_length
 
 // MARK: - TelemetryStage
@@ -17,19 +17,6 @@ nonisolated enum TelemetryStage: String {
     case capture
     case encoder
     case writer
-}
-
-// MARK: - CaptureRole
-
-/// Which lifecycle a `CameraSource` serves: full recording, or a lightweight preview.
-///
-/// `rawValue` is the wire-format token emitted in the `role=` field of every capture
-/// telemetry line. Keep these stable — log analysis depends on the exact strings.
-nonisolated enum CaptureRole: String {
-    /// Live preview: session runs for the preview layer only; no data outputs, no telemetry task.
-    case preview
-    /// Full recording: video data output attached, frames yielded, telemetry flushed.
-    case record
 }
 
 // MARK: - DurationAccumulator

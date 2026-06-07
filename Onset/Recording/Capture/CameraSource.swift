@@ -191,7 +191,7 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
             throw error
         }
         // Preview emits no frames — an all-zero line every second is log noise.
-        if case .record = self.role {
+        if self.role == .record {
             self.startCaptureTelemetryTask()
         }
     }

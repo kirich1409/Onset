@@ -452,7 +452,7 @@ struct CameraSourceLiveTests {
         .enabled(if: l5CaptureEnabled())
     )
     func previewRole_producesNoFrames() async throws {
-        let setup = try makeLivePreviewSource()
+        let setup = try makeLiveCaptureSource(role: .preview)
         try await setup.source.start(anchoredTo: setup.anchor)
 
         // Race a frame-wait task against a 1s timeout; the timeout winning is the expected path.
@@ -485,11 +485,17 @@ private struct LiveCaptureSetup {
     let anchor: HostTimeAnchor
 }
 
-/// Builds and configures a `CameraSource` from the first available built-in camera and
-/// default microphone. Returns the configured source, the selected format, and a fresh anchor.
+// swiftlint:disable function_body_length
+/// Builds and configures a `CameraSource` from the first available built-in camera.
+/// For `.record` role also acquires the default microphone; for `.preview` passes `nil`
+/// (preview never attaches a data output, so mic hardware is irrelevant).
+/// Returns the configured source, the selected format, and a fresh anchor.
+///
+/// - Parameter role: Which lifecycle the source serves (default `.record`).
+///   Pass `.preview` to build a source that suppresses data outputs and telemetry.
 ///
 /// Extracted to keep `liveCapture_producesFramesAndSamples` within `function_body_length`.
-private func makeLiveCaptureSource() throws -> LiveCaptureSetup {
+private func makeLiveCaptureSource(role: CaptureRole = .record) throws -> LiveCaptureSetup {
     guard let avDevice = AVCaptureDevice.default(
         .builtInWideAngleCamera,
         for: .video,
@@ -497,8 +503,17 @@ private func makeLiveCaptureSource() throws -> LiveCaptureSetup {
     ) else {
         throw L5SetupError.noCamera
     }
-    guard let avMic = AVCaptureDevice.default(for: .audio) else {
-        throw L5SetupError.noMicrophone
+
+    let micDevice: MicrophoneDevice?
+    switch role {
+    case .record:
+        guard let avMic = AVCaptureDevice.default(for: .audio) else {
+            throw L5SetupError.noMicrophone
+        }
+        micDevice = MicrophoneDevice(uniqueID: avMic.uniqueID)
+
+    case .preview:
+        micDevice = nil
     }
 
     let formats: [CameraFormat] = avDevice.formats.compactMap { fmt in
@@ -520,60 +535,17 @@ private func makeLiveCaptureSource() throws -> LiveCaptureSetup {
     )
 
     let cameraDevice = CameraDevice(uniqueID: avDevice.uniqueID, formats: formats)
-    let micDevice = MicrophoneDevice(uniqueID: avMic.uniqueID)
-    let source = CameraSource(
-        cameraDevice: cameraDevice,
-        format: selectedFormat,
-        micDevice: micDevice,
-        config: config
-    )
-    return LiveCaptureSetup(source: source, format: selectedFormat, anchor: HostTimeAnchor.now())
-}
-
-/// Builds a `CameraSource` with `role: .preview` from the first available built-in camera
-/// and default microphone. Used by `previewRole_producesNoFrames` to verify that the
-/// preview role suppresses data-output attachment (issue #119).
-private func makeLivePreviewSource() throws -> LiveCaptureSetup {
-    guard let avDevice = AVCaptureDevice.default(
-        .builtInWideAngleCamera,
-        for: .video,
-        position: .unspecified
-    ) else {
-        throw L5SetupError.noCamera
-    }
-    guard let avMic = AVCaptureDevice.default(for: .audio) else {
-        throw L5SetupError.noMicrophone
-    }
-
-    let formats: [CameraFormat] = avDevice.formats.compactMap { fmt in
-        let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
-        let maxFps = fmt.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0
-        let minFps = fmt.videoSupportedFrameRateRanges.map(\.minFrameRate).min() ?? 0
-        return CameraFormat(
-            pixelWidth: dims.width,
-            pixelHeight: dims.height,
-            minFps: minFps,
-            maxFps: maxFps
-        )
-    }
-
-    let config = RecordingConfiguration.mvpDefault
-    let selectedFormat = try CameraFormatSelector.pickBestFormat(
-        from: formats,
-        minFps: Double(config.minCameraFps)
-    )
-
-    let cameraDevice = CameraDevice(uniqueID: avDevice.uniqueID, formats: formats)
-    let micDevice = MicrophoneDevice(uniqueID: avMic.uniqueID)
     let source = CameraSource(
         cameraDevice: cameraDevice,
         format: selectedFormat,
         micDevice: micDevice,
         config: config,
-        role: .preview
+        role: role
     )
     return LiveCaptureSetup(source: source, format: selectedFormat, anchor: HostTimeAnchor.now())
 }
+
+// swiftlint:enable function_body_length
 
 // MARK: - L5 error types
 
