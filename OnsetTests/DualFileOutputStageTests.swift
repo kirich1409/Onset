@@ -255,7 +255,9 @@ private func makeStage(
     expected: Set<RecordingPipelineKind>,
     includeAudio: Bool,
     onAllWritersFaulted: @escaping @Sendable () async -> Void = {}
-) -> DualFileOutputStage {
+)
+    -> DualFileOutputStage
+{ // swiftlint:disable:this opening_brace
     DualFileOutputStage(
         sessionT0: SampleFactory.sessionT0,
         expectedPipelines: expected,
