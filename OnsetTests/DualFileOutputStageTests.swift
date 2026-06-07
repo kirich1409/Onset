@@ -522,6 +522,24 @@ struct DualFileOutputStageFinishTests {
     }
 }
 
+// MARK: - Fail-fast helpers
+
+/// Polls `condition` every 5 ms up to `timeoutMs`. Returns `true` as soon as the condition holds,
+/// `false` if the deadline passes. Replaces fixed `Task.sleep` waits in fault-observer tests so
+/// the suite is robust on slow CI runners where observer Tasks may take longer to be scheduled.
+private func eventually(
+    timeoutMs: Int = 2000,
+    _ condition: @Sendable () async -> Bool
+) async
+-> Bool {
+    let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
+    while Date() < deadline {
+        if await condition() { return true }
+        try? await Task.sleep(nanoseconds: 5_000_000) // 5 ms
+    }
+    return await condition()
+}
+
 // MARK: - Fail-fast (#105)
 
 @Suite("DualFileOutputStage — fail-fast on writer fault (#105)")
@@ -551,11 +569,12 @@ struct DualFileOutputStageFaultTests {
         factory.screenWriter.simulateFault()
         factory.cameraWriter.simulateFault()
 
-        // Give the observer tasks a chance to run.
-        try await Task.sleep(nanoseconds: 50_000_000)
-
+        // Wait until the observer task inside DualFileOutputStage fires the callback.
+        // `eventually` polls every 5 ms (up to 2 s) so the test is robust on slow CI runners
+        // where scheduling a background Task may take significantly longer than 50 ms.
+        let fired = await eventually { box.value }
         callbackFired = box.value
-        #expect(callbackFired, "onAllWritersFaulted must fire when all writers are faulted")
+        #expect(fired && callbackFired, "onAllWritersFaulted must fire when all writers are faulted")
     }
 
     // MARK: Only the created writer faults (second not yet created) → callback fires
@@ -580,9 +599,9 @@ struct DualFileOutputStageFaultTests {
         // so one created writer faulting satisfies the "all live writers faulted" condition.
         factory.screenWriter.simulateFault()
 
-        try await Task.sleep(nanoseconds: 50_000_000)
-
-        #expect(box.value, "onAllWritersFaulted must fire when the only created writer faults")
+        // Poll until the callback fires — same rationale as allWritersFaulted_callbackFires.
+        let fired = await eventually { box.value }
+        #expect(fired && box.value, "onAllWritersFaulted must fire when the only created writer faults")
     }
 
     // MARK: Only one writer faults → callback does NOT fire

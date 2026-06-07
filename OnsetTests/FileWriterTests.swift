@@ -444,6 +444,12 @@ struct FileWriterDropTests {
             sourceFormatHint: hint
         )
 
+        // start() puts AVAssetWriter into .writing state — required before markFinished() so
+        // that rawVideoInput.markAsFinished() is a defined operation. Without startWriting(),
+        // markAsFinished() on an unstarted AVAssetWriterInput produces undefined behavior on
+        // some AVFoundation versions (hangs the actor, preventing faultsContinuation.finish()).
+        try await writer.start(atSourceTime: .zero)
+
         // Collect from faults before calling markFinished so we don't miss any early yield.
         let faultsCollector = Task { () -> [Void] in
             var values: [Void] = []
