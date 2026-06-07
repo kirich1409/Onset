@@ -446,6 +446,35 @@ struct CameraSourceLiveTests {
         assertVideoFrames(result.frames, anchor: setup.anchor, format: setup.format)
         assertAudioSamples(result.samples, anchor: setup.anchor)
     }
+
+    @Test(
+        "preview role starts successfully and produces no frames within 1s",
+        .enabled(if: l5CaptureEnabled())
+    )
+    func previewRole_producesNoFrames() async throws {
+        let setup = try makeLivePreviewSource()
+        try await setup.source.start(anchoredTo: setup.anchor)
+
+        // Race a frame-wait task against a 1s timeout; the timeout winning is the expected path.
+        let gotFrame = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await _ in setup.source.frames {
+                    return true
+                }
+                return false
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(1))
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+
+        await setup.source.stop()
+        #expect(gotFrame == false, "Preview CameraSource must not yield frames (issue #119)")
+    }
 }
 
 // MARK: - L5 setup helper
@@ -497,6 +526,51 @@ private func makeLiveCaptureSource() throws -> LiveCaptureSetup {
         format: selectedFormat,
         micDevice: micDevice,
         config: config
+    )
+    return LiveCaptureSetup(source: source, format: selectedFormat, anchor: HostTimeAnchor.now())
+}
+
+/// Builds a `CameraSource` with `role: .preview` from the first available built-in camera
+/// and default microphone. Used by `previewRole_producesNoFrames` to verify that the
+/// preview role suppresses data-output attachment (issue #119).
+private func makeLivePreviewSource() throws -> LiveCaptureSetup {
+    guard let avDevice = AVCaptureDevice.default(
+        .builtInWideAngleCamera,
+        for: .video,
+        position: .unspecified
+    ) else {
+        throw L5SetupError.noCamera
+    }
+    guard let avMic = AVCaptureDevice.default(for: .audio) else {
+        throw L5SetupError.noMicrophone
+    }
+
+    let formats: [CameraFormat] = avDevice.formats.compactMap { fmt in
+        let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
+        let maxFps = fmt.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0
+        let minFps = fmt.videoSupportedFrameRateRanges.map(\.minFrameRate).min() ?? 0
+        return CameraFormat(
+            pixelWidth: dims.width,
+            pixelHeight: dims.height,
+            minFps: minFps,
+            maxFps: maxFps
+        )
+    }
+
+    let config = RecordingConfiguration.mvpDefault
+    let selectedFormat = try CameraFormatSelector.pickBestFormat(
+        from: formats,
+        minFps: Double(config.minCameraFps)
+    )
+
+    let cameraDevice = CameraDevice(uniqueID: avDevice.uniqueID, formats: formats)
+    let micDevice = MicrophoneDevice(uniqueID: avMic.uniqueID)
+    let source = CameraSource(
+        cameraDevice: cameraDevice,
+        format: selectedFormat,
+        micDevice: micDevice,
+        config: config,
+        role: .preview
     )
     return LiveCaptureSetup(source: source, format: selectedFormat, anchor: HostTimeAnchor.now())
 }

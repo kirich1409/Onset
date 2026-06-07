@@ -237,7 +237,7 @@ final class MainViewModel {
             CameraDevice, CameraFormat, MicrophoneDevice?, RecordingConfiguration
         )
             -> CameraSource = { device, format, mic, config in
-                CameraSource(cameraDevice: device, format: format, micDevice: mic, config: config)
+                CameraSource(cameraDevice: device, format: format, micDevice: mic, config: config, role: .preview)
             }
     ) {
         self.permissions = permissions

@@ -94,8 +94,8 @@ struct StageRateAggregatorCaptureFormatTests {
         agg.recordOverflow()
         let result = agg.flush(elapsedSeconds: 1.0)
         let line = try #require(result)
-        // Key order: lane stage fresh didDrop overflow gap_ms_avg gap_ms_max nominal win_s
-        let expected = "lane=camera stage=capture fresh=1.0 didDrop=1.0 overflow=1.0"
+        // Key order: lane stage role fresh didDrop overflow gap_ms_avg gap_ms_max nominal win_s
+        let expected = "lane=camera stage=capture role=record fresh=1.0 didDrop=1.0 overflow=1.0"
             + " gap_ms_avg=0.0 gap_ms_max=0.0 nominal=30 win_s=1.0"
         #expect(line == expected)
     }
@@ -108,7 +108,7 @@ struct StageRateAggregatorCaptureFormatTests {
         agg.recordIdle()
         let result = agg.flush(elapsedSeconds: 1.0)
         let line = try #require(result)
-        let expected = "lane=screen stage=capture fresh=1.0 didDrop=0.0 overflow=0.0"
+        let expected = "lane=screen stage=capture role=record fresh=1.0 didDrop=0.0 overflow=0.0"
             + " gap_ms_avg=0.0 gap_ms_max=0.0 idle=2.0 nominal=60 win_s=1.0"
         #expect(line == expected)
     }
@@ -119,6 +119,22 @@ struct StageRateAggregatorCaptureFormatTests {
         let result = agg.flush(elapsedSeconds: 1.0)
         let line = try #require(result)
         #expect(!line.contains("idle="))
+    }
+
+    @Test("default role produces role=record in capture line")
+    func defaultRole_producesRecordToken() throws {
+        var agg = StageRateAggregator(lane: "camera", stage: .capture, nominalFps: 30)
+        let result = agg.flush(elapsedSeconds: 1.0)
+        let line = try #require(result)
+        #expect(line.contains(" role=record "))
+    }
+
+    @Test("preview role produces role=preview in capture line")
+    func previewRole_producesPreviewToken() throws {
+        var agg = StageRateAggregator(lane: "camera", stage: .capture, nominalFps: 30, role: .preview)
+        let result = agg.flush(elapsedSeconds: 1.0)
+        let line = try #require(result)
+        #expect(line.contains(" role=preview "))
     }
 }
 
