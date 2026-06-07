@@ -514,3 +514,32 @@ struct StageRateAggregatorDeliveryGapTests {
         #expect(gapMaxPos < nominalPos, "gap_ms_max must precede nominal")
     }
 }
+
+// MARK: - Duration.totalSeconds ms conversion
+
+@Suite("Duration.totalSeconds — ms conversion")
+struct DurationTotalSecondsMsTests {
+    // Tolerance of 1 µs (0.001 ms) — floating-point conversion of attoseconds.
+    private static let toleranceMs = 0.001
+
+    @Test("5 ms duration converts to ≈ 5.0 ms via totalSeconds * 1000")
+    func fiveMilliseconds() {
+        let dur = Duration.milliseconds(5)
+        let elapsedMs = dur.totalSeconds * 1000
+        #expect(abs(elapsedMs - 5.0) < DurationTotalSecondsMsTests.toleranceMs)
+    }
+
+    @Test("1 s duration converts to ≈ 1000.0 ms via totalSeconds * 1000")
+    func oneSecond() {
+        let dur = Duration.seconds(1)
+        let elapsedMs = dur.totalSeconds * 1000
+        #expect(abs(elapsedMs - 1000.0) < DurationTotalSecondsMsTests.toleranceMs)
+    }
+
+    @Test("1500 ms duration converts to ≈ 1500.0 ms via totalSeconds * 1000")
+    func oneSecondAndHalf() {
+        let dur = Duration.milliseconds(1500)
+        let elapsedMs = dur.totalSeconds * 1000
+        #expect(abs(elapsedMs - 1500.0) < DurationTotalSecondsMsTests.toleranceMs)
+    }
+}

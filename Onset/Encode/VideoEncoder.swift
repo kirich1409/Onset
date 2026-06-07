@@ -680,9 +680,8 @@ actor VideoEncoder {
     /// `SWIFT_STRICT_MEMORY_SAFETY`. Called from `submit` and `ingest` to record
     /// per-call durations without importing a second clock type.
     nonisolated private func elapsedMs(from startInstant: ContinuousClock.Instant) -> Double {
-        let elapsed = (ContinuousClock.now - startInstant).components
         // swiftlint:disable:next no_magic_numbers
-        return Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1_000_000_000_000_000_000
+        (ContinuousClock.now - startInstant).totalSeconds * 1000
     }
 
     // MARK: - Submission + backpressure

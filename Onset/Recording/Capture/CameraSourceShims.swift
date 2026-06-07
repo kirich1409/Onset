@@ -25,8 +25,11 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
     /// `nonisolated(unsafe)`: confined to `videoQueue` (serial). That queue is the lock.
     nonisolated(unsafe) var didLogBufferAnomaly = false
 
-    /// Host-time seconds of the previous successfully delivered frame, used to compute the
-    /// inter-arrival gap fed to `recordDeliveryGap`.
+    /// Host-time seconds of the previous frame presented to `captureOutput`, used to compute
+    /// the camera PTS inter-arrival gap fed to `recordDeliveryGap`.
+    ///
+    /// Updated on every `captureOutput` callback (including frames dropped by the pipeline);
+    /// the gap metric measures device delivery cadence, not pipeline throughput.
     ///
     /// `nonisolated(unsafe)`: confined to `videoQueue` (serial). That queue is the lock.
     nonisolated(unsafe) var lastDeliveryHostTimeSec: Double?
