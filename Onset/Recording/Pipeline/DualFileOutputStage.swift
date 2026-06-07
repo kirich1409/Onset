@@ -273,7 +273,7 @@ actor DualFileOutputStage {
                 prevRate = unsafe Int(prevDesc.pointee.mSampleRate)
                 prevCh = unsafe Int(prevDesc.pointee.mChannelsPerFrame)
                 prevBits = unsafe Int(prevDesc.pointee.mBitsPerChannel)
-                prevFlags = unsafe String(format: "0x%08x", prevDesc.pointee.mFormatFlags)
+                prevFlags = Self.hexFlags(unsafe prevDesc.pointee.mFormatFlags)
                 prevBpf = unsafe Int(prevDesc.pointee.mBytesPerFrame)
             }
             var curRate = -1
@@ -285,7 +285,7 @@ actor DualFileOutputStage {
                 curRate = unsafe Int(curDesc.pointee.mSampleRate)
                 curCh = unsafe Int(curDesc.pointee.mChannelsPerFrame)
                 curBits = unsafe Int(curDesc.pointee.mBitsPerChannel)
-                curFlags = unsafe String(format: "0x%08x", curDesc.pointee.mFormatFlags)
+                curFlags = Self.hexFlags(unsafe curDesc.pointee.mFormatFlags)
                 curBpf = unsafe Int(curDesc.pointee.mBytesPerFrame)
             }
             // Mid-stream audio format change: should never happen with the pinned LPCM capture
@@ -548,6 +548,19 @@ actor DualFileOutputStage {
             )
         }
         return result
+    }
+
+    // MARK: - Private helpers
+
+    /// Formats a `UInt32` format-flags field as a zero-padded 8-digit lowercase hex string,
+    /// e.g. `0x0000000c`. Uses radix arithmetic (no Foundation/CVarArg) consistent with the
+    /// `String(_:radix:)` pattern used elsewhere in the codebase.
+    private static func hexFlags(_ flags: UInt32) -> String {
+        // swiftlint:disable no_magic_numbers
+        // 16: hex radix; 8: digits in a 32-bit hex word (UInt32 max = 0xFFFFFFFF).
+        let hex = String(flags, radix: 16, uppercase: false)
+        return "0x" + String(repeating: "0", count: max(0, 8 - hex.count)) + hex
+        // swiftlint:enable no_magic_numbers
     }
 }
 

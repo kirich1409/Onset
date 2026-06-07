@@ -21,7 +21,29 @@
 import AVFoundation
 import CoreMedia
 @testable import Onset
+import os
 import Testing
+
+// MARK: - Helpers
+
+/// A thread-safe boolean flag backed by `OSAllocatedUnfairLock`.
+///
+/// Replaces the bare `@unchecked Sendable` box pattern used in fault-suite callbacks:
+/// the callback mutates the flag from `DualFileOutputStage`'s actor context while the
+/// test reads it from its own async context, which is a formal data race under Swift 6
+/// strict concurrency. Using `withLock` on both sides eliminates the race without
+/// changing the observable test semantics.
+private final class FlagBox: Sendable {
+    private let lock = OSAllocatedUnfairLock(initialState: false)
+
+    func set() {
+        self.lock.withLock { $0 = true }
+    }
+
+    var value: Bool {
+        self.lock.withLock { $0 }
+    }
+}
 
 // MARK: - Fakes
 
@@ -549,17 +571,13 @@ struct DualFileOutputStageFaultTests {
     @Test("all writers faulted → onAllWritersFaulted is called")
     func allWritersFaulted_callbackFires() async throws {
         let factory = FakeWriterFactory()
-        var callbackFired = false
-        // Use a protected box to cross the @unchecked Sendable boundary safely.
-        // (Same pattern as FakeRecordingControlling in RecordingCoordinatorTests.)
-        final class Box: @unchecked Sendable { var value = false }
-        let box = Box()
+        let box = FlagBox()
 
         let stage = makeStage(
             factory: factory,
             expected: [.screen, .camera],
             includeAudio: false
-        ) { box.value = true }
+        ) { box.set() }
 
         // Trigger writer creation for both pipelines.
         try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
@@ -573,8 +591,7 @@ struct DualFileOutputStageFaultTests {
         // `eventually` polls every 5 ms (up to 2 s) so the test is robust on slow CI runners
         // where scheduling a background Task may take significantly longer than 50 ms.
         let fired = await eventually { box.value }
-        callbackFired = box.value
-        #expect(fired && callbackFired, "onAllWritersFaulted must fire when all writers are faulted")
+        #expect(fired, "onAllWritersFaulted must fire when all writers are faulted")
     }
 
     // MARK: Only the created writer faults (second not yet created) → callback fires
@@ -582,15 +599,14 @@ struct DualFileOutputStageFaultTests {
     @Test("fault of the only CREATED writer, second not yet created → callback fires")
     func onlyCreatedWriterFaults_secondNotYetCreated_callbackFires() async throws {
         let factory = FakeWriterFactory()
-        final class Box: @unchecked Sendable { var value = false }
-        let box = Box()
+        let box = FlagBox()
 
         // Both .screen and .camera are expected, but only .screen will be created.
         let stage = makeStage(
             factory: factory,
             expected: [.screen, .camera],
             includeAudio: false
-        ) { box.value = true }
+        ) { box.set() }
 
         // Route a video sample only for .screen — camera writer is never created.
         try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
@@ -609,14 +625,13 @@ struct DualFileOutputStageFaultTests {
     @Test("one of two writers faulted → onAllWritersFaulted is NOT called")
     func oneWriterFaulted_callbackDoesNotFire() async throws {
         let factory = FakeWriterFactory()
-        final class Box: @unchecked Sendable { var value = false }
-        let box = Box()
+        let box = FlagBox()
 
         let stage = makeStage(
             factory: factory,
             expected: [.screen, .camera],
             includeAudio: false
-        ) { box.value = true }
+        ) { box.set() }
 
         try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
         try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .camera), from: .camera)
@@ -634,14 +649,13 @@ struct DualFileOutputStageFaultTests {
     @Test("graceful finishAll cancels observer tasks — callback does NOT fire")
     func finishAll_doesNotFireFaultCallback() async throws {
         let factory = FakeWriterFactory()
-        final class Box: @unchecked Sendable { var value = false }
-        let box = Box()
+        let box = FlagBox()
 
         let stage = makeStage(
             factory: factory,
             expected: [.screen, .camera],
             includeAudio: false
-        ) { box.value = true }
+        ) { box.set() }
 
         try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
         try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .camera), from: .camera)
