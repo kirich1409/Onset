@@ -38,6 +38,9 @@
 - Буферы frames (4–8) и drops (8) развязаны: детекция backpressure не зависит от
   переполнения очереди кадров.
 
+Подробнее о механизме записи камеры, испробованных подходах и известных ограничениях:
+[`architecture/camera-recording-pipeline.md`](architecture/camera-recording-pipeline.md).
+
 ## Пайплайн — `Onset/Recording/Pipeline/`
 
 Оркестрация двухфайловой записи: источники, кодеры, вывод в файлы, мониторинг

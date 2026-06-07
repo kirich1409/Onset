@@ -21,6 +21,7 @@ xcodebuild build -scheme Onset -destination 'platform=macOS' -configuration Debu
   ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
 
 # Unit tests (Swift Testing; runs L2 only — L5 suites are env-gated, see Testing)
+# CODE_SIGNING_ALLOWED=NO is fine for build/unit tests; never for L5 (see Testing)
 xcodebuild test -scheme Onset -destination 'platform=macOS' -configuration Debug \
   ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
 
@@ -48,7 +49,15 @@ Artifact checks (CI `artifact-checks` job):
   it hides that summary.
 - L5 (real hardware) suites are opt-in via env vars: `ONSET_RUN_L5_CAPTURE=1`
   (CameraSource, RecordingSession), `ONSET_RUN_L5_ENCODE=1` (VideoEncoder, FileWriter).
-  Prefix the `xcodebuild test` command above with the var.
+  From agent/CI shells env vars do NOT propagate via `xcodebuild test` — inject them
+  into a copy of the generated `.xctestrun`
+  (`TestConfigurations:0:TestTargets:0:EnvironmentVariables` via PlistBuddy) and run
+  `test-without-building -xctestrun`; full recipe in
+  `docs/quality/production-quality-bar.md` §4.3. `-only-testing` matches suites, not
+  test functions.
+- L5 requires a SIGNED build — drop `CODE_SIGNING_ALLOWED=NO` for build-for-testing;
+  an unsigned test host writes a sticky TCC deny for screen capture (recovery:
+  `tccutil reset ScreenCapture` + manual re-grant).
 - BEFORE any L5 run: check stale test hosts with `pgrep -la Onset`; if any, ask the
   user to run `pkill -9 Onset` (agents may not kill processes). One `xcodebuild test`
   at a time — hardware tests fight over the camera and hang, spawning extra instances.

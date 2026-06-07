@@ -607,6 +607,46 @@ nonisolated private func assertAudioSamples(_ samples: [AudioSample], anchor: Ho
 
 // MARK: - audioOutputSettings builder tests
 
+// MARK: - Delivery gap helper tests
+
+/// Guards `cameraDeliveryGapMs`, the pure helper that backs the inter-frame gap telemetry.
+///
+/// Three properties are verified:
+/// 1. First delivery (nil previous) records no gap.
+/// 2. Second delivery records exactly (pts2 - pts1) * 1000 ms.
+/// 3. A negative delta (PTS discontinuity) records 0 ms — clamp from fix 3.
+@Suite("CameraSource — delivery gap helper")
+struct CameraDeliveryGapTests {
+    @Test("first delivery (nil previous) produces nil gap")
+    func firstDelivery_producesNilGap() {
+        let gap = cameraDeliveryGapMs(previousDeliverySec: nil, currentDeliverySec: 1.0)
+        #expect(gap == nil)
+    }
+
+    @Test("second delivery records exact gap in milliseconds")
+    func secondDelivery_recordsExactGapMs() {
+        // 1/30 s ≈ 33.333 ms for a 30 fps stream.
+        let pts1 = 1.0
+        let pts2 = pts1 + 1.0 / 30.0
+        let gap = cameraDeliveryGapMs(previousDeliverySec: pts1, currentDeliverySec: pts2)
+        let expected = (pts2 - pts1) * 1000
+        #expect(gap == expected)
+    }
+
+    @Test("negative PTS delta (discontinuity) is clamped to zero")
+    func negativeDelta_clampedToZero() {
+        // Simulates a device reconnect where the new PTS is earlier than the previous one.
+        let gap = cameraDeliveryGapMs(previousDeliverySec: 2.0, currentDeliverySec: 1.5)
+        #expect(gap == 0)
+    }
+
+    @Test("zero delta records zero gap")
+    func zeroDelta_recordsZeroGap() {
+        let gap = cameraDeliveryGapMs(previousDeliverySec: 1.0, currentDeliverySec: 1.0)
+        #expect(gap == 0)
+    }
+}
+
 @Suite("CameraSource — audioOutputSettings builder")
 struct CameraSourceAudioSettingsTests {
     private let sampleRate: Double = 48000

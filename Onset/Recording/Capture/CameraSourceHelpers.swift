@@ -121,3 +121,30 @@ nonisolated func isCaptureAuthorized(
 nonisolated func shouldHandleDisconnect(notificationDeviceID: String?, cameraID: String) -> Bool {
     notificationDeviceID == cameraID
 }
+
+/// Computes the inter-frame delivery gap in milliseconds between two consecutive camera PTS values.
+///
+/// Returns `nil` on the first delivery (no previous timestamp available), so the gap metric
+/// is only recorded starting from the second frame — matching the guard in `VideoOutputShim`.
+///
+/// Negative deltas (PTS discontinuity from device reconnect or clock anomaly) are clamped to
+/// zero so `DurationAccumulator` averages/maxima are not corrupted by a decrement.
+///
+/// Extracted for testability: the pure computation is exercisable without live AVFoundation or
+/// actor machinery.
+///
+/// - Parameters:
+///   - previousDeliverySec: Host-time seconds of the previous frame, or `nil` for the first frame.
+///   - currentDeliverySec: Host-time seconds of the current frame.
+/// - Returns: Gap in milliseconds (≥ 0), or `nil` when `previousDeliverySec` is `nil`.
+nonisolated func cameraDeliveryGapMs(
+    previousDeliverySec: Double?,
+    currentDeliverySec: Double
+)
+-> Double? {
+    guard let prev = previousDeliverySec else { return nil }
+    // Negative PTS delta (device reconnect / clock discontinuity) is clamped to zero,
+    // mirroring the tick-lag call site policy.
+    // swiftlint:disable:next no_magic_numbers
+    return max(0, currentDeliverySec - prev) * 1000
+}

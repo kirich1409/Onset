@@ -25,6 +25,15 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
     /// `nonisolated(unsafe)`: confined to `videoQueue` (serial). That queue is the lock.
     nonisolated(unsafe) var didLogBufferAnomaly = false
 
+    /// Host-time seconds of the previous frame presented to `captureOutput`, used to compute
+    /// the camera PTS inter-arrival gap fed to `recordDeliveryGap`.
+    ///
+    /// Updated on every `captureOutput` callback (including frames dropped by the pipeline);
+    /// the gap metric measures device delivery cadence, not pipeline throughput.
+    ///
+    /// `nonisolated(unsafe)`: confined to `videoQueue` (serial). That queue is the lock.
+    nonisolated(unsafe) var lastDeliveryHostTimeSec: Double?
+
     /// Per-stage cadence accumulator, shared with the owning `CameraSource` actor for flushing.
     ///
     /// `OSAllocatedUnfairLock` because `VideoOutputShim` runs on `videoQueue` (a GCD serial queue)
@@ -75,11 +84,22 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         }
         let frame = VideoFrame(pixelBuffer: pixelBuffer, ptsHostTime: pts, isHoldRepeat: false)
         let yieldResult = self.framesContinuation.yield(frame)
+        // `unsafe`: STRICT_MEMORY_SAFETY=YES — nonisolated(unsafe) requires this keyword.
+        // Safety: read+write confined to videoQueue (serial); that queue is the lock.
+        let ptsSeconds = CMTimeGetSeconds(pts)
+        let previousDelivery = unsafe self.lastDeliveryHostTimeSec
+        unsafe self.lastDeliveryHostTimeSec = ptsSeconds
         self.rateLock.withLock { aggregator in
             if case .dropped = yieldResult {
                 aggregator.recordOverflow()
             } else {
                 aggregator.recordFresh()
+                if let gapMs = cameraDeliveryGapMs(
+                    previousDeliverySec: previousDelivery,
+                    currentDeliverySec: ptsSeconds
+                ) {
+                    aggregator.recordDeliveryGap(durationMs: gapMs)
+                }
             }
         }
         if let dropEvent = cameraBackpressureDropEvent(for: yieldResult, pts: pts) {

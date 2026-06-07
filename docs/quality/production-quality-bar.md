@@ -87,13 +87,13 @@
 | Критерий | Порог | Метод | Статус |
 |---|---|---|---|
 | Выживаемость enc_real | ≥ 95% поданных кадров | телеметрия `enc_real / capture` | ❌ ~84% (enc_real 20.0 / capture 23.8 при тихом прогоне, `cfr-clock-acceptance.md`) |
-| Fresh-content rate (mpdecimate) | ≥ 95% номинала (≥ 28.5 fps при 30, ≥ 57 fps при 60) | `verify-cfr.sh` ассерт C + mpdecimate | ❌ **~43% номинала** (12.4–13.5 fps из 30; 3 прогона 2026-06-07 при дневном свете — [#112](https://github.com/kirich1409/Onset/issues/112)) — **блокер релиза** |
-| Capture overflow | ≈ 0/с | телеметрия `capture_overflow` | ❌ 12–15/с (стенд 2026-06-07, [#112](https://github.com/kirich1409/Onset/issues/112)) |
-| tick_lag (camera-актор) | медиана ≤ 10 мс, max ≤ 50 мс | телеметрия `tick_lag_ms` | ❌ avg 33–40 мс, max до 133 мс (2026-06-07, [#112](https://github.com/kirich1409/Onset/issues/112)) |
+| Fresh-content rate (mpdecimate) | ≥ 95% номинала (≥ 28.5 fps при 30, ≥ 57 fps при 60) | `verify-cfr.sh` ассерт C + mpdecimate | ❌ **пайплайн чист** — CFR-сетка идеальна (ассерт B PASS, gap_count=0), ассерты A/B/D PASS в поле (2026-06-07). Ограничение — доставка самой камеры ~19–23 fps при комнатном освещении: AE поверх пиннинга frame duration снижает фактический fps устройства (→ [#113](https://github.com/kirich1409/Onset/issues/113)). mpdecimate поле: 16.73 fps (утром: 12.4–13.5). Порог ≥ 28.5 fps не достигается до решения #113. Ранее: ~43% номинала до фикса B-frames |
+| Capture overflow | ≈ 0/с | телеметрия `capture_overflow` | ✅ полевой прогон 2026-06-07 (владелец в кадре, реальный воркфлоу): encoder overflow 0, gate_drop 0, writer 30.14/с — полоса записи чиста. «12–15/с» из #112 переатрибуированы preview-CameraSource с непотребляемым стримом (телеметрия без тега роли; → [#119](https://github.com/kirich1409/Onset/issues/119)). Оговорка: метрика валидна только после тега роли (#119). |
+| tick_lag (camera-актор) | медиана ≤ 10 мс, max ≤ 50 мс | телеметрия `tick_lag_ms` | ✅ avg ≈ 2.3 мс, max ≈ 9 мс (стенд 2026-06-07 после #112). Под 10×CPU load: avg 2.0 / max 6.7 мс — критерий PASS и под нагрузкой. Исторические значения 33–40 мс avg / до 133 мс max — артефакт измерения: старая семантика `tick_lag` фиксировала ~slot-период (33 мс) на здоровом пайплайне; новая (wake-latency) — реальную задержку пробуждения актора |
 | Серии дублей — мода | ≤ 2 кадра | `verify-cfr.sh` ассерт D: `MAX_RUN_MODE=2` | ✅ закрыто #102 (до: ~13, после: ≤2) |
 | Серии дублей — нет длинных | ни одна серия длиной ≥ 5 не повторяется ≥ 10 раз | `verify-cfr.sh` `LONG_RUN_LEN=5, LONG_RUN_MAX=10` | ✅ закрыто #102 |
-| Пакетный rate (файл pkt/s) | отклонение ≤ 2% от номинала | `verify-cfr.sh` ассерт A: `RATE_TOL_PCT=2` | ❌ 25–27 pkt/s из 30 (~83–90%; замер 2026-06-07, [#112](https://github.com/kirich1409/Onset/issues/112)); ранее: ~67% (20.0/30, тихий прогон, `cfr-clock-acceptance.md`) |
-| Равномерность PTS-дельт | ≤ 10 гэпов/мин > 1.5 слота | `verify-cfr.sh` ассерт B | ✅ закрыто #102 (B-frame sorting fix) |
+| Пакетный rate (файл pkt/s) | отклонение ≤ 2% от номинала | `verify-cfr.sh` ассерт A: `RATE_TOL_PCT=2` | ✅ 30.00 pkt/s (`verify-cfr` ассерт A PASS; стенд 2026-06-07 после #112: B-frames → структурные gate-дропы устранены, gate_drop=0.00/с, pending_max=2.0–2.5). Ранее: 25–27 pkt/s до фикса. Sustained 240s (2026-06-07, инструментированный L5-стенд, MX Brio 1080p30): camera 30.00 / screen 60.00 pkt/s, verify-cfr A PASS обе полосы. Поле 2026-06-07: 30.00/60.00 PASS |
+| Равномерность PTS-дельт | ≤ 10 гэпов/мин > 1.5 слота | `verify-cfr.sh` ассерт B | ✅ закрыто #102 (B-frame sorting fix); подтверждено #112: gap_count=0 после отключения B-frames. 240s: gap_count=0 обе полосы (B PASS) |
 | Пиксельный формат | 420v (`kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange`) | `ffprobe -show_streams` `pix_fmt` | ✅ `RecordingConfiguration.mvpDefault`: pixelFormat=[.biPlanar420v, .biPlanar420f]; 420v — первый/приоритетный |
 | Кодек видео | HEVC / hvc1 | `ffprobe -show_streams` `codec_name`, `codec_tag_string` | ✅ `mvpDefault`: codec=HEVC, sampleEntry=hvc1 (h264 в спеках не заявлен) |
 
@@ -149,7 +149,10 @@
 - **Режим:** High Power (`powermode 2`), AC power, Release-сборка.
 - **Движение в кадре** для ассерта C (fresh-content): дневной свет, движение объекта. Статичная
   тёмная комната → HEVC давит сенсорный шум → `fresh_fps ≈ 0.01` даже при корректной работе
-  энкодера. Ассерт C нельзя использовать в тёмной/статичной сцене.
+  энкодера. Ассерт C нельзя использовать в тёмной/статичной сцене. Аналогично ассерт D
+  (кластеры дублей) на длинных статичных записях контент-зависим: длинные dup-серии возникают
+  из самого контента — 240s статичной сцены дали `long_fail=1` при идеальной CFR-сетке
+  (gap_count=0); ассерт D валиден только при свете + движении в кадре, как и C.
 
 ### 4.2 Инструменты
 
@@ -164,7 +167,21 @@
 **Инвариант телеметрии:** `capture ≈ enc_real ≈ writer` (±стат. шум). Расхождение стадий =
 stage-specific drop; подробнее — [docs/architecture/drop-accounting.md](../architecture/drop-accounting.md).
 
-### 4.3 Негативный контроль
+### 4.3 Запуск L5 из не-Xcode шелла
+
+Переменные окружения (в т.ч. с префиксом `TEST_RUNNER_`) **не доходят** до test host через
+`xcodebuild test` в данной конфигурации. Рабочий путь:
+
+1. `xcodebuild build-for-testing` (с CODE_SIGNING_ALLOWED=NO **нельзя** — см. ниже).
+2. Найти `.xctestrun` в DerivedData, скопировать рядом.
+3. `PlistBuddy -c "Set :TestConfigurations:0:TestTargets:0:EnvironmentVariables:<VAR> <VALUE>" copy.xctestrun` — инъекция нужных переменных.
+4. `xcodebuild test-without-building -xctestrun copy.xctestrun`.
+
+**L5 требует подписанной сборки.** `CODE_SIGNING_ALLOWED=NO` ломает TCC-грант захвата экрана:
+test host получает sticky deny до `tccutil reset ScreenCapture` + повторного явного гранта.
+Флаг `-only-testing` работает на уровне suite, не отдельной функции.
+
+### 4.4 Негативный контроль
 
 Baseline записи с багом (до #102): camera 2.88 fps fresh, screen 42.3/60 pkt/s. Файлы:
 `~/Movies/Onset/Onset-1780682249/250`. `verify-cfr.sh` обязан FAIL на C и D этого baseline.
@@ -173,9 +190,9 @@ Baseline записи с багом (до #102): camera 2.88 fps fresh, screen 4
 
 | Разрыв | Issue | Приоритет | Суть |
 |---|---|---|---|
-| Потери кадров камеры — 43% номинала | [#112](https://github.com/kirich1409/Onset/issues/112) | 🔴 блокер релиза | capture overflow 12–15/с + tick_lag до 133 мс → fresh content 12.4–13.5 fps из 30; данные: 3 прогона 2026-06-07 при дневном свете |
+| Потери кадров камеры — 43% номинала | [#112](https://github.com/kirich1409/Onset/issues/112) | ✅ пайплайн-часть закрыта (PR #118, стенд+поле); device-input (~20 fps доставка камеры при комнатном свете) → [#113](https://github.com/kirich1409/Onset/issues/113); preview-телеметрия/чёрный старт → [#119](https://github.com/kirich1409/Onset/issues/119) | Корень — B-frames (`AllowFrameReordering=true`): reorder window держал `NumberOfPendingFrames` ≥ 4, структурно достигая backpressure gate. Фикс: `allowFrameReordering=false` в `mvpDefault`. Полевой прогон (владелец в кадре): encoder overflow 0, gate_drop 0, writer 30.14/с, verify-cfr A/B/D PASS. «12–15/с» overflow переатрибуированы preview-CameraSource (#119). Остаточный fresh-дефицит: AE-ограничение камеры (~19–23 fps при комнатном свете) → #113 |
 | Поддержка режимов камеры (4K30 / 1080p60 / встроенная) | [#113](https://github.com/kirich1409/Onset/issues/113) | 🔴 блокер релиза | 4K30 не тестировался; 1080p60 недостижим; встроенная камера не проверена; ручного выбора нет |
-| VT-потолок / кросс-полосная конкуренция | [#104](https://github.com/kirich1409/Onset/issues/104) | 🔴 блокер | Screen encoder ~20–42 fps (4K); camera страдает косвенно (tick_lag_ms_avg 38 мс); корень проблемы #112 (H-A) |
+| VT-потолок / кросс-полосная конкуренция | [#104](https://github.com/kirich1409/Onset/issues/104) | 🔴 блокер | Screen encoder ~20–42 fps (4K); camera страдает косвенно; #112 закрыт отдельно |
 | Конфляция источников дропов | [#100](https://github.com/kirich1409/Onset/issues/100) | 🟠 важный | Backpressure-gate drops, capture drops и CFR-normalization drops суммируются в `encoderBackpressureDrops`; честная атрибуция не реализована |
 | EngineBudgetCap требует калибровки | [#97](https://github.com/kirich1409/Onset/issues/97) / [#98](https://github.com/kirich1409/Onset/issues/98) | 🟡 | `EngineBudgetCap` (995M px/s) — плейсхолдер; `CapabilityResolver` молча применяет downscale без user-visible сигнала |
 | Персистенция выбора устройств | [#109](https://github.com/kirich1409/Onset/issues/109) | 🟡 | Камера и микрофон сбрасываются на значения по умолчанию при каждом перезапуске |

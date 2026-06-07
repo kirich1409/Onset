@@ -88,7 +88,13 @@ nonisolated struct RecordingConfiguration {
     nonisolated let keyFrameIntervalSeconds: Double
 
     /// Whether B-frames are permitted (`AllowFrameReordering`).
-    /// Spec: `true` — B-frames improve compression; recording is not live streaming.
+    ///
+    /// Set to `false` for real-time capture: the HEVC encoder's reorder window holds
+    /// `NumberOfPendingFrames` at a floor of ~4 — at or above the `VideoEncoder`
+    /// backpressure gate threshold (`maxPendingFrames = 4`) — so a healthy pipeline
+    /// structurally gate-drops CFR slots (camera ~17% loss, screen ~40%; issue #112).
+    /// DTS == PTS and minimal encoder latency are also desirable for capture.
+    /// The compression benefit of B-frames is not worth a broken cadence.
     nonisolated let allowFrameReordering: Bool
 
     // MARK: - Pixel Format Preference
@@ -272,7 +278,7 @@ nonisolated struct RecordingConfiguration {
             bitrateTable: bitrateTable,
             dataRateLimitsPeakMultiplier: 2.0,
             keyFrameIntervalSeconds: 2.0,
-            allowFrameReordering: true,
+            allowFrameReordering: false,
             pixelFormatPreference: [.biPlanar420v, .biPlanar420f],
             // Audio placeholder values — calibrate post-MVP against real hardware.
             audioSampleRate: 48000,

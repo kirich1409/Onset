@@ -406,10 +406,73 @@ struct VideoEncoderTests {
         let encoder = await makeEncoder(mock: mock, anchor: anchor)
         try await encoder.start()
 
-        await encoder.clockTick()
+        // nowSeconds is immaterial: lastPixelBuffer is nil so clockTick returns early
+        // before any normalizer or encoding call regardless of the injected time.
+        await encoder.clockTick(nowSeconds: CMTimeGetSeconds(anchor.anchorTime) + 1.0)
 
         #expect(mock.encodedBuffers.isEmpty)
         #expect(await encoder.cfrNormalizationDropCount == 0)
+    }
+
+    // MARK: - tick-lag fixed semantics
+
+    @Test("clockTick(nowSeconds:targetDeadlineSeconds:) records lag when now is past deadline")
+    func clockTick_lagRecorded_whenPastDeadline() async throws {
+        // Verify the new tick-lag overload records wake-up latency correctly.
+        // A target deadline 5 ms before `now` should produce a 5 ms lag.
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor, grace: 0.005)
+        try await encoder.start()
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let now = anchorSeconds + 1.0
+        let targetBefore = now - 0.005 // 5 ms before now → lag = 5 ms
+        await encoder.clockTick(nowSeconds: now, targetDeadlineSeconds: targetBefore)
+
+        let maxLag = await encoder.aggregatorTickLagMaxMs
+        // Lag must be ≥ 5 ms (the pre-deadline gap) but not wildly more.
+        #expect(maxLag >= 4.9, "Expected lag ≥ 5 ms, got \(maxLag)")
+        #expect(maxLag <= 10.0, "Expected lag ≤ 10 ms (sanity), got \(maxLag)")
+    }
+
+    @Test("clockTick(nowSeconds:targetDeadlineSeconds:) records zero lag when now is before deadline (early wake)")
+    func clockTick_lagIsZero_whenEarlyWake() async throws {
+        // An early wake (now < targetDeadline) must clamp to 0, not produce negative lag.
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor, grace: 0.005)
+        try await encoder.start()
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let now = anchorSeconds + 1.0
+        let targetAfter = now + 0.010 // deadline is 10 ms in the future → early wake
+        await encoder.clockTick(nowSeconds: now, targetDeadlineSeconds: targetAfter)
+
+        let maxLag = await encoder.aggregatorTickLagMaxMs
+        #expect(maxLag == 0.0, "Early wake must produce zero lag, got \(maxLag)")
+    }
+
+    @Test("clockTick(nowSeconds:) test-only path does not record tick-lag")
+    func clockTick_nowSecondsOnly_doesNotRecordLag() async throws {
+        // The single-arg overload is used by tests to drive holds without providing
+        // a deadline; it must not pollute the tick-lag metric.
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor, grace: 0.005)
+        try await encoder.start()
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let grace = 0.005
+        let nowForSlot1 = anchorSeconds + (1.5 / Double(testFps)) + grace + 0.001
+        await encoder.clockTick(nowSeconds: nowForSlot1)
+
+        // Tick-lag must remain zero — no deadline was provided.
+        let maxLag = await encoder.aggregatorTickLagMaxMs
+        #expect(maxLag == 0.0, "Single-arg clockTick must not record lag, got \(maxLag)")
     }
 
     // MARK: - #102 regression: beat-race fix
@@ -899,7 +962,8 @@ struct VideoEncoderTests {
             props[kVTCompressionPropertyKey_AllowFrameReordering as String],
             "AllowFrameReordering must be applied to the session"
         )
-        #expect(CFEqual(allowReorder, kCFBooleanTrue), "AllowFrameReordering must be true (B-frames)")
+        // B-frames disabled: reorder window pins NumberOfPendingFrames ≥ 4, hitting the backpressure gate (#112).
+        #expect(CFEqual(allowReorder, kCFBooleanFalse), "AllowFrameReordering must be false")
 
         let profileLevel = try #require(
             props[kVTCompressionPropertyKey_ProfileLevel as String],

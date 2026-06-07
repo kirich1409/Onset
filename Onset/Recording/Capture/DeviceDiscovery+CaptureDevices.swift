@@ -12,6 +12,17 @@ nonisolated private let discoveryDeviceLogger = Logger(
 // MARK: - Camera enumeration
 
 extension DeviceDiscovery {
+    /// The `AVCaptureDevice.DeviceType` values that identify camera devices on macOS 26.
+    ///
+    /// Covers built-in wide-angle, USB/Thunderbolt external, and Continuity Camera sources.
+    /// Shared between `cameras(cameraAuthorized:)` and tests that build a discovery session
+    /// for name matching so the two never diverge.
+    nonisolated static let cameraDeviceTypes: [AVCaptureDevice.DeviceType] = [
+        .builtInWideAngleCamera,
+        .external,
+        .continuityCamera,
+    ]
+
     /// Enumerates all connected camera devices.
     ///
     /// Queries `AVCaptureDevice.DiscoverySession` for the three macOS 26 video types:
@@ -29,11 +40,7 @@ extension DeviceDiscovery {
         }
 
         let session = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [
-                .builtInWideAngleCamera,
-                .external,
-                .continuityCamera,
-            ],
+            deviceTypes: Self.cameraDeviceTypes,
             mediaType: .video,
             position: .unspecified
         )

@@ -103,7 +103,7 @@ Key integration points:
 
 6. **Two-tier UX.** Базовый экран — read-only дефолт-профиль (zero-config). Меню настроек (post-MVP) — редактор того же `RecordingConfiguration`; наполняется постепенно добавлением полей/опций в реестр без переписывания pipeline.
 
-7. **Дефолт кодека — HEVC Main 8-bit Rec.709 CFR, контейнер .mp4 (hvc1)**, VBR + peak-cap, B-кадры on, `RealTime=true`, `ProfileLevel = HEVC_Main_AutoLevel`, `movieFragmentInterval` (устойчивость к крашу). ProRes/H.264 — опции настроек post-MVP (+ ProRes как probe-fallback при нехватке encode-движка).
+7. **Дефолт кодека — HEVC Main 8-bit Rec.709 CFR, контейнер .mp4 (hvc1)**, VBR + peak-cap, B-кадры off (`AllowFrameReordering=false` — reorder window фиксирует `NumberOfPendingFrames` ≥ 4, структурно достигая backpressure gate; #112), `RealTime=true`, `ProfileLevel = HEVC_Main_AutoLevel`, `movieFragmentInterval` (устойчивость к крашу). ProRes/H.264 — опции настроек post-MVP (+ ProRes как probe-fallback при нехватке encode-движка).
 
 8. **CapabilityProbe** — на старте: тестовый `VTCompressionSession` с `RequireHardwareAcceleratedVideoEncoder` + read-back `UsingHardwareAcceleratedVideoEncoder`. Питает Degraded-состояние. Точные пороги/тиры деградации в MVP НЕ зашиваются (калибруются на железе post-MVP).
 
