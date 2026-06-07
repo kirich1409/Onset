@@ -250,8 +250,8 @@ struct RecordingContentView: View {
                 }
                 .frame(maxWidth: .infinity)
                 .frame(height: Metrics.stopButtonHeight)
-                .foregroundStyle(Color(nsColor: .windowBackgroundColor))
-                .background(Color.primary)
+                .foregroundStyle(Color.white)
+                .background(Color("StopButtonBackground"))
                 .clipShape(RoundedRectangle(cornerRadius: Metrics.stopButtonCornerRadius))
             }
         )
