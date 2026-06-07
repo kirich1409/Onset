@@ -123,8 +123,7 @@ struct MainView: View {
     private func resolvedAlert() -> PostStopAlert? {
         PostStopAlert.resolve(
             writeError: self.model.coordinator.lastWriteError,
-            degraded: self.model.coordinator.lastDegradedWarning,
-            droppedFrames: self.model.coordinator.drops.encoderBackpressureDrops
+            droppedFrames: self.model.coordinator.lastDroppedFrames
         )
     }
 
@@ -141,10 +140,10 @@ struct MainView: View {
                 }
             )
 
-        case let .degradedWarning(droppedFrames):
+        case .degradedWarning:
             Alert(
                 title: Text("Запись завершена"),
-                message: Text(RussianPluralForm.droppedFrames(count: droppedFrames)),
+                message: Text(alert.message),
                 dismissButton: .default(Text("ОК")) {
                     self.model.coordinator.acknowledgeDegradedWarning()
                     self.pendingAlert = nil
@@ -321,15 +320,14 @@ struct CameraPreviewRepresentable: NSViewRepresentable {
 /// `degradedWarning` carries the session's encoder-backpressure drop count so the alert can
 /// display "Пропущено N кадров — возможны рывки." (AC-9).
 ///
-/// Priority ordering is enforced by `resolve(writeError:degraded:droppedFrames:)`: write-error
+/// Priority ordering is enforced by `resolve(writeError:droppedFrames:)`: write-error
 /// supersedes degraded-warning because a failed write means the file was not saved (higher severity).
 enum PostStopAlert: Identifiable {
     case writeError(reason: String)
     /// Post-stop warning shown when the session's encoder-backpressure drop count exceeds zero.
     ///
-    /// `droppedFrames` is `RecordingResult.drops.encoderBackpressureDrops` captured at stop time.
-    /// The value is frozen — `RecordingCoordinator.drops` resets only on the next `start()`, so
-    /// reading it before `acknowledgeDegradedWarning()` is safe.
+    /// `droppedFrames` is `RecordingCoordinator.lastDroppedFrames` — frozen at stop time,
+    /// reset to 0 in `acknowledgeDegradedWarning()` and on every `start()`.
     case degradedWarning(droppedFrames: Int)
 
     var id: String {
@@ -347,15 +345,28 @@ enum PostStopAlert: Identifiable {
     ///
     /// - Parameters:
     ///   - writeError:    Human-readable write-failure reason, or `nil` when the file was saved.
-    ///   - degraded:      `true` when the finished session had encoder-backpressure drops.
-    ///   - droppedFrames: `RecordingResult.drops.encoderBackpressureDrops` at stop time.
-    nonisolated static func resolve(writeError: String?, degraded: Bool, droppedFrames: Int) -> Self? {
+    ///   - droppedFrames: `RecordingCoordinator.lastDroppedFrames` at call time — a non-zero value
+    ///                    means the session had encoder-backpressure drops and the warning is shown.
+    nonisolated static func resolve(writeError: String?, droppedFrames: Int) -> Self? {
         if let reason = writeError {
             return .writeError(reason: reason)
         }
-        if degraded {
+        if droppedFrames > 0 {
             return .degradedWarning(droppedFrames: droppedFrames)
         }
         return nil
+    }
+
+    /// Localized message for the `.degradedWarning` alert body (AC-9).
+    ///
+    /// Examples:
+    /// - `degradedWarning(droppedFrames: 1).message`  → "Пропущен 1 кадр — возможны рывки."
+    /// - `degradedWarning(droppedFrames: 2).message`  → "Пропущено 2 кадра — возможны рывки."
+    /// - `degradedWarning(droppedFrames: 5).message`  → "Пропущено 5 кадров — возможны рывки."
+    nonisolated var message: String {
+        guard case let .degradedWarning(count) = self else { return "" }
+        let verb = RussianPluralForm.select(count: count, one: "Пропущен", few: "Пропущено", many: "Пропущено")
+        let noun = RussianPluralForm.select(count: count, one: "кадр", few: "кадра", many: "кадров")
+        return "\(verb) \(count) \(noun) — возможны рывки."
     }
 }
