@@ -156,11 +156,13 @@ final class RecordingCoordinator {
 
     /// `true` when the most recent finished session had encoder-backpressure drops (AC-9 warning).
     /// Derived from `lastDroppedFrames` — single source of truth, no lockstep pair needed.
-    var lastDegradedWarning: Bool { self.lastDroppedFrames > 0 }
+    var lastDegradedWarning: Bool {
+        self.lastDroppedFrames > 0
+    }
 
     /// Encoder-backpressure drop count from the most recent finished session, frozen at stop time.
     /// Reset to 0 in `acknowledgeDegradedWarning()` and cleared on every `start()`.
-    private(set) var lastDroppedFrames: Int = 0
+    private(set) var lastDroppedFrames = 0
 
     /// Non-nil when the most recent session had a hard write failure (e.g. disk full). Contains
     /// the human-readable reason for the error alert. Distinct from `lastDegradedWarning` — a
