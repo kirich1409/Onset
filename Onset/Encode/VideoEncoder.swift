@@ -233,6 +233,9 @@ actor VideoEncoder {
     ///   - anchor: Session T0. Defaults to `HostTimeAnchor.now()` for standalone use until
     ///     `RecordingSession` (#34) injects a shared anchor.
     ///   - maxPendingFrames: Backpressure bound. Default 4 (≈ a few frames of slack at 30–60fps).
+    ///     With `allowFrameReordering=false` (production default since issue #104) the encoder's
+    ///     steady-state pending depth is ≤2, so 4 is a conservative headroom bound rather than a
+    ///     tight calibration against the B-frame reorder window.
     ///   - grace: Source-silence threshold in seconds — the clock waits this long after a slot's
     ///     midpoint before synthesising a hold. `nil` (default) derives the value from fps via
     ///     `defaultGrace(fps:)` (2 slots, floored at 5 ms). Pass an explicit value only when
