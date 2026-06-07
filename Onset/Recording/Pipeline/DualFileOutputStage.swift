@@ -119,14 +119,14 @@ actor DualFileOutputStage {
     ///   - writerFactory: Builds writers lazily from `(kind, sourceFormatHint, includeAudio)`.
     ///   - onWriterCreated: Registers a new writer's `drops` channel with `DropMonitor`.
     ///   - onAllWritersFaulted: Called when every live writer has faulted — expected to stop the
-    ///     session immediately. Defaults to a no-op so existing tests need no changes.
+    ///     session immediately.
     init(
         sessionT0: CMTime,
         expectedPipelines: Set<RecordingPipelineKind>,
         includeAudio: Bool,
         writerFactory: any WriterFactory,
         onWriterCreated: @escaping @Sendable (any WriterControlling) async -> Void,
-        onAllWritersFaulted: @escaping @Sendable () async -> Void = {}
+        onAllWritersFaulted: @escaping @Sendable () async -> Void
     ) {
         self.sessionT0 = sessionT0
         self.expectedKinds = expectedPipelines
@@ -250,8 +250,12 @@ actor DualFileOutputStage {
         let buf = sample.sampleBuffer
         let curFmt = CMSampleBufferGetFormatDescription(buf)
 
+        guard self.includeAudio else { return }
+
         // Permanent canary: after the Commit-1 LPCM fix the audio format must not change
         // mid-stream. A change means the fix regressed or a new device sends variable formats.
+        // Placed after the includeAudio guard: when audio is disabled there is no writer to
+        // fault, so the comparison is irrelevant and skipped entirely.
         // `unsafe`: CMAudioFormatDescriptionGetStreamBasicDescription returns UnsafePointer;
         // SWIFT_STRICT_MEMORY_SAFETY = YES requires the annotation at call sites (#105 pattern).
         let fmtChanged = if let prev = self.audioPrevFmtDesc, let cur = curFmt {
@@ -293,9 +297,9 @@ actor DualFileOutputStage {
                 "Audio format changed mid-stream (#105 regression): prev rate=\(prevRate, privacy: .public) ch=\(prevCh, privacy: .public) bits=\(prevBits, privacy: .public) flags=\(prevFlags, privacy: .public) bpf=\(prevBpf, privacy: .public) → cur rate=\(curRate, privacy: .public) ch=\(curCh, privacy: .public) bits=\(curBits, privacy: .public) flags=\(curFlags, privacy: .public) bpf=\(curBpf, privacy: .public)"
             )
         }
-        self.audioPrevFmtDesc = curFmt
-
-        guard self.includeAudio else { return }
+        // Update baseline only when curFmt is non-nil: a nil format description (degenerate
+        // buffer) must not reset the baseline and mask the next real format change.
+        if let curFmt { self.audioPrevFmtDesc = curFmt }
 
         guard let retimed = self.retime(sample) else {
             // Retiming failed (degenerate buffer) — drop this sample rather than write a

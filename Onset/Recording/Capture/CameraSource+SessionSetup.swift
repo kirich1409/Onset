@@ -204,6 +204,12 @@ extension CameraSource {
                 sampleRate: self.config.audioSampleRate,
                 channelCount: self.config.audioChannelCount
             )
+            // Log the actually-applied settings: AVCaptureAudioDataOutput.audioSettings is a
+            // best-effort API — the framework may ignore or adjust the requested values.
+            // .debug: stripped in release builds; safe to log the full dict at this level.
+            cameraSourceLogger.debug(
+                "Audio output settings applied: \(String(describing: audioOutput.audioSettings), privacy: .public)"
+            )
             guard session.canAddOutput(audioOutput) else {
                 cameraSourceLogger.error("Cannot add audio data output to session")
                 throw RecordingError.captureSetupFailed(CameraSourceError.cannotAddAudioOutput)
