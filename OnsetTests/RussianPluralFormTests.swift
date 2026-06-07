@@ -82,4 +82,22 @@ struct RussianPluralFormSelectTests {
         let result = RussianPluralForm.select(count: 112, one: "кадр", few: "кадра", many: "кадров")
         #expect(result == "кадров")
     }
+
+    @Test("13 → many form (teen exception: ends in 3 but also in 13)")
+    func count13_selectsMany() {
+        let result = RussianPluralForm.select(count: 13, one: "кадр", few: "кадра", many: "кадров")
+        #expect(result == "кадров")
+    }
+
+    @Test("14 → many form (teen exception: ends in 4 but also in 14)")
+    func count14_selectsMany() {
+        let result = RussianPluralForm.select(count: 14, one: "кадр", few: "кадра", many: "кадров")
+        #expect(result == "кадров")
+    }
+
+    @Test("113 → many form (teen exception: ends in 13)")
+    func count113_selectsMany() {
+        let result = RussianPluralForm.select(count: 113, one: "кадр", few: "кадра", many: "кадров")
+        #expect(result == "кадров")
+    }
 }

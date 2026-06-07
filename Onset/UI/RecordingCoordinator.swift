@@ -154,13 +154,12 @@ final class RecordingCoordinator {
     /// stop completes.
     private(set) var lastResult: RecordingResult?
 
-    /// `true` when the most recent finished session carried enough backpressure drops to warrant the
-    /// AC-9 warning. Computed from `RecordingResult.degradedWarning` on stop.
-    private(set) var lastDegradedWarning = false
+    /// `true` when the most recent finished session had encoder-backpressure drops (AC-9 warning).
+    /// Derived from `lastDroppedFrames` — single source of truth, no lockstep pair needed.
+    var lastDegradedWarning: Bool { self.lastDroppedFrames > 0 }
 
     /// Encoder-backpressure drop count from the most recent finished session, frozen at stop time.
     /// Reset to 0 in `acknowledgeDegradedWarning()` and cleared on every `start()`.
-    /// Pair with `lastDegradedWarning` — both are set/cleared in lockstep.
     private(set) var lastDroppedFrames: Int = 0
 
     /// Non-nil when the most recent session had a hard write failure (e.g. disk full). Contains
@@ -303,10 +302,9 @@ final class RecordingCoordinator {
         self.phase = .main
     }
 
-    /// Clears `lastDegradedWarning` and `lastDroppedFrames` after the user has acknowledged the alert
-    /// (AC-9). Called by `MainView` on dismiss so the flags do not persist across subsequent recordings.
+    /// Clears `lastDroppedFrames` (and thereby `lastDegradedWarning`) after the user has acknowledged
+    /// the alert (AC-9). Called by `MainView` on dismiss so the state does not persist across sessions.
     func acknowledgeDegradedWarning() {
-        self.lastDegradedWarning = false
         self.lastDroppedFrames = 0
     }
 
@@ -350,8 +348,7 @@ final class RecordingCoordinator {
         // Every source starts live; a graceful revoke (AC-12) flips the affected one(s) during the session.
         self.sourceLiveness = .allLive
         self.isStopping = false
-        // Reset per-session warning flags — structural invariant: every new session starts clean.
-        self.lastDegradedWarning = false
+        // Reset per-session drop counter (drives lastDegradedWarning) — structural invariant: clean start.
         self.lastDroppedFrames = 0
         self.lastWriteError = nil
         self.phase = .recording
@@ -423,7 +420,6 @@ final class RecordingCoordinator {
 
     // MARK: - Stop (AC-9) — funnel for all three stop paths
 
-    // swiftlint:disable function_body_length
     /// Stops the active recording. Funnel for the three stop paths (button / hotkey / menu —
     /// AC-9). Re-entrancy-guarded so the teardown (reveal, warning, phase transition) runs exactly
     /// once even under concurrent calls: `isStopping` is flipped synchronously before the first
@@ -453,7 +449,6 @@ final class RecordingCoordinator {
 
         self.lastResult = result
         self.drops = result.drops
-        self.lastDegradedWarning = result.degradedWarning
         self.lastDroppedFrames = result.drops.encoderBackpressureDrops
         self.lastWriteError = result.writeFailureReason
         self.session = nil
@@ -488,8 +483,6 @@ final class RecordingCoordinator {
             "Recording stopped — files=\(result.outputURLs.count) origin=\(String(describing: self.origin))"
         )
     }
-
-    // swiftlint:enable function_body_length
 
     // MARK: - Global hotkey (#67 / AC-9 third stop path)
 

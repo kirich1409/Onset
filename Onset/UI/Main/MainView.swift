@@ -83,7 +83,10 @@ struct MainView: View {
         // Write-error supersedes degraded-warning (both can be true simultaneously when
         // the writer fails under heavy backpressure). Priority is enforced in `resolvedAlert`.
         .onAppear {
-            self.pendingAlert = self.resolvedAlert()
+            // Guard prevents a repeated appear (e.g. window re-focus) from overwriting an active alert.
+            if self.pendingAlert == nil {
+                self.pendingAlert = self.resolvedAlert()
+            }
             // Install menu-bar record intent while the main window is visible (#38).
             // [weak model] prevents a retain cycle: coordinator ← closure ← model,
             // while model also holds coordinator.
@@ -106,10 +109,9 @@ struct MainView: View {
                 self.pendingAlert = alert
             }
         }
-        .onChange(of: self.model.coordinator.lastDegradedWarning) { _, newValue in
-            if newValue, self.pendingAlert == nil {
-                self.pendingAlert = self.resolvedAlert()
-            }
+        .onChange(of: self.model.coordinator.lastDroppedFrames) { _, newValue in
+            guard newValue > 0, self.pendingAlert == nil else { return }
+            self.pendingAlert = self.resolvedAlert()
         }
         .alert(item: self.$pendingAlert) { alert in
             self.makeAlert(for: alert)
@@ -128,6 +130,9 @@ struct MainView: View {
     }
 
     /// Builds the `Alert` for a given `PostStopAlert` case.
+    ///
+    /// Write-error dismiss chains to `resolvedAlert()` to surface any pending degraded-warning
+    /// that was suppressed by the higher-priority write-error (Фикс 2: потеря второго алерта).
     private func makeAlert(for alert: PostStopAlert) -> Alert {
         switch alert {
         case let .writeError(reason):
@@ -136,7 +141,10 @@ struct MainView: View {
                 message: Text(reason),
                 dismissButton: .default(Text("ОК")) {
                     self.model.coordinator.acknowledgeWriteError()
-                    self.pendingAlert = nil
+                    // Chain to the next pending alert (degradedWarning if lastDroppedFrames > 0,
+                    // nil otherwise). Without this, onChange never re-fires for an unchanged
+                    // lastDroppedFrames, so the degraded-warning alert would be lost.
+                    self.pendingAlert = self.resolvedAlert()
                 }
             )
 
@@ -146,7 +154,9 @@ struct MainView: View {
                 message: Text(alert.message),
                 dismissButton: .default(Text("ОК")) {
                     self.model.coordinator.acknowledgeDegradedWarning()
-                    self.pendingAlert = nil
+                    // resolvedAlert() returns nil here (lastDroppedFrames is 0 after acknowledge);
+                    // explicit assignment keeps the dismiss path symmetrical with writeError.
+                    self.pendingAlert = self.resolvedAlert()
                 }
             )
         }

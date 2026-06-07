@@ -325,6 +325,7 @@ struct RecordingCoordinatorTests {
         await coordinator.stop()
 
         #expect(coordinator.lastDegradedWarning == true, "degradedWarning must come from the result")
+        #expect(coordinator.lastDroppedFrames == 128, "lastDroppedFrames must be the frozen snapshot from stop()")
         #expect(coordinator.drops.encoderBackpressureDrops == 128, "final drops come from the result")
     }
 
@@ -420,10 +421,12 @@ struct RecordingCoordinatorTests {
         await coordinator.stop()
 
         #expect(coordinator.lastDegradedWarning == true, "flag must be true after a degraded stop")
+        #expect(coordinator.lastDroppedFrames == 64, "lastDroppedFrames must hold the frozen snapshot from stop()")
 
-        // Acknowledge: flag must clear.
+        // Acknowledge: flag and counter must clear.
         coordinator.acknowledgeDegradedWarning()
         #expect(coordinator.lastDegradedWarning == false, "flag must be false after acknowledgeDegradedWarning()")
+        #expect(coordinator.lastDroppedFrames == 0, "lastDroppedFrames must be 0 after acknowledgeDegradedWarning()")
 
         // --- Session 2 on the SAME coordinator: clean result must not carry flag forward ---
         // This exercises the FIX 2 reset in start(): lastDegradedWarning must be false at the
@@ -433,6 +436,7 @@ struct RecordingCoordinatorTests {
 
         // The flag must be false — same coordinator, so FIX 2 reset in start() is exercised.
         #expect(coordinator.lastDegradedWarning == false, "no stale degraded flag on same-instance second session")
+        #expect(coordinator.lastDroppedFrames == 0, "lastDroppedFrames must be 0 after clean second session")
     }
 
     @Test("stop with write-failed result sets lastWriteError; acknowledge clears it")
