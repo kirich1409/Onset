@@ -365,18 +365,11 @@ actor FileWriter {
         // diagnostic for #105: one-shot first-append format summary to identify USB mic mismatches
         if self.firstAudioAppendPending {
             self.firstAudioAppendPending = false
-            var sampleRate = 0
-            var channelCount: UInt32 = 0
-            var formatID: UInt32 = 0
-            if let info = Self.audioFormatInfo(from: buffer) {
-                sampleRate = info.sampleRate
-                channelCount = info.channelCount
-                formatID = info.formatID
-            }
-            let fmtTag = Self.fourCC(formatID)
+            let info = Self.audioFormatInfo(from: buffer)
+            let fmtTag = Self.fourCC(info?.formatID ?? 0)
             self.logger.notice(
                 // swiftlint:disable:next line_length
-                "first audio append: rate=\(sampleRate, privacy: .public) ch=\(channelCount, privacy: .public) fmt=\(fmtTag, privacy: .public) pts=\(Self.secStr(audioPTS), privacy: .public)s t0=\(Self.secStr(self.sessionSourceTime), privacy: .public)s"
+                "first audio append: rate=\(info?.sampleRate ?? 0, privacy: .public) ch=\(info?.channelCount ?? 0, privacy: .public) fmt=\(fmtTag, privacy: .public) pts=\(Self.secStr(audioPTS), privacy: .public)s t0=\(Self.secStr(self.sessionSourceTime), privacy: .public)s"
             )
         }
     }
@@ -428,14 +421,14 @@ actor FileWriter {
 
     // MARK: - Helpers
 
-    /// Extracts sample rate, channel count, and format ID from a `CMSampleBuffer`'s ASBD.
-    /// Returns `nil` when no format description is available — diagnostic for #105.
     private struct AudioFormatInfo {
         let sampleRate: Int
         let channelCount: UInt32
         let formatID: UInt32
     }
 
+    /// Extracts sample rate, channel count, and format ID from a `CMSampleBuffer`'s ASBD.
+    /// Returns `nil` when no format description is available — diagnostic for #105.
     private static func audioFormatInfo(from buffer: CMSampleBuffer) -> AudioFormatInfo? {
         guard let fmtDesc = CMSampleBufferGetFormatDescription(buffer) else { return nil }
         guard let asbd = unsafe CMAudioFormatDescriptionGetStreamBasicDescription(fmtDesc) else {
@@ -466,24 +459,15 @@ actor FileWriter {
 
     /// Renders a CoreAudio FourCC `UInt32` as a 4-character ASCII tag (e.g. `lpcm`).
     /// Falls back to hex if any byte is outside printable ASCII — diagnostic for #105.
-    private static func fourCC(_ code: UInt32) -> String {
-        // Named constants to satisfy no_magic_numbers: byte positions and printable ASCII range.
-        let shift3: UInt32 = 24
-        let shift2: UInt32 = 16
-        let shift1: UInt32 = 8
-        let byteMask: UInt32 = 0xFF
-        let asciiPrintableMin: UInt8 = 32
-        let asciiPrintableMax: UInt8 = 127
-        let hexRadix = 16
-        let byte0 = UInt8((code >> shift3) & byteMask)
-        let byte1 = UInt8((code >> shift2) & byteMask)
-        let byte2 = UInt8((code >> shift1) & byteMask)
-        let byte3 = UInt8(code & byteMask)
-        let bytes = [byte0, byte1, byte2, byte3]
-        guard bytes.allSatisfy({ $0 >= asciiPrintableMin && $0 < asciiPrintableMax }) else {
-            return String(code, radix: hexRadix)
+    /// `internal` (not `private`) so tests can reuse it directly.
+    static func fourCC(_ code: UInt32) -> String {
+        // swiftlint:disable no_magic_numbers
+        let bytes = [24, 16, 8, 0].map { UInt8((code >> $0) & 0xFF) }
+        guard bytes.allSatisfy({ $0 >= 32 && $0 < 127 }) else {
+            return String(code, radix: 16)
         }
-        return String(bytes: bytes, encoding: .ascii) ?? String(code, radix: hexRadix)
+        return String(bytes: bytes, encoding: .ascii) ?? String(code, radix: 16)
+        // swiftlint:enable no_magic_numbers
     }
 
     // MARK: - Finish

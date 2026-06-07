@@ -673,9 +673,11 @@ struct FileWriterLiveTests {
         // The encoder's compressed format subtype (hvc1 or hev1) must round-trip through
         // the passthrough muxer unchanged. Both are valid HEVC-in-MP4 tags.
         let encoderSubType = CMFormatDescriptionGetMediaSubType(formatHint)
+        let encoderTag = FileWriter.fourCC(encoderSubType)
+        let fileTag = FileWriter.fourCC(mediaSubType)
         #expect(
             mediaSubType == encoderSubType,
-            "expected subtype \(fourCC(encoderSubType)) from encoder, got \(fourCC(mediaSubType)) in file"
+            "expected subtype \(encoderTag) from encoder, got \(fileTag) in file"
         )
     }
 
@@ -741,19 +743,6 @@ struct FileWriterLiveTests {
         )
         #expect(CMTimeCompare(interval, expected) == 0)
     }
-}
-
-// MARK: - Helpers
-
-/// Renders a FourCC `UInt32` as a human-readable 4-character string for assertion messages.
-private func fourCC(_ value: FourCharCode) -> String {
-    let bytes: [UInt8] = [
-        UInt8((value >> 24) & 0xFF),
-        UInt8((value >> 16) & 0xFF),
-        UInt8((value >> 8) & 0xFF),
-        UInt8(value & 0xFF),
-    ]
-    return String(bytes: bytes, encoding: .ascii) ?? "????"
 }
 
 // swiftlint:enable no_magic_numbers
