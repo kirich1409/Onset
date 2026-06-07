@@ -253,6 +253,11 @@ private final class SessionFakeWriter: WriterControlling, @unchecked Sendable {
         self.appendedAudio += 1
     }
 
+    func simulateFault() {
+        self.faultsContinuation.yield(())
+        self.faultsContinuation.finish()
+    }
+
     func markFinished() {
         self.markFinishedCalled = true
         self.dropsContinuation.finish()
@@ -1280,6 +1285,42 @@ struct RecordingSessionLiveTests {
             count += 1
         }
         return count
+    }
+}
+
+// MARK: - Fail-fast on writer fault (AC-13 / #105)
+
+@Suite("RecordingSession — fail-fast on writer fault")
+struct RecordingSessionFaultTests {
+    @Test("all writers faulted mid-recording → session stops itself")
+    func allWritersFaultedMidRecording_sessionStopsItself() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(
+            encoders: encoders,
+            writers: writers,
+            sources: sources,
+            probe: probe.callable()
+        )
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+
+        // Drive one sample per pipeline so both writers are created.
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.bothWritersCreated }
+
+        // Fault both writers — the session's onAllWritersFaulted callback calls stop().
+        writers.screenWriter.simulateFault()
+        writers.cameraWriter.simulateFault()
+
+        // Session must stop itself without an explicit session.stop() call.
+        let stopped = await eventually {
+            sources.screenSource.stopCalled && sources.cameraSource.stopCalled
+        }
+        #expect(stopped, "session must stop all sources when all writers fault")
     }
 }
 

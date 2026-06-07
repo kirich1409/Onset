@@ -556,6 +556,33 @@ struct DualFileOutputStageFaultTests {
         #expect(callbackFired, "onAllWritersFaulted must fire when all writers are faulted")
     }
 
+    // MARK: Only the created writer faults (second not yet created) → callback fires
+
+    @Test("fault of the only CREATED writer, second not yet created → callback fires")
+    func onlyCreatedWriterFaults_secondNotYetCreated_callbackFires() async throws {
+        let factory = FakeWriterFactory()
+        final class Box: @unchecked Sendable { var value = false }
+        let box = Box()
+
+        // Both .screen and .camera are expected, but only .screen will be created.
+        let stage = makeStage(
+            factory: factory,
+            expected: [.screen, .camera],
+            includeAudio: false
+        ) { box.value = true }
+
+        // Route a video sample only for .screen — camera writer is never created.
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
+
+        // Fault the only created writer. liveKinds = created writers (not expectedPipelines),
+        // so one created writer faulting satisfies the "all live writers faulted" condition.
+        factory.screenWriter.simulateFault()
+
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        #expect(box.value, "onAllWritersFaulted must fire when the only created writer faults")
+    }
+
     // MARK: Only one writer faults → callback does NOT fire
 
     @Test("one of two writers faulted → onAllWritersFaulted is NOT called")

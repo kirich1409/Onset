@@ -395,6 +395,70 @@ struct FileWriterDropTests {
         let faulted = await writer.isFaultedForTesting
         #expect(faulted, "append()==false must mark the writer faulted")
     }
+
+    @Test("append()==false → faults emits exactly one value, then finishes")
+    func appendReturnsFalse_faultsEmitsOne() async throws {
+        try FileManager.default.createDirectory(at: self.tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: self.tempDir) }
+
+        let url = self.tempDir.appending(path: "test-faults-one.mp4")
+        let hint = try makeHEVCFormatDescription()
+        let writer = try FileWriter(
+            outputURL: url,
+            configuration: .mvpDefault,
+            includeAudio: false,
+            sourceFormatHint: hint
+        )
+
+        let stub = StubWriterInput(ready: true, appendReturnValue: false)
+        await writer.injectVideoInputForTesting(stub)
+
+        // Collect every value emitted by the faults stream. The stream self-terminates
+        // after the first fault (yield + finish), so the task exits naturally.
+        let faultsCollector = Task { () -> [Void] in
+            var values: [Void] = []
+            for await _ in writer.faults {
+                values.append(())
+            }
+            return values
+        }
+
+        let sample = try self.makeEncodedSample(ptsSeconds: 1.0)
+        await writer.appendVideo(sample)
+
+        let values = await faultsCollector.value
+        #expect(values.count == 1, "faults must emit exactly one value on first append failure")
+    }
+
+    @Test("markFinished() → faults finishes WITHOUT emitting a value")
+    func markFinished_faultsFinishesWithoutYield() async throws {
+        try FileManager.default.createDirectory(at: self.tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: self.tempDir) }
+
+        let url = self.tempDir.appending(path: "test-faults-empty.mp4")
+        let hint = try makeHEVCFormatDescription()
+        let writer = try FileWriter(
+            outputURL: url,
+            configuration: .mvpDefault,
+            includeAudio: false,
+            sourceFormatHint: hint
+        )
+
+        // Collect from faults before calling markFinished so we don't miss any early yield.
+        let faultsCollector = Task { () -> [Void] in
+            var values: [Void] = []
+            for await _ in writer.faults {
+                values.append(())
+            }
+            return values
+        }
+
+        // markFinished() calls faultsContinuation.finish() without yield — graceful teardown.
+        await writer.markFinished()
+
+        let values = await faultsCollector.value
+        #expect(values.isEmpty, "markFinished must not emit a fault value — graceful finish only")
+    }
 }
 
 // MARK: - FileWriterAudioTests (L2, stub seam)
