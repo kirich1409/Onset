@@ -1,5 +1,12 @@
 import os
 
+// file_length and type_body_length are disabled: StageRateAggregator is a single-concern
+// pure value type whose line count grew with the new duration and delivery-gap accumulators.
+// Splitting it would require either a second file for the same struct (awkward) or refactoring
+// into sub-types that obscure the flush-line contract. The struct remains cohesive.
+// swiftlint:disable file_length
+// swiftlint:disable type_body_length
+
 // MARK: - TelemetryStage
 
 /// The stage within a recording pipeline that owns a `StageRateAggregator`.
@@ -58,9 +65,9 @@ nonisolated struct StageRateAggregator {
 
     // MARK: - Clock-health accumulators (encoder only)
 
-    // Tick lag: actual-vs-deadline gap at each clockTick call.
+    // Tick lag: wake-up latency vs. targeted deadline at each clockTick call.
     private var tickLagSumMs = 0.0
-    private var tickLagMaxMs = 0.0
+    private var tickLagMaxMsAccum = 0.0
     private var tickLagSamples = 0
 
     /// Maximum catch-up batch size observed in this window.
@@ -68,6 +75,33 @@ nonisolated struct StageRateAggregator {
 
     /// Count of catch-up batches that were capped short (real frame deferred) in this window.
     private var capOverflow = 0
+
+    // MARK: - Duration accumulators (encoder only)
+
+    // VTCompressionSession encode call duration.
+    private var encMsSumMs = 0.0
+    private var encMsMaxMs = 0.0
+    private var encMsSamples = 0
+
+    // pendingFrameCount() query duration.
+    private var pendMsSumMs = 0.0
+    private var pendMsMaxMs = 0.0
+    private var pendMsSamples = 0
+
+    /// Maximum pending frame count observed in a window (snapshot at each submit call).
+    private var pendingMax = 0
+
+    // Frame ingest (full ingest() body) duration.
+    private var ingMsSumMs = 0.0
+    private var ingMsMaxMs = 0.0
+    private var ingMsSamples = 0
+
+    // MARK: - Delivery-gap accumulators (capture stage only)
+
+    // Camera inter-arrival gap (host-time delta between consecutive captureOutput callbacks).
+    private var gapMsSumMs = 0.0
+    private var gapMsMaxMs = 0.0
+    private var gapMsSamples = 0
 
     // MARK: - Init
 
@@ -140,14 +174,15 @@ nonisolated struct StageRateAggregator {
 
     // MARK: - Increment API (clock health, encoder stage)
 
-    /// Records the measured lag between the current time and the expected deadline at a
-    /// `clockTick(nowSeconds:)` call.
+    /// Records the wake-up latency vs. the targeted deadline at a `clockTick` call.
     ///
-    /// - Parameter lagMs: `|now − deadline| * 1000`. Always non-negative.
+    /// The lag is `max(0, now − targetDeadline) * 1000`: how many milliseconds after the
+    /// targeted absolute deadline the encoder loop actually woke up. Zero on early wakes.
+    /// - Parameter lagMs: Wake-up latency in milliseconds. Always non-negative.
     mutating func recordTickLag(lagMs: Double) {
         self.tickLagSumMs += lagMs
-        if lagMs > self.tickLagMaxMs {
-            self.tickLagMaxMs = lagMs
+        if lagMs > self.tickLagMaxMsAccum {
+            self.tickLagMaxMsAccum = lagMs
         }
         self.tickLagSamples += 1
     }
@@ -164,6 +199,54 @@ nonisolated struct StageRateAggregator {
     /// because the hold count reached `holdCapSlots` (encoder only).
     mutating func recordCapOverflow() {
         self.capOverflow += 1
+    }
+
+    // MARK: - Duration API (encoder stage)
+
+    /// Records the wall-clock duration of a `VTCompressionSessionEncodeFrame` call.
+    ///
+    /// - Parameter durationMs: Duration in milliseconds.
+    mutating func recordEncodeCall(durationMs: Double) {
+        self.encMsSumMs += durationMs
+        if durationMs > self.encMsMaxMs { self.encMsMaxMs = durationMs }
+        self.encMsSamples += 1
+    }
+
+    /// Records the wall-clock duration of a `pendingFrameCount()` query.
+    ///
+    /// - Parameter durationMs: Duration in milliseconds.
+    mutating func recordPendingQuery(durationMs: Double) {
+        self.pendMsSumMs += durationMs
+        if durationMs > self.pendMsMaxMs { self.pendMsMaxMs = durationMs }
+        self.pendMsSamples += 1
+    }
+
+    /// Records a snapshot of the current pending frame count; updates the per-window maximum.
+    ///
+    /// - Parameter count: The value returned by `pendingFrameCount()`.
+    mutating func recordPendingValue(_ count: Int) {
+        if count > self.pendingMax { self.pendingMax = count }
+    }
+
+    /// Records the wall-clock duration of the full `ingest(_:)` call.
+    ///
+    /// - Parameter durationMs: Duration in milliseconds.
+    mutating func recordIngest(durationMs: Double) {
+        self.ingMsSumMs += durationMs
+        if durationMs > self.ingMsMaxMs { self.ingMsMaxMs = durationMs }
+        self.ingMsSamples += 1
+    }
+
+    // MARK: - Delivery-gap API (capture stage)
+
+    /// Records the inter-arrival gap between two consecutive camera delivery callbacks.
+    ///
+    /// Computed from the host-time PTS delta. Called once per delivered frame (not per drop).
+    /// - Parameter durationMs: Gap duration in milliseconds (must be non-negative).
+    mutating func recordDeliveryGap(durationMs: Double) {
+        self.gapMsSumMs += durationMs
+        if durationMs > self.gapMsMaxMs { self.gapMsMaxMs = durationMs }
+        self.gapMsSamples += 1
     }
 
     // MARK: - Episode tracking API (writer stage)
@@ -198,6 +281,12 @@ nonisolated struct StageRateAggregator {
         self.capOverflow
     }
 
+    /// The maximum tick-lag observed since the last flush, in milliseconds.
+    /// Exposed for L2 tests that verify the fixed tick-lag semantics.
+    var tickLagMaxMs: Double {
+        self.tickLagMaxMsAccum
+    }
+
     // MARK: - Flush
 
     /// Returns a formatted telemetry line and resets all accumulators.
@@ -230,10 +319,13 @@ nonisolated struct StageRateAggregator {
         let freshRate = self.rate(self.fresh, over: elapsedSeconds)
         let dropRate = self.rate(self.didDrop, over: elapsedSeconds)
         let overflowRate = self.rate(self.overflow, over: elapsedSeconds)
+        let gapAvg = self.gapMsSamples > 0 ? self.gapMsSumMs / Double(self.gapMsSamples) : 0.0
         let base = "lane=\(self.lane) stage=\(self.stage.rawValue)"
             + " fresh=\(self.fmt(freshRate))"
             + " didDrop=\(self.fmt(dropRate))"
             + " overflow=\(self.fmt(overflowRate))"
+            + " gap_ms_avg=\(self.fmt(gapAvg))"
+            + " gap_ms_max=\(self.fmt(self.gapMsMaxMs))"
         if self.lane == "screen" {
             return base
                 + " idle=\(self.fmt(self.rate(self.idle, over: elapsedSeconds)))"
@@ -245,6 +337,9 @@ nonisolated struct StageRateAggregator {
 
     private func encoderFlushLine(elapsedSeconds: Double) -> String {
         let lagAvg = self.tickLagSamples > 0 ? self.tickLagSumMs / Double(self.tickLagSamples) : 0.0
+        let encAvg = self.encMsSamples > 0 ? self.encMsSumMs / Double(self.encMsSamples) : 0.0
+        let pendAvg = self.pendMsSamples > 0 ? self.pendMsSumMs / Double(self.pendMsSamples) : 0.0
+        let ingAvg = self.ingMsSamples > 0 ? self.ingMsSumMs / Double(self.ingMsSamples) : 0.0
         return "lane=\(self.lane) stage=\(self.stage.rawValue)"
             + " fresh=\(self.fmt(self.rate(self.fresh, over: elapsedSeconds)))"
             + " didDrop=0"
@@ -257,9 +352,16 @@ nonisolated struct StageRateAggregator {
             + " emit_rate=\(self.fmt(self.rate(self.emitCount, over: elapsedSeconds)))"
             + " nominal=\(self.nominalFps)"
             + " tick_lag_ms_avg=\(self.fmt(lagAvg))"
-            + " tick_lag_ms_max=\(self.fmt(self.tickLagMaxMs))"
+            + " tick_lag_ms_max=\(self.fmt(self.tickLagMaxMsAccum))"
             + " catchup_max=\(self.catchupMax)"
             + " cap_overflow=\(self.capOverflow)"
+            + " enc_ms_avg=\(self.fmt(encAvg))"
+            + " enc_ms_max=\(self.fmt(self.encMsMaxMs))"
+            + " pend_ms_avg=\(self.fmt(pendAvg))"
+            + " pend_ms_max=\(self.fmt(self.pendMsMaxMs))"
+            + " pending_max=\(self.pendingMax)"
+            + " ing_ms_avg=\(self.fmt(ingAvg))"
+            + " ing_ms_max=\(self.fmt(self.ingMsMaxMs))"
             + " win_s=\(self.fmt(elapsedSeconds))"
     }
 
@@ -306,12 +408,27 @@ nonisolated struct StageRateAggregator {
         self.notReadyTotalMs = 0
         // episodeStart intentionally not reset — open episode spans flush windows.
         self.tickLagSumMs = 0
-        self.tickLagMaxMs = 0
+        self.tickLagMaxMsAccum = 0
         self.tickLagSamples = 0
         self.catchupMax = 0
         self.capOverflow = 0
+        self.encMsSumMs = 0
+        self.encMsMaxMs = 0
+        self.encMsSamples = 0
+        self.pendMsSumMs = 0
+        self.pendMsMaxMs = 0
+        self.pendMsSamples = 0
+        self.pendingMax = 0
+        self.ingMsSumMs = 0
+        self.ingMsMaxMs = 0
+        self.ingMsSamples = 0
+        self.gapMsSumMs = 0
+        self.gapMsMaxMs = 0
+        self.gapMsSamples = 0
     }
 }
+
+// swiftlint:enable type_body_length
 
 // MARK: - Telemetry logger
 

@@ -308,6 +308,12 @@ actor VideoEncoder {
         self.aggregator.capOverflowCount
     }
 
+    /// Test-only observation accessor; exposes the maximum tick-lag recorded since the last
+    /// flush. Used by L2 tests to verify the fixed tick-lag semantics (wake-up latency only).
+    var aggregatorTickLagMaxMs: Double {
+        self.aggregator.tickLagMaxMs
+    }
+
     /// Whether the active session uses a hardware encoder (false when not started).
     /// Drives the L5 HW assertion.
     var isUsingHardwareEncoder: Bool {
@@ -446,11 +452,16 @@ actor VideoEncoder {
                 guard let self else { return }
                 let remaining = await self.secondsUntilNextDeadline()
                 if let remaining {
+                    // Capture the absolute target deadline BEFORE sleeping so the lag
+                    // measurement reflects the actual wake-up latency, not any post-wake
+                    // grid advancement (which would report ~1 slot period on a healthy pipeline).
+                    let targetDeadlineSeconds = CMTimeGetSeconds(PipelineClock.currentHostTime()) + remaining
                     if remaining > 0 {
                         try? await Task.sleep(for: .seconds(remaining))
                     }
                     if Task.isCancelled { return }
-                    await self.clockTick()
+                    let nowSeconds = CMTimeGetSeconds(PipelineClock.currentHostTime())
+                    await self.clockTick(nowSeconds: nowSeconds, targetDeadlineSeconds: targetDeadlineSeconds)
                 } else {
                     // Grid not yet open — no real frame has arrived. Sleep one slot and retry
                     // rather than spinning. clockTick() would be a no-op here anyway.
@@ -520,30 +531,29 @@ actor VideoEncoder {
     ///   synchronously. The `pendingFrameCount` proxy cannot drain mid-batch, so holds beyond
     ///   `maxPendingFrames` receive a backpressure drop. Dropping stale holds after a stall is
     ///   consistent with the "atomic read-and-decide" contract and the cap bound.
-    func clockTick() {
-        let nowSeconds = CMTimeGetSeconds(PipelineClock.currentHostTime())
+    func clockTick(nowSeconds: Double, targetDeadlineSeconds: Double) {
+        // Wake-up latency: how far past the targeted deadline we actually woke up.
+        // max(0,…) clamps early wakes (scheduler jitter) to zero.
+        // swiftlint:disable:next no_magic_numbers
+        self.aggregator.recordTickLag(lagMs: max(0, nowSeconds - targetDeadlineSeconds) * 1000)
         self.clockTick(nowSeconds: nowSeconds)
     }
 
-    /// Testable overload: inject `nowSeconds` instead of reading the real clock.
+    /// Test-only entry: reads the real clock and drives a tick without recording tick-lag.
     ///
-    /// The production `clockTick()` calls through with `PipelineClock.currentHostTime()`.
+    /// Used by tests that verify no-op behavior before the first frame (no target deadline
+    /// is meaningful in that context). Production code uses the `targetDeadlineSeconds` path.
+    func clockTick() {
+        self.clockTick(nowSeconds: CMTimeGetSeconds(PipelineClock.currentHostTime()))
+    }
+
+    /// Test-only entry: drives a clock tick at an injected `nowSeconds` without recording
+    /// tick-lag (no target deadline is available in this path).
+    ///
+    /// Production code calls `clockTick(nowSeconds:targetDeadlineSeconds:)` via `startClock()`.
     /// Tests drive this directly for deterministic, wall-clock-free assertions.
     func clockTick(nowSeconds: Double) {
         guard let lastPixelBuffer = self.lastPixelBuffer else { return }
-
-        // Measure tick-lag BEFORE catchUpHolds advances the grid — after, nextDeadlineSeconds
-        // returns the next window's deadline and the lag measurement would be meaningless.
-        if self.normalizer.lastEmittedSlot >= 0 {
-            let deadline = self.normalizer.nextDeadlineSeconds(
-                anchorSeconds: self.anchorSeconds,
-                fps: self.fps,
-                graceSeconds: self.graceSeconds
-            )
-            // swiftlint:disable:next no_magic_numbers
-            let lagMs = abs(nowSeconds - deadline) * 1000
-            self.aggregator.recordTickLag(lagMs: lagMs)
-        }
 
         let emission = self.normalizer.catchUpHolds(
             nowSeconds: nowSeconds,
@@ -580,6 +590,9 @@ actor VideoEncoder {
     /// Input frames always arrive with `isHoldRepeat == false`; this encoder owns the hold
     /// decision via the normalizer.
     func ingest(_ frame: VideoFrame) {
+        let ingestStart = ContinuousClock.now
+        defer { self.aggregator.recordIngest(durationMs: self.elapsedMs(from: ingestStart)) }
+
         // F7: not-running guard. Frames arriving before start() or after stop() are dropped;
         // log it rather than swallow silently. No DropEvent (that taxonomy is #35 scope).
         guard self.state == .running else {
@@ -659,6 +672,19 @@ actor VideoEncoder {
         }
     }
 
+    // MARK: - Duration measurement helper
+
+    /// Returns the elapsed time in milliseconds since `startInstant` (from `ContinuousClock`).
+    ///
+    /// Uses integer arithmetic on `components` to avoid `CVarArg` and satisfy
+    /// `SWIFT_STRICT_MEMORY_SAFETY`. Called from `submit` and `ingest` to record
+    /// per-call durations without importing a second clock type.
+    nonisolated private func elapsedMs(from startInstant: ContinuousClock.Instant) -> Double {
+        let elapsed = (ContinuousClock.now - startInstant).components
+        // swiftlint:disable:next no_magic_numbers
+        return Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1_000_000_000_000_000_000
+    }
+
     // MARK: - Submission + backpressure
 
     /// Submits one pixel buffer to the session at the pre-computed `pts` for `slotIndex`.
@@ -672,7 +698,12 @@ actor VideoEncoder {
     private func submit(pixelBuffer: CVPixelBuffer, slotIndex: Int, pts: CMTime, detectedAt: CMTime) {
         guard let session = self.session else { return }
 
-        if session.pendingFrameCount() >= self.maxPendingFrames {
+        let pendingQueryStart = ContinuousClock.now
+        let pending = session.pendingFrameCount()
+        self.aggregator.recordPendingQuery(durationMs: self.elapsedMs(from: pendingQueryStart))
+        self.aggregator.recordPendingValue(pending)
+
+        if pending >= self.maxPendingFrames {
             self.encoderBackpressureDrops += 1
             self.aggregator.recordGateDrop()
             self.dropsContinuation.yield(
@@ -683,7 +714,9 @@ actor VideoEncoder {
 
         // Slot duration is exactly one grid step.
         let duration = CMTimeMake(value: 1, timescale: Int32(self.fps))
+        let encodeStart = ContinuousClock.now
         let status = session.encodeFrame(pixelBuffer: pixelBuffer, pts: pts, duration: duration)
+        self.aggregator.recordEncodeCall(durationMs: self.elapsedMs(from: encodeStart))
         if status != noErr {
             // F2 / KNOWN LIMITATION: the normalizer already advanced `lastEmittedSlot`, so a
             // non-noErr encode is a permanent invisible gap in the CFR grid. For MVP this is

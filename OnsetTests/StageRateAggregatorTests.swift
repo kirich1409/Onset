@@ -1,6 +1,10 @@
 @testable import Onset
 import Testing
 
+// file_length is disabled: the suite grew with new duration and gap accumulator tests.
+// All tests are for a single struct (StageRateAggregator) and share no external fixtures.
+// swiftlint:disable file_length
+
 // MARK: - Flush basics
 
 @Suite("StageRateAggregator — flush basics")
@@ -90,8 +94,9 @@ struct StageRateAggregatorCaptureFormatTests {
         agg.recordOverflow()
         let result = agg.flush(elapsedSeconds: 1.0)
         let line = try #require(result)
-        // Key order: lane stage fresh didDrop overflow nominal win_s
-        let expected = "lane=camera stage=capture fresh=1.0 didDrop=1.0 overflow=1.0 nominal=30 win_s=1.0"
+        // Key order: lane stage fresh didDrop overflow gap_ms_avg gap_ms_max nominal win_s
+        let expected = "lane=camera stage=capture fresh=1.0 didDrop=1.0 overflow=1.0"
+            + " gap_ms_avg=0.0 gap_ms_max=0.0 nominal=30 win_s=1.0"
         #expect(line == expected)
     }
 
@@ -103,7 +108,8 @@ struct StageRateAggregatorCaptureFormatTests {
         agg.recordIdle()
         let result = agg.flush(elapsedSeconds: 1.0)
         let line = try #require(result)
-        let expected = "lane=screen stage=capture fresh=1.0 didDrop=0.0 overflow=0.0 idle=2.0 nominal=60 win_s=1.0"
+        let expected = "lane=screen stage=capture fresh=1.0 didDrop=0.0 overflow=0.0"
+            + " gap_ms_avg=0.0 gap_ms_max=0.0 idle=2.0 nominal=60 win_s=1.0"
         #expect(line == expected)
     }
 
@@ -150,6 +156,13 @@ struct StageRateAggregatorEncoderFormatTests {
         #expect(line.contains(" tick_lag_ms_max=2.0 "))
         #expect(line.contains(" catchup_max=3 "))
         #expect(line.contains(" cap_overflow=0 "))
+        #expect(line.contains(" enc_ms_avg="))
+        #expect(line.contains(" enc_ms_max="))
+        #expect(line.contains(" pend_ms_avg="))
+        #expect(line.contains(" pend_ms_max="))
+        #expect(line.contains(" pending_max="))
+        #expect(line.contains(" ing_ms_avg="))
+        #expect(line.contains(" ing_ms_max="))
         #expect(line.hasSuffix("win_s=1.0"))
     }
 
@@ -355,5 +368,149 @@ struct StageRateAggregatorWinSTests {
         let result = agg.flush(elapsedSeconds: 1.05)
         let line = try #require(result)
         #expect(line.contains("win_s=1.1"))
+    }
+}
+
+// MARK: - Encoder duration accumulators
+
+@Suite("StageRateAggregator — encoder duration keys")
+struct StageRateAggregatorEncoderDurationTests {
+    @Test("enc_ms_avg is sum / count; enc_ms_max is the largest observed")
+    func encCallDuration() throws {
+        var agg = StageRateAggregator(lane: "camera", stage: .encoder, nominalFps: 30)
+        agg.recordEncodeCall(durationMs: 2.0)
+        agg.recordEncodeCall(durationMs: 8.0)
+        let result = agg.flush(elapsedSeconds: 1.0)
+        let line = try #require(result)
+        #expect(line.contains(" enc_ms_avg=5.0 "))
+        #expect(line.contains(" enc_ms_max=8.0 "))
+    }
+
+    @Test("pend_ms_avg and pend_ms_max accumulate pendingFrameCount query durations")
+    func pendQueryDuration() throws {
+        var agg = StageRateAggregator(lane: "camera", stage: .encoder, nominalFps: 30)
+        agg.recordPendingQuery(durationMs: 1.0)
+        agg.recordPendingQuery(durationMs: 3.0)
+        let result = agg.flush(elapsedSeconds: 1.0)
+        let line = try #require(result)
+        #expect(line.contains(" pend_ms_avg=2.0 "))
+        #expect(line.contains(" pend_ms_max=3.0 "))
+    }
+
+    @Test("pending_max tracks the highest pending frame count")
+    func pendingMax() throws {
+        var agg = StageRateAggregator(lane: "camera", stage: .encoder, nominalFps: 30)
+        agg.recordPendingValue(4)
+        agg.recordPendingValue(9)
+        agg.recordPendingValue(2)
+        let result = agg.flush(elapsedSeconds: 1.0)
+        let line = try #require(result)
+        #expect(line.contains(" pending_max=9 "))
+    }
+
+    @Test("ing_ms_avg and ing_ms_max accumulate ingest durations")
+    func ingestDuration() throws {
+        var agg = StageRateAggregator(lane: "camera", stage: .encoder, nominalFps: 30)
+        agg.recordIngest(durationMs: 4.0)
+        agg.recordIngest(durationMs: 6.0)
+        let result = agg.flush(elapsedSeconds: 1.0)
+        let line = try #require(result)
+        #expect(line.contains(" ing_ms_avg=5.0 "))
+        #expect(line.contains(" ing_ms_max=6.0 "))
+    }
+
+    @Test("encoder duration accumulators reset after flush")
+    func encoderDurationsResetAfterFlush() throws {
+        var agg = StageRateAggregator(lane: "camera", stage: .encoder, nominalFps: 30)
+        agg.recordEncodeCall(durationMs: 10.0)
+        agg.recordPendingQuery(durationMs: 5.0)
+        agg.recordPendingValue(7)
+        agg.recordIngest(durationMs: 3.0)
+        _ = agg.flush(elapsedSeconds: 1.0)
+        let result = agg.flush(elapsedSeconds: 1.0)
+        let line = try #require(result)
+        #expect(line.contains(" enc_ms_avg=0.0 "))
+        #expect(line.contains(" enc_ms_max=0.0 "))
+        #expect(line.contains(" pend_ms_avg=0.0 "))
+        #expect(line.contains(" pend_ms_max=0.0 "))
+        #expect(line.contains(" pending_max=0 "))
+        #expect(line.contains(" ing_ms_avg=0.0 "))
+        #expect(line.contains(" ing_ms_max=0.0 "))
+    }
+
+    @Test("zero-activity encoder line has all duration keys at zero")
+    func encoderDurationZeroActivity() throws {
+        var agg = StageRateAggregator(lane: "camera", stage: .encoder, nominalFps: 30)
+        let result = agg.flush(elapsedSeconds: 1.0)
+        let line = try #require(result)
+        #expect(line.contains(" enc_ms_avg=0.0 "))
+        #expect(line.contains(" enc_ms_max=0.0 "))
+        #expect(line.contains(" pend_ms_avg=0.0 "))
+        #expect(line.contains(" pend_ms_max=0.0 "))
+        #expect(line.contains(" pending_max=0 "))
+        #expect(line.contains(" ing_ms_avg=0.0 "))
+        #expect(line.contains(" ing_ms_max=0.0 "))
+    }
+}
+
+// MARK: - Delivery gap accumulators
+
+@Suite("StageRateAggregator — delivery gap keys")
+struct StageRateAggregatorDeliveryGapTests {
+    @Test("gap_ms_avg is sum / count; gap_ms_max is the largest observed")
+    func gapAvgMax() throws {
+        var agg = StageRateAggregator(lane: "camera", stage: .capture, nominalFps: 30)
+        agg.recordDeliveryGap(durationMs: 30.0)
+        agg.recordDeliveryGap(durationMs: 50.0)
+        let result = agg.flush(elapsedSeconds: 1.0)
+        let line = try #require(result)
+        #expect(line.contains(" gap_ms_avg=40.0 "))
+        #expect(line.contains(" gap_ms_max=50.0 "))
+    }
+
+    @Test("gap keys emit zero when no gaps were recorded (screen source)")
+    func gapZeroForScreenSource() throws {
+        var agg = StageRateAggregator(lane: "screen", stage: .capture, nominalFps: 60)
+        let result = agg.flush(elapsedSeconds: 1.0)
+        let line = try #require(result)
+        #expect(line.contains(" gap_ms_avg=0.0 "))
+        #expect(line.contains(" gap_ms_max=0.0 "))
+    }
+
+    @Test("gap accumulators reset after flush")
+    func gapResetsAfterFlush() throws {
+        var agg = StageRateAggregator(lane: "camera", stage: .capture, nominalFps: 30)
+        agg.recordDeliveryGap(durationMs: 40.0)
+        _ = agg.flush(elapsedSeconds: 1.0)
+        let result = agg.flush(elapsedSeconds: 1.0)
+        let line = try #require(result)
+        #expect(line.contains(" gap_ms_avg=0.0 "))
+        #expect(line.contains(" gap_ms_max=0.0 "))
+    }
+
+    @Test("gap_ms_avg and gap_ms_max appear between overflow and nominal in camera line")
+    func gapKeyOrderInCameraLine() throws {
+        var agg = StageRateAggregator(lane: "camera", stage: .capture, nominalFps: 30)
+        agg.recordDeliveryGap(durationMs: 33.0)
+        let result = agg.flush(elapsedSeconds: 1.0)
+        let line = try #require(result)
+        // Verify ordering via expected exact key sequence: overflow … gap_ms_avg … gap_ms_max … nominal
+        // Split into tokens and check positional order without importing Foundation.
+        let tokens = line.split(separator: " ").map(String.init)
+        let overflowIdx = tokens.firstIndex { $0.hasPrefix("overflow=") }
+        let gapAvgIdx = tokens.firstIndex { $0.hasPrefix("gap_ms_avg=") }
+        let gapMaxIdx = tokens.firstIndex { $0.hasPrefix("gap_ms_max=") }
+        let nominalIdx = tokens.firstIndex { $0.hasPrefix("nominal=") }
+        guard let overflowPos = overflowIdx,
+              let gapAvgPos = gapAvgIdx,
+              let gapMaxPos = gapMaxIdx,
+              let nominalPos = nominalIdx
+        else {
+            Issue.record("Missing expected key in: \(line)")
+            return
+        }
+        #expect(overflowPos < gapAvgPos, "overflow must precede gap_ms_avg")
+        #expect(gapAvgPos < gapMaxPos, "gap_ms_avg must precede gap_ms_max")
+        #expect(gapMaxPos < nominalPos, "gap_ms_max must precede nominal")
     }
 }

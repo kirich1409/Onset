@@ -25,6 +25,12 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
     /// `nonisolated(unsafe)`: confined to `videoQueue` (serial). That queue is the lock.
     nonisolated(unsafe) var didLogBufferAnomaly = false
 
+    /// Host-time seconds of the previous successfully delivered frame, used to compute the
+    /// inter-arrival gap fed to `recordDeliveryGap`.
+    ///
+    /// `nonisolated(unsafe)`: confined to `videoQueue` (serial). That queue is the lock.
+    nonisolated(unsafe) var lastDeliveryHostTimeSec: Double?
+
     /// Per-stage cadence accumulator, shared with the owning `CameraSource` actor for flushing.
     ///
     /// `OSAllocatedUnfairLock` because `VideoOutputShim` runs on `videoQueue` (a GCD serial queue)
@@ -75,11 +81,20 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         }
         let frame = VideoFrame(pixelBuffer: pixelBuffer, ptsHostTime: pts, isHoldRepeat: false)
         let yieldResult = self.framesContinuation.yield(frame)
+        // `unsafe`: STRICT_MEMORY_SAFETY=YES — nonisolated(unsafe) requires this keyword.
+        // Safety: read+write confined to videoQueue (serial); that queue is the lock.
+        let ptsSeconds = CMTimeGetSeconds(pts)
+        let previousDelivery = unsafe self.lastDeliveryHostTimeSec
+        unsafe self.lastDeliveryHostTimeSec = ptsSeconds
         self.rateLock.withLock { aggregator in
             if case .dropped = yieldResult {
                 aggregator.recordOverflow()
             } else {
                 aggregator.recordFresh()
+                if let prev = previousDelivery {
+                    // swiftlint:disable:next no_magic_numbers
+                    aggregator.recordDeliveryGap(durationMs: (ptsSeconds - prev) * 1_000)
+                }
             }
         }
         if let dropEvent = cameraBackpressureDropEvent(for: yieldResult, pts: pts) {
