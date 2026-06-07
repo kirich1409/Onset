@@ -64,13 +64,9 @@ extension OnboardingView {
 
     /// Computes the footer descriptor for the current VM state.
     var footerDescriptor: OnboardingFooterDescriptor {
-        let effective = viewModel.effectivePermissions
-        return OnboardingFooterMapper.descriptor(
+        OnboardingFooterMapper.descriptor(
             isAwaiting: viewModel.isAwaitingScreen,
-            canRecord: effective.canRecord,
-            cameraOnly: effective.cameraOnlyAvailable,
-            noAudio: effective.videoWithoutAudioAvailable,
-            fullMode: effective.fullModeAvailable
+            effective: viewModel.effectivePermissions
         )
     }
 

@@ -22,17 +22,12 @@ struct OnboardingFooterMapperTests {
         mic: Bool
     )
     -> OnboardingFooterDescriptor {
-        let canRecord = screen || camera
-        let cameraOnly = !screen && camera
-        let noAudio = canRecord && !mic
-        let fullMode = screen && camera && mic
-        return OnboardingFooterMapper.descriptor(
-            isAwaiting: isAwaiting,
-            canRecord: canRecord,
-            cameraOnly: cameraOnly,
-            noAudio: noAudio,
-            fullMode: fullMode
+        let effective = EffectivePermissions(
+            screenAvailable: screen,
+            cameraAvailable: camera,
+            microphoneAvailable: mic
         )
+        return OnboardingFooterMapper.descriptor(isAwaiting: isAwaiting, effective: effective)
     }
 
     // MARK: - Awaiting state
@@ -167,6 +162,13 @@ struct OnboardingFooterMapperTests {
 
     // MARK: - Invariants: no two enabled proceed buttons
 
+    private func enabledProceedCount(in desc: OnboardingFooterDescriptor) -> Int {
+        [
+            desc.gracefulLink?.action == .proceed,
+            desc.primary.action == .proceed && desc.primary.isEnabled,
+        ].count { $0 == true }
+    }
+
     @Test(
         "Invariant: at most one enabled proceed button across all non-awaiting states",
         arguments: [
@@ -182,11 +184,7 @@ struct OnboardingFooterMapperTests {
     )
     func noTwoEnabledProceedButtons(screen: Bool, camera: Bool, mic: Bool) {
         let desc = self.make(isAwaiting: false, screen: screen, camera: camera, mic: mic)
-        let enabledProceedCount = [
-            desc.gracefulLink.map { $0.action == .proceed && true } ?? false,
-            desc.primary.action == .proceed && desc.primary.isEnabled,
-        ].count { $0 }
-        #expect(enabledProceedCount <= 1)
+        #expect(self.enabledProceedCount(in: desc) <= 1)
     }
 
     @Test(
@@ -200,11 +198,7 @@ struct OnboardingFooterMapperTests {
     )
     func noTwoEnabledProceedButtons_awaiting(camera: Bool, mic: Bool) {
         let desc = self.make(isAwaiting: true, screen: false, camera: camera, mic: mic)
-        let enabledProceedCount = [
-            desc.gracefulLink.map { $0.action == .proceed && true } ?? false,
-            desc.primary.action == .proceed && desc.primary.isEnabled,
-        ].count { $0 }
-        #expect(enabledProceedCount <= 1)
+        #expect(self.enabledProceedCount(in: desc) <= 1)
     }
 
     @Test(

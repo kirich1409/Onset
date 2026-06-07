@@ -48,6 +48,11 @@ struct OnboardingFooterDescriptor {
 
     /// The single primary action button always shown on the right.
     nonisolated let primary: PrimaryButton
+
+    nonisolated init(gracefulLink: GracefulLink? = nil, primary: PrimaryButton) {
+        self.gracefulLink = gracefulLink
+        self.primary = primary
+    }
 }
 
 // MARK: - Equatable
@@ -84,12 +89,12 @@ extension OnboardingFooterDescriptor: Equatable {}
 ///
 /// ## Decision order (non-awaiting branch)
 ///
-/// 1. `fullMode` (S+C+M) → "Перейти к записи" (enabled, no link).
+/// 1. `fullModeAvailable` (S+C+M) → "Перейти к записи" (enabled, no link).
 /// 2. `!canRecord` (no video source) → disabled "Продолжить" + "Позже" escape link.
-/// 3. `cameraOnly` (!S+C) → "Продолжить без экрана" (enabled, no link).
-///    Checked before the `noAudio` branch so the overlap cell (S=0,C=1,M=0) resolves
-///    to the camera-only label, which already describes the recording mode.
-/// 4. `noAudio` (has video, no mic) → disabled "Продолжить" + "Записать без звука" link.
+/// 3. `cameraOnlyAvailable` (!S+C) → "Продолжить без экрана" (enabled, no link).
+///    Checked before the `videoWithoutAudioAvailable` branch so the overlap cell
+///    (S=0,C=1,M=0) resolves to the camera-only label, which already describes the mode.
+/// 4. `videoWithoutAudioAvailable` (has video, no mic) → disabled "Продолжить" + "Записать без звука" link.
 /// 5. Fallback (partial video, mic present) → "Продолжить" (enabled, no link).
 nonisolated enum OnboardingFooterMapper {
     // MARK: - Mapping
@@ -98,26 +103,20 @@ nonisolated enum OnboardingFooterMapper {
     ///
     /// - Parameters:
     ///   - isAwaiting: `true` while screen-recording has been requested and polling is in flight.
-    ///   - canRecord: At least one video source (screen or camera) is available.
-    ///   - cameraOnly: Screen is not available and camera is available.
-    ///   - noAudio: A video source is available but microphone is not.
-    ///   - fullMode: All three permissions are granted.
+    ///   - effective: The effective recording permissions derived from the current TCC statuses.
     nonisolated static func descriptor(
         isAwaiting: Bool,
-        canRecord: Bool,
-        cameraOnly: Bool,
-        noAudio: Bool,
-        fullMode: Bool
+        effective: EffectivePermissions
     )
     -> OnboardingFooterDescriptor {
         if isAwaiting {
-            return self.awaitingDescriptor(cameraOnly: cameraOnly)
+            return self.awaitingDescriptor(cameraOnly: effective.cameraOnlyAvailable)
         }
         return self.normalDescriptor(
-            canRecord: canRecord,
-            cameraOnly: cameraOnly,
-            noAudio: noAudio,
-            fullMode: fullMode
+            canRecord: effective.canRecord,
+            cameraOnly: effective.cameraOnlyAvailable,
+            noAudio: effective.videoWithoutAudioAvailable,
+            fullMode: effective.fullModeAvailable
         )
     }
 
@@ -149,7 +148,6 @@ nonisolated enum OnboardingFooterMapper {
         if fullMode {
             // All three granted — single enabled proceed, label signals recording is ready.
             return OnboardingFooterDescriptor(
-                gracefulLink: nil,
                 primary: .init(label: "Перейти к записи", action: .proceed, isEnabled: true)
             )
         }
@@ -167,7 +165,6 @@ nonisolated enum OnboardingFooterMapper {
             // Screen not available, camera is — "Продолжить без экрана" describes the result.
             // Checked before noAudio: the overlap cell (S=0,C=1,M=0) resolves here, not below.
             return OnboardingFooterDescriptor(
-                gracefulLink: nil,
                 primary: .init(label: "Продолжить без экрана", action: .proceed, isEnabled: true)
             )
         }
@@ -182,7 +179,6 @@ nonisolated enum OnboardingFooterMapper {
 
         // Partial video + mic present but not full (e.g. S=1 or C=1, M=1, other missing).
         return OnboardingFooterDescriptor(
-            gracefulLink: nil,
             primary: .init(label: "Продолжить", action: .proceed, isEnabled: true)
         )
     }
