@@ -16,44 +16,46 @@ Critical product requirements, in priority order: **stability**, **performance**
 ## Commands
 
 ```bash
-# Build (CI-equivalent)
+# Build (local — do NOT pipe to xcpretty: not installed locally, CI installs it itself)
 xcodebuild build -scheme Onset -destination 'platform=macOS' -configuration Debug \
-  ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO | xcpretty
+  ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
 
-# Unit tests (Swift Testing)
+# Unit tests (Swift Testing; runs L2 only — L5 suites are env-gated, see Testing)
 xcodebuild test -scheme Onset -destination 'platform=macOS' -configuration Debug \
-  ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO | xcpretty
+  ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
 
 # Lint — CI "Lint" job runs BOTH; check both before push
 swiftformat . --lint --config .swiftformat
 swiftlint lint --strict --config .swiftlint.yml   # version pinned 0.63.3 via Mintfile
 ```
 
-Artifact checks (CI `artifact-checks` job; run against the BUILT .app, not source):
+Artifact checks (CI `artifact-checks` job):
 
-- `scripts/check-entitlements.sh <Onset.app>` — entitlements are injected at signing,
-  source-only checks give false results
-- `scripts/check-no-network.sh` — "no network client" invariant: binary must not link
-  network frameworks
-- `scripts/check-privacy-manifest.sh` — PrivacyInfo.xcprivacy lint (fatal in CI;
-  official Required-Reason codes for UserDefaults)
+- `scripts/check-privacy-manifest.sh` — works on SOURCE, no build needed (fast
+  pre-check; fatal in CI: official Required-Reason codes for UserDefaults).
+- `scripts/check-entitlements.sh <Onset.app>` and `scripts/check-no-network.sh
+  <Onset.app>` — need the BUILT .app: entitlements are injected at signing;
+  no-network invariant = binary must not link network frameworks.
 - `scripts/verify-cfr.sh screen.mp4 camera.mp4 60 30` — CFR cadence from real packet
-  timestamps; ffprobe metadata (r_frame_rate/nb_frames) lies
+  timestamps (ffprobe metadata r_frame_rate/nb_frames lies). Slow: ~1 min per 10 min
+  of video; the fresh-content check needs MOTION in frame — a static scene fails
+  falsely.
 
 ## Testing
 
-- Swift Testing only, zero XCTest. In xcodebuild output the XCTest banner
-  "Executed 0 tests" is FALSE — the verdict is in the Swift Testing summary.
-  Never use `-quiet`: it hides that summary.
-- Tiers: L2 (no hardware, `Fake*` doubles) and L5 (real hardware) coexist in the
-  same test files; L5 suites are opt-in via `ONSET_RUN_L5_*` env vars and
-  `.enabled(if:)` traits.
+- Swift Testing only, zero XCTest. The XCTest banner "Executed 0 tests" in xcodebuild
+  output is FALSE — the verdict is the Swift Testing summary line. Never use `-quiet`:
+  it hides that summary.
+- L5 (real hardware) suites are opt-in via env vars: `ONSET_RUN_L5_CAPTURE=1`
+  (CameraSource, RecordingSession), `ONSET_RUN_L5_ENCODE=1` (VideoEncoder, FileWriter).
+  Prefix the `xcodebuild test` command above with the var.
+- BEFORE any L5 run: check stale test hosts with `pgrep -la Onset`; if any, ask the
+  user to run `pkill -9 Onset` (agents may not kill processes). One `xcodebuild test`
+  at a time — hardware tests fight over the camera and hang, spawning extra instances.
 - Reference hardware for L5: Logitech MX Brio
   (see `docs/quality/production-quality-bar.md`).
-- Before re-running `xcodebuild test`, kill stale/orphaned test-host processes —
-  hardware (camera) tests fight over the device and hang, spawning extra instances.
-- Window scenes and the global hotkey are suppressed under test runs
-  (see `OnsetApp.swift`) so the suite doesn't pop onboarding windows.
+- Recordings land in `~/Movies/Onset/` — L5 outputs for verify-cfr/ffprobe live there.
+- Test-writing conventions (fakes, naming, suites): `OnsetTests/CLAUDE.md`.
 - OnsetUITests target exists but is not wired into the Onset scheme's Test action.
 
 ## Project structure
@@ -116,6 +118,22 @@ Full type-level map (Russian): `docs/architecture.md`.
   L/XL or architectural work → opus planning + sonnet implementation;
   P0 bumps one tier up.
 
+## Source of truth
+
+- Specs: `docs/specs/` (product overview, recording MVP, permissions/onboarding,
+  devops/CI).
+- Quality bar: `docs/quality/production-quality-bar.md`.
+- Design references: `docs/design-ref/`.
+- Framework/tool documentation links: `docs/architecture.md`, раздел «Ссылки на
+  документацию».
+
+## Code style
+
+- SwiftLint opt-ins to know: `missing_docs` (docs on all declarations),
+  `force_unwrapping` banned, `no_magic_numbers` (tests exempt).
+- SwiftFormat owns formatting: `--maxwidth 120`, `--trailingcommas always`,
+  wrap before-first.
+
 ## Workflow
 
 - Work autonomously: draft→ready promotion and native auto-merge
@@ -125,36 +143,10 @@ Full type-level map (Russian): `docs/architecture.md`.
   close L5.
 - Docs describe `main`: update affected `docs/` in the same PR that changes behavior.
 - After completing a task, fold non-obvious learnings into CLAUDE.md
-  (`/claude-md-management:revise-claude-md`).
+  (`/claude-md-management:revise-claude-md`). Maintenance = add AND delete: a rule
+  Claude already follows without being told gets removed; keep this file ≤200 lines.
 - UI design is not done by agents: write a brief for the Claude Design service and
   hand it to the user.
-
-## Source of truth
-
-- Specs: `docs/specs/` (product overview, recording MVP, permissions/onboarding,
-  devops/CI).
-- Quality bar: `docs/quality/production-quality-bar.md`.
-- Design references: `docs/design-ref/`.
-
-## Code style
-
-- SwiftLint opt-ins to know: `missing_docs` (docs on all declarations),
-  `force_unwrapping` banned, `no_magic_numbers` (tests exempt).
-- SwiftFormat owns formatting: `--maxwidth 120`, `--trailingcommas always`,
-  wrap before-first.
-
-## Documentation links
-
-- ScreenCaptureKit — <https://developer.apple.com/documentation/screencapturekit>
-- AVFoundation — <https://developer.apple.com/documentation/avfoundation>
-- VideoToolbox — <https://developer.apple.com/documentation/videotoolbox>
-- Swift Testing — <https://developer.apple.com/documentation/testing>
-- MenuBarExtra — <https://developer.apple.com/documentation/swiftui/menubarextra>
-- Privacy manifests — <https://developer.apple.com/documentation/bundleresources/privacy-manifest-files>
-- Required-Reason API — <https://developer.apple.com/documentation/bundleresources/describing-use-of-required-reason-api>
-- Swift 6 concurrency migration — <https://www.swift.org/migration/>
-- SwiftLint rule directory — <https://realm.github.io/SwiftLint/rule-directory.html>
-- SwiftFormat rules — <https://github.com/nicklockwood/SwiftFormat/blob/main/Rules.md>
 
 ## Gotchas
 
@@ -163,4 +155,12 @@ Full type-level map (Russian): `docs/architecture.md`.
   InternalImportsByDefault / MemberImportVisibility.
 - The app must never gain network-client code — spec AC enforced by
   `check-no-network.sh`.
+- CI job timeouts (hang detection): build 20 min, unit 20 min, lint 10 min,
+  privacy-manifest 5 min, artifact-checks 10 min, CodeQL 60 min — anything running
+  longer is stuck, not slow.
+- `AVCaptureDevice.authorizationStatus` is cached in-process (macOS 26.x): a TCC
+  revoke is visible only after app restart. Platform behavior, NOT a bug — don't
+  investigate it as one.
+- `com/` at repo root is a JVM artifact of Claude tooling; `.codex/` is the Xcode MCP
+  bridge config — ignore both, never analyze as product code.
 - `swarm-report/` is gitignored orchestration state, not part of the product.
