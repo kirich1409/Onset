@@ -123,7 +123,8 @@ struct MainView: View {
     private func resolvedAlert() -> PostStopAlert? {
         PostStopAlert.resolve(
             writeError: self.model.coordinator.lastWriteError,
-            degraded: self.model.coordinator.lastDegradedWarning
+            degraded: self.model.coordinator.lastDegradedWarning,
+            droppedFrames: self.model.coordinator.drops.encoderBackpressureDrops
         )
     }
 
@@ -140,13 +141,10 @@ struct MainView: View {
                 }
             )
 
-        case .degradedWarning:
+        case let .degradedWarning(droppedFrames):
             Alert(
-                title: Text("Запись завершена с ошибками"),
-                message: Text(
-                    "Во время записи были пропущены кадры из-за перегрузки диска." +
-                        " Видеофайл может содержать пропуски."
-                ),
+                title: Text("Запись завершена"),
+                message: Text(RussianPluralForm.droppedFrames(count: droppedFrames)),
                 dismissButton: .default(Text("ОК")) {
                     self.model.coordinator.acknowledgeDegradedWarning()
                     self.pendingAlert = nil
@@ -320,11 +318,19 @@ struct CameraPreviewRepresentable: NSViewRepresentable {
 /// Which post-stop alert `MainView` presents after a recording ends.
 ///
 /// `writeError` carries the localized reason for the message body.
-/// Priority ordering is enforced by `resolve(writeError:degraded:)`: write-error supersedes
-/// degraded-warning because a failed write means the file was not saved (higher severity).
+/// `degradedWarning` carries the session's encoder-backpressure drop count so the alert can
+/// display "Пропущено N кадров — возможны рывки." (AC-9).
+///
+/// Priority ordering is enforced by `resolve(writeError:degraded:droppedFrames:)`: write-error
+/// supersedes degraded-warning because a failed write means the file was not saved (higher severity).
 enum PostStopAlert: Identifiable {
     case writeError(reason: String)
-    case degradedWarning
+    /// Post-stop warning shown when the session's encoder-backpressure drop count exceeds zero.
+    ///
+    /// `droppedFrames` is `RecordingResult.drops.encoderBackpressureDrops` captured at stop time.
+    /// The value is frozen — `RecordingCoordinator.drops` resets only on the next `start()`, so
+    /// reading it before `acknowledgeDegradedWarning()` is safe.
+    case degradedWarning(droppedFrames: Int)
 
     var id: String {
         switch self {
@@ -338,12 +344,17 @@ enum PostStopAlert: Identifiable {
     /// Priority: `.writeError` > `.degradedWarning` > `nil`.
     /// Both flags can be simultaneously true when the writer fails under heavy backpressure;
     /// only the higher-severity alert is shown to avoid competing presentation slots.
-    nonisolated static func resolve(writeError: String?, degraded: Bool) -> Self? {
+    ///
+    /// - Parameters:
+    ///   - writeError:    Human-readable write-failure reason, or `nil` when the file was saved.
+    ///   - degraded:      `true` when the finished session had encoder-backpressure drops.
+    ///   - droppedFrames: `RecordingResult.drops.encoderBackpressureDrops` at stop time.
+    nonisolated static func resolve(writeError: String?, degraded: Bool, droppedFrames: Int) -> Self? {
         if let reason = writeError {
             return .writeError(reason: reason)
         }
         if degraded {
-            return .degradedWarning
+            return .degradedWarning(droppedFrames: droppedFrames)
         }
         return nil
     }
