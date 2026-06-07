@@ -115,22 +115,6 @@ final class OnboardingViewModel {
         return "нужно выдать три разрешения"
     }
 
-    /// Whether a graceful "Продолжить без экрана" option is available.
-    var canContinueWithoutScreen: Bool {
-        self.permissions.effectivePermissions.cameraOnlyAvailable
-    }
-
-    /// Whether a graceful "Записать без звука" option is available.
-    var canRecordWithoutAudio: Bool {
-        self.permissions.effectivePermissions.videoWithoutAudioAvailable
-    }
-
-    /// Whether the primary «Продолжить» button is enabled.
-    /// Enabled when at least one video source is available.
-    var canContinue: Bool {
-        self.permissions.effectivePermissions.canRecord
-    }
-
     // MARK: - Screen recording actions
 
     /// Calls `CGRequestScreenCaptureAccess()` once (registers Onset in the TCC list),

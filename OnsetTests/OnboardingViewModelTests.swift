@@ -51,53 +51,6 @@ struct OnboardingViewModelTests {
         #expect(fake.requestMicrophoneCallCount == 1)
     }
 
-    // MARK: - AC-7: Screen not granted + camera authorized → canContinueWithoutScreen available
-
-    @Test("Screen notDetermined + camera authorized → canContinueWithoutScreen true (AC-7)")
-    func screenNotDetermined_cameraAuthorized_canContinueWithoutScreen() {
-        let fake = FakePermissionsService(screen: .notDetermined, camera: .authorized)
-        let sut = OnboardingViewModel(permissions: fake)
-
-        #expect(sut.canContinueWithoutScreen)
-        #expect(sut.canContinue) // camera is a valid video source
-    }
-
-    @Test("Screen notDetermined, camera notDetermined → canContinueWithoutScreen false (no video source)")
-    func screenNotDetermined_cameraNotDetermined_cannotContinueWithoutScreen() {
-        let fake = FakePermissionsService(screen: .notDetermined, camera: .notDetermined)
-        let sut = OnboardingViewModel(permissions: fake)
-
-        #expect(!sut.canContinueWithoutScreen)
-        #expect(!sut.canContinue) // no video source at all
-    }
-
-    // MARK: - AC-7: «Записать без звука» (mic not available)
-
-    @Test("Camera authorized, microphone denied → canRecordWithoutAudio true (AC-7)")
-    func cameraAuthorized_micDenied_canRecordWithoutAudio() {
-        let fake = FakePermissionsService(screen: .denied, camera: .authorized, microphone: .denied)
-        let sut = OnboardingViewModel(permissions: fake)
-
-        #expect(sut.canRecordWithoutAudio)
-        #expect(sut.canContinue)
-    }
-
-    @Test("Screen authorized, microphone denied → canRecordWithoutAudio true (AC-7)")
-    func screenAuthorized_micDenied_canRecordWithoutAudio() {
-        let fake = FakePermissionsService(screen: .authorized, microphone: .denied)
-        let sut = OnboardingViewModel(permissions: fake)
-
-        #expect(sut.canRecordWithoutAudio)
-    }
-
-    @Test("All three authorized → canRecordWithoutAudio false (full mode)")
-    func allAuthorized_canRecordWithoutAudioFalse() {
-        let fake = FakePermissionsService(screen: .authorized, camera: .authorized, microphone: .authorized)
-        let sut = OnboardingViewModel(permissions: fake)
-
-        #expect(!sut.canRecordWithoutAudio)
-    }
-
     // MARK: - AC-4: Screen awaiting state (requestScreenRecording → isAwaitingScreen true)
 
     @Test("requestScreenRecording → isAwaitingScreen true, screenStatus still notDetermined (AC-4)")
@@ -157,10 +110,7 @@ struct OnboardingViewModelTests {
         #expect(fake.allGranted)
         #expect(sut.progress == 3)
         #expect(sut.progressHintText == "все разрешения активны")
-        #expect(sut.canContinue)
         #expect(sut.effectivePermissions.fullModeAvailable)
-        #expect(!sut.canContinueWithoutScreen)
-        #expect(!sut.canRecordWithoutAudio)
     }
 
     // MARK: - Progress «N из 3» across combinations
@@ -221,17 +171,6 @@ struct OnboardingViewModelTests {
         let sut = OnboardingViewModel(permissions: fake)
 
         #expect(sut.progressHintText == "ждём запись экрана")
-    }
-
-    // MARK: - No video source — recording blocked
-
-    @Test("No video source (screen denied, camera denied) → canContinue false (AC-7)")
-    func noVideoSource_canContinueFalse() {
-        let fake = FakePermissionsService(screen: .denied, camera: .denied, microphone: .authorized)
-        let sut = OnboardingViewModel(permissions: fake)
-
-        #expect(!sut.canContinue)
-        #expect(!sut.effectivePermissions.canRecord)
     }
 
     // MARK: - Polling lifecycle
