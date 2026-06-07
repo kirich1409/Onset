@@ -359,3 +359,106 @@ decode-порядке, а не в display-порядке — без сортир
 `r_frame_rate` не используется — номинальный fps передаётся явным аргументом.
 
 Коды выхода: 0 — все проверки прошли, 1 — одна или более провалена, 2 — отсутствует зависимость.
+
+---
+
+## 9. Writer fault — отдельная поверхность, не backpressure-drop (#105)
+
+Фолт `AVAssetWriter` — жёсткий, невосстановимый сбой записи (`append()` вернул `false` не из-за
+`isReadyForMoreMediaData`, а из-за внутренней ошибки движка). Это не backpressure-drop [DROP-G] —
+они семантически противоположны: backpressure означает «downstream не успевает, попробуй позже»,
+фолт означает «writer мёртв, продолжать бессмысленно».
+
+### Канал `FileWriter.faults`
+
+```swift
+nonisolated let faults: AsyncStream<Void>
+```
+
+Свойства канала:
+- **At-most-once**: при фолте в стрим кладётся ровно один `Void`, после чего стрим финишируется.
+- **Без yield при штатном завершении**: `markFinished()` вызывает `finish()` напрямую (без
+  предшествующего `yield(())`), поэтому `for await _ in faults` завершается без итераций — канал
+  не блокирует потребителей и не сигнализирует ложный фолт.
+- `deinit` также вызывает `finish()` как safety-net; двойной `finish` — документированный no-op.
+
+### Маршрутизация фолта
+
+```
+FileWriter.append() → false (writer faulted)
+    ↓ isFaulted = true; faultsContinuation.yield(()); faultsContinuation.finish()
+FileWriter.faults (AsyncStream<Void>)
+    ↓ for await in DualFileOutputStage (fault-observer task, запускается при создании writer)
+DualFileOutputStage.recordFault(for: kind)
+    ↓ faultedWriterKinds.insert(kind)
+    ↓ если faultedWriterKinds ⊇ liveKinds → onAllWritersFaulted()
+RecordingSession.stop()   // немедленно, fail-fast; stop() идемпотентен через memoised stopTask
+```
+
+**Ключевой инвариант:** «live writers» — только те, для которых уже создан `FileWriter` (первый
+видеокадр поступил и `createWriter` выполнился). Lazy-врайтеры (не созданные к моменту фолта —
+нет входящих кадров) **не входят** в множество `liveKinds` и не блокируют срабатывание
+`onAllWritersFaulted`. Это намеренно: если, например, камера не дала ни одного кадра, а экранный
+writer фолтнул — запись останавливается немедленно, а не ждёт несуществующего camera-writer.
+
+### Canary-лог смены аудио-формата
+
+`DualFileOutputStage.routeAudio(_:)` содержит постоянный canary-лог:
+
+```swift
+self.logger.error("Audio format changed mid-stream (#105 regression): …")
+```
+
+Уровень `.error` выбран намеренно — смена формата после фикса #105 означает регрессию (pinning
+перестал работать); `.debug` или `.warning` будут отфильтрованы в release-сборках и при диагностике
+инцидента окажутся невидимы. Canary всегда проходит (никакая конфигурация логирования не обрезает
+`.error`).
+
+### Отличие от backpressure-дропов
+
+| | Backpressure-drop [DROP-G] | Writer fault |
+|---|---|---|
+| Условие | `videoSeam.isReadyForMoreMediaData == false` | `append()` вернул `false` при готовом input |
+| Восстановимо | Да — следующий `append()` может пройти | Нет — writer мёртв |
+| Попадает в `DropMonitor` | Да, `.encoderBackpressureDrops` | Нет |
+| Действие | Кадр отброшен, запись продолжается | `RecordingSession.stop()` немедленно |
+| Канал | `FileWriter.drops: AsyncStream<DropEvent>` | `FileWriter.faults: AsyncStream<Void>` |
+
+---
+
+## 10. Pinning аудио-формата (`CameraSource.audioOutputSettings`) (#105)
+
+### Root cause
+
+`AVCaptureAudioDataOutput` с `audioSettings = nil` доставляет буферы в device-native transport
+формате (например, int16 interleaved stereo для USB-микрофона MX Brio). После того как CoreAudio
+устанавливает channel routing, формат переключается mid-stream на float32 non-interleaved.
+`AVAssetWriterInput` (AAC) конфигурирует внутренний конвертер на **первом** буфере; смена layout
+после этого вызывает сбой конвертера с кодами `-11800` (AVFoundation internal) / `-12737`
+(ArrayTooSmall в AudioConverter), что убивает оба writer'а (#105).
+
+### Фикс
+
+`CameraSource.audioOutputSettings(sampleRate:channelCount:)` явно задаёт
+`AVCaptureAudioDataOutput.audioSettings` = LPCM float32 interleaved:
+
+```swift
+AVFormatIDKey: kAudioFormatLinearPCM,
+AVLinearPCMBitDepthKey: 32,
+AVLinearPCMIsFloatKey: true,
+AVLinearPCMIsNonInterleaved: false,   // interleaved
+AVLinearPCMIsBigEndianKey: false,
+```
+
+CoreAudio нормализует формат один раз до прихода любого буфера в pipeline — формат фиксирован на
+всю сессию. Параметры `sampleRate` и `channelCount` поступают из `RecordingConfiguration` — того же
+источника, что использует `FileWriter` для настройки AAC-входа; capture-формат и mux-формат
+согласованы конструктивно.
+
+### Почему смена формата теперь регрессия
+
+До фикса pipeline терпел mid-stream смену формата потому, что capture-формат не был закреплён.
+После фикса `audioSettings` зафиксированы — формат **никогда** не должен меняться в течение
+сессии. Любое срабатывание canary-лога `routeAudio(_:)` (см. раздел 9) означает, что pinning
+сломался или новое устройство выходит за пределы заявленного spec. Это регрессия класса #105,
+не диагностический шум.

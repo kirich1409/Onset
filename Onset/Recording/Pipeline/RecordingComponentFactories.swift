@@ -71,6 +71,13 @@ nonisolated protocol WriterControlling: Sendable {
     /// Writer-side backpressure drop events for `DropMonitor`. Registered at writer creation.
     nonisolated var drops: AsyncStream<DropEvent> { get }
 
+    /// Hard-fault events emitted exactly once when the writer enters the faulted state.
+    ///
+    /// Emits a single `Void` value when `AVAssetWriter.append()` returns `false` (terminal,
+    /// non-recoverable), then the stream finishes. Consumers that observe this stream should
+    /// treat its completion as an early-stop signal (#105 fail-fast path).
+    nonisolated var faults: AsyncStream<Void> { get }
+
     /// Establishes the timeline origin. MUST be passed the session's verbatim T0 (AC-7) — never
     /// `.zero`, never first-sample PTS.
     func start(atSourceTime sourceTime: CMTime) async throws

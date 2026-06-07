@@ -395,6 +395,76 @@ struct FileWriterDropTests {
         let faulted = await writer.isFaultedForTesting
         #expect(faulted, "append()==false must mark the writer faulted")
     }
+
+    @Test("append()==false → faults emits exactly one value, then finishes")
+    func appendReturnsFalse_faultsEmitsOne() async throws {
+        try FileManager.default.createDirectory(at: self.tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: self.tempDir) }
+
+        let url = self.tempDir.appending(path: "test-faults-one.mp4")
+        let hint = try makeHEVCFormatDescription()
+        let writer = try FileWriter(
+            outputURL: url,
+            configuration: .mvpDefault,
+            includeAudio: false,
+            sourceFormatHint: hint
+        )
+
+        let stub = StubWriterInput(ready: true, appendReturnValue: false)
+        await writer.injectVideoInputForTesting(stub)
+
+        // Collect every value emitted by the faults stream. The stream self-terminates
+        // after the first fault (yield + finish), so the task exits naturally.
+        let faultsCollector = Task { () -> [Void] in
+            var values: [Void] = []
+            for await _ in writer.faults {
+                values.append(())
+            }
+            return values
+        }
+
+        let sample = try self.makeEncodedSample(ptsSeconds: 1.0)
+        await writer.appendVideo(sample)
+
+        let values = await faultsCollector.value
+        #expect(values.count == 1, "faults must emit exactly one value on first append failure")
+    }
+
+    @Test("markFinished() → faults finishes WITHOUT emitting a value")
+    func markFinished_faultsFinishesWithoutYield() async throws {
+        try FileManager.default.createDirectory(at: self.tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: self.tempDir) }
+
+        let url = self.tempDir.appending(path: "test-faults-empty.mp4")
+        let hint = try makeHEVCFormatDescription()
+        let writer = try FileWriter(
+            outputURL: url,
+            configuration: .mvpDefault,
+            includeAudio: false,
+            sourceFormatHint: hint
+        )
+
+        // start() puts AVAssetWriter into .writing state — required before markFinished() so
+        // that rawVideoInput.markAsFinished() is a defined operation. Without startWriting(),
+        // markAsFinished() on an unstarted AVAssetWriterInput produces undefined behavior on
+        // some AVFoundation versions (hangs the actor, preventing faultsContinuation.finish()).
+        try await writer.start(atSourceTime: .zero)
+
+        // Collect from faults before calling markFinished so we don't miss any early yield.
+        let faultsCollector = Task { () -> [Void] in
+            var values: [Void] = []
+            for await _ in writer.faults {
+                values.append(())
+            }
+            return values
+        }
+
+        // markFinished() calls faultsContinuation.finish() without yield — graceful teardown.
+        await writer.markFinished()
+
+        let values = await faultsCollector.value
+        #expect(values.isEmpty, "markFinished must not emit a fault value — graceful finish only")
+    }
 }
 
 // MARK: - FileWriterAudioTests (L2, stub seam)
@@ -673,9 +743,11 @@ struct FileWriterLiveTests {
         // The encoder's compressed format subtype (hvc1 or hev1) must round-trip through
         // the passthrough muxer unchanged. Both are valid HEVC-in-MP4 tags.
         let encoderSubType = CMFormatDescriptionGetMediaSubType(formatHint)
+        let encoderTag = FileWriter.fourCC(encoderSubType)
+        let fileTag = FileWriter.fourCC(mediaSubType)
         #expect(
             mediaSubType == encoderSubType,
-            "expected subtype \(fourCC(encoderSubType)) from encoder, got \(fourCC(mediaSubType)) in file"
+            "expected subtype \(encoderTag) from encoder, got \(fileTag) in file"
         )
     }
 
@@ -741,19 +813,6 @@ struct FileWriterLiveTests {
         )
         #expect(CMTimeCompare(interval, expected) == 0)
     }
-}
-
-// MARK: - Helpers
-
-/// Renders a FourCC `UInt32` as a human-readable 4-character string for assertion messages.
-private func fourCC(_ value: FourCharCode) -> String {
-    let bytes: [UInt8] = [
-        UInt8((value >> 24) & 0xFF),
-        UInt8((value >> 16) & 0xFF),
-        UInt8((value >> 8) & 0xFF),
-        UInt8(value & 0xFF),
-    ]
-    return String(bytes: bytes, encoding: .ascii) ?? "????"
 }
 
 // swiftlint:enable no_magic_numbers
