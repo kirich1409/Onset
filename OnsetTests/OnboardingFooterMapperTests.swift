@@ -20,7 +20,8 @@ struct OnboardingFooterMapperTests {
         screen: Bool,
         camera: Bool,
         mic: Bool
-    ) -> OnboardingFooterDescriptor {
+    )
+    -> OnboardingFooterDescriptor {
         let canRecord = screen || camera
         let cameraOnly = !screen && camera
         let noAudio = canRecord && !mic
@@ -38,7 +39,7 @@ struct OnboardingFooterMapperTests {
 
     @Test("Awaiting + camera granted → graceful link + Проверить снова primary (AC-7)")
     func awaiting_cameraGranted_continueWithoutScreen() {
-        let desc = make(isAwaiting: true, screen: false, camera: true, mic: false)
+        let desc = self.make(isAwaiting: true, screen: false, camera: true, mic: false)
 
         #expect(desc.gracefulLink?.label == "Продолжить без экрана")
         #expect(desc.gracefulLink?.action == .proceed)
@@ -49,7 +50,7 @@ struct OnboardingFooterMapperTests {
 
     @Test("Awaiting + camera granted + mic granted → graceful link + Проверить снова (AC-7)")
     func awaiting_cameraAndMicGranted_continueWithoutScreen() {
-        let desc = make(isAwaiting: true, screen: false, camera: true, mic: true)
+        let desc = self.make(isAwaiting: true, screen: false, camera: true, mic: true)
 
         #expect(desc.gracefulLink?.label == "Продолжить без экрана")
         #expect(desc.primary.label == "Проверить снова")
@@ -58,7 +59,7 @@ struct OnboardingFooterMapperTests {
 
     @Test("Awaiting + no camera → no graceful link, Проверить снова only")
     func awaiting_noCamera_noGracefulLink() {
-        let desc = make(isAwaiting: true, screen: false, camera: false, mic: false)
+        let desc = self.make(isAwaiting: true, screen: false, camera: false, mic: false)
 
         #expect(desc.gracefulLink == nil)
         #expect(desc.primary.label == "Проверить снова")
@@ -68,7 +69,7 @@ struct OnboardingFooterMapperTests {
 
     @Test("Awaiting + no camera + mic granted → no graceful link, Проверить снова only")
     func awaiting_noCamera_micGranted_noGracefulLink() {
-        let desc = make(isAwaiting: true, screen: false, camera: false, mic: true)
+        let desc = self.make(isAwaiting: true, screen: false, camera: false, mic: true)
 
         #expect(desc.gracefulLink == nil)
         #expect(desc.primary.label == "Проверить снова")
@@ -78,7 +79,7 @@ struct OnboardingFooterMapperTests {
 
     @Test("Full mode → no graceful link, Перейти к записи enabled (AC-8)")
     func fullMode_goToRecording() {
-        let desc = make(screen: true, camera: true, mic: true)
+        let desc = self.make(screen: true, camera: true, mic: true)
 
         #expect(desc.gracefulLink == nil)
         #expect(desc.primary.label == "Перейти к записи")
@@ -90,7 +91,7 @@ struct OnboardingFooterMapperTests {
 
     @Test("No video source (S=0, C=0, M=0) → Позже link + disabled Продолжить (AC-7)")
     func noVideoSource_nothingGranted() {
-        let desc = make(screen: false, camera: false, mic: false)
+        let desc = self.make(screen: false, camera: false, mic: false)
 
         #expect(desc.gracefulLink?.label == "Позже")
         #expect(desc.gracefulLink?.action == .proceed)
@@ -101,7 +102,7 @@ struct OnboardingFooterMapperTests {
 
     @Test("No video source (S=0, C=0, M=1) → Позже link + disabled Продолжить")
     func noVideoSource_onlyMicGranted() {
-        let desc = make(screen: false, camera: false, mic: true)
+        let desc = self.make(screen: false, camera: false, mic: true)
 
         #expect(desc.gracefulLink?.label == "Позже")
         #expect(!desc.primary.isEnabled)
@@ -114,7 +115,7 @@ struct OnboardingFooterMapperTests {
     func cameraOnly_noMic_continueWithoutScreen() {
         // The overlap cell: both cameraOnly and noAudio are true.
         // cameraOnly is checked first → label reflects the camera-only recording mode.
-        let desc = make(screen: false, camera: true, mic: false)
+        let desc = self.make(screen: false, camera: true, mic: false)
 
         #expect(desc.gracefulLink == nil)
         #expect(desc.primary.label == "Продолжить без экрана")
@@ -124,7 +125,7 @@ struct OnboardingFooterMapperTests {
 
     @Test("Camera only + mic granted (S=0, C=1, M=1) → no link, Продолжить без экрана enabled (AC-7)")
     func cameraOnly_micGranted_continueWithoutScreen() {
-        let desc = make(screen: false, camera: true, mic: true)
+        let desc = self.make(screen: false, camera: true, mic: true)
 
         #expect(desc.gracefulLink == nil)
         #expect(desc.primary.label == "Продолжить без экрана")
@@ -135,7 +136,7 @@ struct OnboardingFooterMapperTests {
 
     @Test("Screen only, no mic (S=1, C=0, M=0) → Записать без звука link + disabled Продолжить (AC-7)")
     func screenOnly_noMic_recordWithoutAudio() {
-        let desc = make(screen: true, camera: false, mic: false)
+        let desc = self.make(screen: true, camera: false, mic: false)
 
         #expect(desc.gracefulLink?.label == "Записать без звука")
         #expect(desc.gracefulLink?.action == .proceed)
@@ -145,7 +146,7 @@ struct OnboardingFooterMapperTests {
 
     @Test("Screen + camera, no mic (S=1, C=1, M=0) → Записать без звука link + disabled Продолжить (AC-7)")
     func screenAndCamera_noMic_recordWithoutAudio() {
-        let desc = make(screen: true, camera: true, mic: false)
+        let desc = self.make(screen: true, camera: true, mic: false)
 
         #expect(desc.gracefulLink?.label == "Записать без звука")
         #expect(desc.primary.label == "Продолжить")
@@ -156,7 +157,7 @@ struct OnboardingFooterMapperTests {
 
     @Test("Screen only + mic granted (S=1, C=0, M=1) → no link, Продолжить enabled")
     func screenAndMic_noCamera_proceed() {
-        let desc = make(screen: true, camera: false, mic: true)
+        let desc = self.make(screen: true, camera: false, mic: true)
 
         #expect(desc.gracefulLink == nil)
         #expect(desc.primary.label == "Продолжить")
@@ -180,11 +181,11 @@ struct OnboardingFooterMapperTests {
         ]
     )
     func noTwoEnabledProceedButtons(screen: Bool, camera: Bool, mic: Bool) {
-        let desc = make(isAwaiting: false, screen: screen, camera: camera, mic: mic)
+        let desc = self.make(isAwaiting: false, screen: screen, camera: camera, mic: mic)
         let enabledProceedCount = [
             desc.gracefulLink.map { $0.action == .proceed && true } ?? false,
             desc.primary.action == .proceed && desc.primary.isEnabled,
-        ].filter { $0 }.count
+        ].count { $0 }
         #expect(enabledProceedCount <= 1)
     }
 
@@ -198,11 +199,11 @@ struct OnboardingFooterMapperTests {
         ]
     )
     func noTwoEnabledProceedButtons_awaiting(camera: Bool, mic: Bool) {
-        let desc = make(isAwaiting: true, screen: false, camera: camera, mic: mic)
+        let desc = self.make(isAwaiting: true, screen: false, camera: camera, mic: mic)
         let enabledProceedCount = [
             desc.gracefulLink.map { $0.action == .proceed && true } ?? false,
             desc.primary.action == .proceed && desc.primary.isEnabled,
-        ].filter { $0 }.count
+        ].count { $0 }
         #expect(enabledProceedCount <= 1)
     }
 
@@ -220,7 +221,7 @@ struct OnboardingFooterMapperTests {
         ]
     )
     func noDuplicateEnabledActions(screen: Bool, camera: Bool, mic: Bool) {
-        let desc = make(isAwaiting: false, screen: screen, camera: camera, mic: mic)
+        let desc = self.make(isAwaiting: false, screen: screen, camera: camera, mic: mic)
         guard let link = desc.gracefulLink, desc.primary.isEnabled else { return }
         // If both are enabled, their actions must differ
         #expect(link.action != desc.primary.action)

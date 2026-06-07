@@ -56,7 +56,8 @@ extension OnboardingFooterDescriptor.Action: Equatable {
     nonisolated static func == (
         lhs: OnboardingFooterDescriptor.Action,
         rhs: OnboardingFooterDescriptor.Action
-    ) -> Bool {
+    )
+    -> Bool {
         switch (lhs, rhs) {
         case (.proceed, .proceed), (.recheck, .recheck):
             true
@@ -67,32 +68,11 @@ extension OnboardingFooterDescriptor.Action: Equatable {
     }
 }
 
-extension OnboardingFooterDescriptor.GracefulLink: Equatable {
-    nonisolated static func == (
-        lhs: OnboardingFooterDescriptor.GracefulLink,
-        rhs: OnboardingFooterDescriptor.GracefulLink
-    ) -> Bool {
-        lhs.label == rhs.label && lhs.action == rhs.action
-    }
-}
+extension OnboardingFooterDescriptor.GracefulLink: Equatable {}
 
-extension OnboardingFooterDescriptor.PrimaryButton: Equatable {
-    nonisolated static func == (
-        lhs: OnboardingFooterDescriptor.PrimaryButton,
-        rhs: OnboardingFooterDescriptor.PrimaryButton
-    ) -> Bool {
-        lhs.label == rhs.label && lhs.action == rhs.action && lhs.isEnabled == rhs.isEnabled
-    }
-}
+extension OnboardingFooterDescriptor.PrimaryButton: Equatable {}
 
-extension OnboardingFooterDescriptor: Equatable {
-    nonisolated static func == (
-        lhs: OnboardingFooterDescriptor,
-        rhs: OnboardingFooterDescriptor
-    ) -> Bool {
-        lhs.gracefulLink == rhs.gracefulLink && lhs.primary == rhs.primary
-    }
-}
+extension OnboardingFooterDescriptor: Equatable {}
 
 // MARK: - OnboardingFooterMapper
 
@@ -128,11 +108,12 @@ nonisolated enum OnboardingFooterMapper {
         cameraOnly: Bool,
         noAudio: Bool,
         fullMode: Bool
-    ) -> OnboardingFooterDescriptor {
+    )
+    -> OnboardingFooterDescriptor {
         if isAwaiting {
-            return awaitingDescriptor(cameraOnly: cameraOnly)
+            return self.awaitingDescriptor(cameraOnly: cameraOnly)
         }
-        return normalDescriptor(
+        return self.normalDescriptor(
             canRecord: canRecord,
             cameraOnly: cameraOnly,
             noAudio: noAudio,
@@ -144,7 +125,8 @@ nonisolated enum OnboardingFooterMapper {
 
     nonisolated private static func awaitingDescriptor(
         cameraOnly: Bool
-    ) -> OnboardingFooterDescriptor {
+    )
+    -> OnboardingFooterDescriptor {
         // Awaiting: "Проверить снова" is always the primary (stays on screen).
         // "Продолжить без экрана" appears as a graceful link only when camera is already
         // available — the user can leave the awaiting state without granting screen.
@@ -162,7 +144,8 @@ nonisolated enum OnboardingFooterMapper {
         cameraOnly: Bool,
         noAudio: Bool,
         fullMode: Bool
-    ) -> OnboardingFooterDescriptor {
+    )
+    -> OnboardingFooterDescriptor {
         if fullMode {
             // All three granted — single enabled proceed, label signals recording is ready.
             return OnboardingFooterDescriptor(
