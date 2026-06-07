@@ -455,6 +455,11 @@ struct CameraSourceLiveTests {
         let setup = try makeLiveCaptureSource(role: .preview)
         try await setup.source.start(anchoredTo: setup.anchor)
 
+        // Positive: session must have started — a nil handle means start() silently failed.
+        #expect(await setup.source.sessionHandle() != nil)
+        // Role-gating: preview must not launch the telemetry flush task.
+        #expect(await setup.source.captureTelemetryTask == nil)
+
         // Race a frame-wait task against a 1s timeout; the timeout winning is the expected path.
         let gotFrame = await withTaskGroup(of: Bool.self) { group in
             group.addTask {

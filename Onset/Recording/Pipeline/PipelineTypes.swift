@@ -465,6 +465,10 @@ extension RecordingRevocation {
 ///
 /// `rawValue` is the wire-format token emitted in the `role=` field of every capture
 /// telemetry line. Keep these stable — log analysis depends on the exact strings.
+///
+/// Role-conditional behavior lives in two guard sites: `CameraSource.start()` (telemetry task)
+/// and `CameraSource+SessionSetup.attachOutputs(to:shims:)` (data outputs). Add a third
+/// gate in both places if a new role-specific behavior is needed.
 nonisolated enum CaptureRole: String, Equatable {
     /// Live preview: session runs for the preview layer only; no data outputs, no telemetry task.
     case preview
