@@ -200,3 +200,21 @@ TCC-разрешения, политика записи, запись MP4.
   `start_transitionsToRecording`, `elapsedAfterStop_isFrozen`.
 - **Поллинг-ассерты**: общий хелпер `eventuallyMain` (дедлайн-таймаут) в
   `RecordingCoordinatorTests.swift`.
+
+Конвенции написания тестов — в `OnsetTests/CLAUDE.md` (подгружается агентом при работе
+с тестами).
+
+## Ссылки на документацию
+
+Внешние справочники по стеку проекта (проверены 2026-06-07):
+
+- ScreenCaptureKit — <https://developer.apple.com/documentation/screencapturekit>
+- AVFoundation — <https://developer.apple.com/documentation/avfoundation>
+- VideoToolbox — <https://developer.apple.com/documentation/videotoolbox>
+- Swift Testing — <https://developer.apple.com/documentation/testing>
+- MenuBarExtra — <https://developer.apple.com/documentation/swiftui/menubarextra>
+- Privacy manifests — <https://developer.apple.com/documentation/bundleresources/privacy-manifest-files>
+- Required-Reason API — <https://developer.apple.com/documentation/bundleresources/describing-use-of-required-reason-api>
+- Миграция на Swift 6 concurrency — <https://www.swift.org/migration/>
+- Каталог правил SwiftLint — <https://realm.github.io/SwiftLint/rule-directory.html>
+- Правила SwiftFormat — <https://github.com/nicklockwood/SwiftFormat/blob/main/Rules.md>
