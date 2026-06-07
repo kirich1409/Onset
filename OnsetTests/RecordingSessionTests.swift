@@ -1172,6 +1172,65 @@ private func l5KeepOutput() -> Bool {
     ProcessInfo.processInfo.environment["ONSET_L5_KEEP_OUTPUT"] == "1"
 }
 
+/// Recording duration in seconds for L5 tests.
+///
+/// Reads `ONSET_L5_DURATION_SECONDS` from the environment. Falls back to 5 when
+/// unset, empty, or not a positive integer. The suite `.timeLimit(.minutes(2))` is
+/// the hard ceiling — set a duration well below ~115 s or the test will time out.
+private func l5DurationSeconds() -> Int {
+    guard let raw = ProcessInfo.processInfo.environment["ONSET_L5_DURATION_SECONDS"],
+          !raw.isEmpty,
+          let parsed = Int(raw),
+          parsed > 0
+    else { return 5 }
+    return parsed
+}
+
+/// Case-insensitive substring filter applied to discovered camera display names.
+///
+/// Reads `ONSET_L5_CAMERA_NAME` from the environment. When unset or empty the
+/// first discovered camera is used (same behaviour as before this knob existed).
+/// When set but no camera name contains the substring, falls back to first.
+/// Example: `ONSET_L5_CAMERA_NAME=MX Brio` pins the Logitech MX Brio.
+private func l5CameraName() -> String? {
+    guard let raw = ProcessInfo.processInfo.environment["ONSET_L5_CAMERA_NAME"],
+          !raw.isEmpty
+    else { return nil }
+    return raw
+}
+
+/// Picks a camera from `cameras` whose `AVCaptureDevice.localizedName` contains
+/// `nameFilter` (case-insensitive), falling back to `cameras.first` when no match.
+///
+/// The filter uses `AVCaptureDevice` directly for the name comparison because
+/// `CameraDevice` stores only `uniqueID`/`formats` (no display name — PII policy).
+/// The device name is used transiently for matching only and is never logged.
+///
+/// - Parameters:
+///   - cameras: Pre-enumerated `CameraDevice` snapshots (same list as the session uses).
+///   - nameFilter: Case-insensitive substring to match against `localizedName`.
+/// - Returns: The first matching camera, or `cameras.first` when no match is found.
+///   Logs whether the filter matched (boolean flag only — no name in the log).
+private func pickCamera(from cameras: [CameraDevice], nameFilter: String) -> CameraDevice? {
+    let discoverySession = AVCaptureDevice.DiscoverySession(
+        deviceTypes: [.builtInWideAngleCamera, .external, .continuityCamera],
+        mediaType: .video,
+        position: .unspecified
+    )
+    let matchedID = discoverySession.devices
+        .first { $0.localizedName.localizedCaseInsensitiveContains(nameFilter) }
+        .map(\.uniqueID)
+
+    if let matchedID {
+        if let camera = cameras.first(where: { $0.uniqueID == matchedID }) {
+            l5Logger.notice("L5_CAMERA_PICK name_matched=true")
+            return camera
+        }
+    }
+    l5Logger.notice("L5_CAMERA_PICK name_matched=false")
+    return cameras.first
+}
+
 nonisolated private let l5Logger = Logger(
     subsystem: "dev.androidbroadcast.Onset",
     category: "RecordingSessionL5Tests"
@@ -1184,13 +1243,47 @@ struct RecordingSessionLiveTests {
         .enabled(if: l5RecordingEnabled())
     )
     func liveRecording_producesTwoNonEmptyFiles() async throws {
+        try await self.runLiveRecordingSession(includeScreen: true, outputSubdir: "dual")
+    }
+
+    @Test(
+        "camera-only session records → one non-empty camera file (frames > 0, audio > 0)",
+        .enabled(if: l5RecordingEnabled())
+    )
+    func liveRecording_cameraOnly_producesCameraFile() async throws {
+        try await self.runLiveRecordingSession(includeScreen: false, outputSubdir: "cameraOnly")
+    }
+
+    // MARK: - Shared helper
+
+    /// Runs a live recording session for the configured duration and asserts non-empty output.
+    ///
+    /// When `includeScreen` is `true` the session receives both screen and camera
+    /// permissions, producing two output files. When `false` only the camera permission
+    /// is granted, producing a single camera file (audio included when a mic is present).
+    ///
+    /// The `outputSubdir` value scopes kept output under `OnsetL5Acceptance/<subdir>/`
+    /// so dual and camera-only runs do not clobber each other.
+    private func runLiveRecordingSession(includeScreen: Bool, outputSubdir: String) async throws {
+        let mode = includeScreen ? "dual" : "cameraOnly"
+
         // Resolve a real display + camera + mic. Skipped silently if hardware is unavailable.
         let displays = try await DeviceDiscovery.displays(screenAuthorized: true)
         let display = try #require(displays.first, "no display available for L5")
         let cameras = DeviceDiscovery.cameras(cameraAuthorized: true)
-        let camera = try #require(cameras.first, "no camera available for L5")
+        let camera: CameraDevice = if let nameFilter = l5CameraName() {
+            try #require(pickCamera(from: cameras, nameFilter: nameFilter), "no camera available for L5")
+        } else {
+            try #require(cameras.first, "no camera available for L5")
+        }
         let format = try CameraFormatSelector.pickBestFormat(from: camera.formats, minFps: 30)
         let mic = DeviceDiscovery.microphones(microphoneAuthorized: true).first
+
+        let duration = l5DurationSeconds()
+        let camW = format.pixelWidth
+        let camH = format.pixelHeight
+        let camFps = Int(format.maxFps)
+        l5Logger.notice("L5_RUN_START mode=\(mode) dur_s=\(duration) cam_w=\(camW) cam_h=\(camH) cam_fps=\(camFps)")
 
         let config = RecordingConfiguration.mvpDefault
         let plan = ResolvedRecordingPlan(
@@ -1206,12 +1299,13 @@ struct RecordingSessionLiveTests {
         )
 
         // Write to a temp dir, NOT ~/Movies.
-        // When ONSET_L5_KEEP_OUTPUT=1 use a stable path so files survive the test run for inspection.
+        // When ONSET_L5_KEEP_OUTPUT=1 use a stable subdir path so files survive the test run.
         let keepOutput = l5KeepOutput()
         let tempDir: URL
         if keepOutput {
             tempDir = FileManager.default.temporaryDirectory
                 .appending(path: "OnsetL5Acceptance", directoryHint: .isDirectory)
+                .appending(path: outputSubdir, directoryHint: .isDirectory)
             // Remove any leftover from a previous run then create clean.
             try? FileManager.default.removeItem(at: tempDir)
         } else {
@@ -1239,18 +1333,21 @@ struct RecordingSessionLiveTests {
         )
 
         try await session.start(permissions: EffectivePermissions(
-            screenAvailable: true, cameraAvailable: true, microphoneAvailable: mic != nil
+            screenAvailable: includeScreen, cameraAvailable: true, microphoneAvailable: mic != nil
         ))
-        try await Task.sleep(nanoseconds: 5_000_000_000) // 5 s
+        try await Task.sleep(for: .seconds(l5DurationSeconds()))
         let result = await session.stop()
 
-        if keepOutput, result.outputURLs.count >= 2 {
-            let screen = result.outputURLs[0].path
-            let camera = result.outputURLs[1].path
-            l5Logger.info("L5_KEEP_OUTPUT screen=\(screen) camera=\(camera)")
+        l5Logger.notice("L5_RUN_END mode=\(mode)")
+
+        if keepOutput {
+            for url in result.outputURLs {
+                l5Logger.info("L5_KEEP_OUTPUT path=\(url.path(percentEncoded: false))")
+            }
         }
 
-        #expect(result.outputURLs.count == 2, "both files should be produced")
+        let expectedCount = includeScreen ? 2 : 1
+        #expect(result.outputURLs.count == expectedCount, "expected \(expectedCount) output file(s)")
         for url in result.outputURLs {
             let exists = FileManager.default.fileExists(atPath: url.path)
             #expect(exists, "output file must exist: \(url.lastPathComponent)")
@@ -1262,8 +1359,9 @@ struct RecordingSessionLiveTests {
             let frameCount = try self.countSamples(of: videoTrack, in: asset)
             #expect(frameCount > 0, "video track must contain > 0 frames: \(url.lastPathComponent)")
 
-            // Audio fans out to BOTH files; when a mic was resolved, assert real audio samples
-            // exist (a denied/silent capture would still produce an openable empty track).
+            // Audio fans out to BOTH files in dual mode; in camera-only the single file carries
+            // audio. When a mic was resolved, assert real audio samples exist (a denied/silent
+            // capture would still produce an openable empty track).
             if mic != nil {
                 let audioTracks = try await asset.loadTracks(withMediaType: .audio)
                 let audioTrack = try #require(audioTracks.first, "no audio track in \(url.lastPathComponent)")
