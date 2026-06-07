@@ -1177,8 +1177,8 @@ private func l5KeepOutput() -> Bool {
 /// Reads `ONSET_L5_DURATION_SECONDS` from the environment. Falls back to 5 when
 /// unset or empty (silent). Logs a warning and falls back to 5 when the value is set
 /// but is not a positive integer (e.g. "30s", "0") so the misconfiguration is visible.
-/// The suite `.timeLimit(.minutes(2))` is the hard ceiling — set a duration well
-/// below ~115 s or the test will time out.
+/// The suite `.timeLimit(.minutes(10))` is the hard ceiling — set a duration well
+/// below ~590 s or the test will time out.
 private func l5DurationSeconds() -> Int {
     guard let raw = ProcessInfo.processInfo.environment["ONSET_L5_DURATION_SECONDS"],
           !raw.isEmpty
@@ -1240,7 +1240,7 @@ nonisolated private let l5Logger = Logger(
     category: "RecordingSessionL5Tests"
 )
 
-@Suite("RecordingSession — L5 live recording", .serialized, .timeLimit(.minutes(2)))
+@Suite("RecordingSession — L5 live recording", .serialized, .timeLimit(.minutes(10)))
 struct RecordingSessionLiveTests {
     @Test(
         "real session records ~5s → two non-empty files (frames > 0, audio > 0)",
