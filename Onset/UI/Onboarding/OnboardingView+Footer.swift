@@ -62,68 +62,67 @@ extension OnboardingView {
 
     // MARK: - Footer buttons
 
-    var checkAgainButton: some View {
-        Button {
-            viewModel.checkNow()
-        } label: {
-            Label("Проверить снова", systemImage: "arrow.clockwise")
-        }
-        .buttonStyle(.bordered)
+    /// Computes the footer descriptor for the current VM state.
+    var footerDescriptor: OnboardingFooterDescriptor {
+        let effective = viewModel.effectivePermissions
+        return OnboardingFooterMapper.descriptor(
+            isAwaiting: viewModel.isAwaitingScreen,
+            canRecord: effective.canRecord,
+            cameraOnly: effective.cameraOnlyAvailable,
+            noAudio: effective.videoWithoutAudioAvailable,
+            fullMode: effective.fullModeAvailable
+        )
     }
 
-    /// «Продолжить без экрана» link — shown whenever screen is not granted AND camera is
-    /// available (AC-7 amended: not gated on awaiting state, not gated on denied state).
-    @ViewBuilder
-    var continueWithoutScreenButton: some View {
-        if viewModel.canContinueWithoutScreen {
-            Button("Продолжить без экрана") {
-                onProceedToMain()
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(Color.accentColor)
-        }
-    }
-
-    @ViewBuilder
+    /// Renders the footer button row from the ``OnboardingFooterDescriptor``.
+    ///
+    /// Exactly one primary button is always shown; an optional graceful link appears to
+    /// its left. The mapper guarantees no two enabled buttons share the same action,
+    /// so duplicate-action buttons are structurally impossible.
     var footerButtons: some View {
-        if viewModel.isAwaitingScreen {
-            self.awaitingFooterButtons
+        HStack(spacing: Metrics.footerHSpacing) {
+            let descriptor = self.footerDescriptor
+            if let link = descriptor.gracefulLink {
+                Button(link.label) {
+                    self.perform(link.action)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(link.action == .proceed ? Color.accentColor : Color.secondary)
+            }
+            self.primaryButton(descriptor.primary)
+        }
+    }
+
+    /// Renders the primary button, applying the correct button style per action.
+    ///
+    /// `buttonStyle` is a generic modifier — the style is fixed at compile time and cannot
+    /// be selected via a runtime conditional on a single button instance. Two branches are
+    /// used instead to keep the style statically typed.
+    @ViewBuilder
+    private func primaryButton(_ primary: OnboardingFooterDescriptor.PrimaryButton) -> some View {
+        if primary.action == .recheck {
+            Button(primary.label) {
+                self.perform(primary.action)
+            }
+            .buttonStyle(.bordered)
+            .disabled(!primary.isEnabled)
         } else {
-            self.normalFooterButtons
-        }
-    }
-
-    /// Footer for the "Ожидание…" state — shows «Проверить снова» plus
-    /// «Продолжить без экрана» when camera is already available (AC-7).
-    var awaitingFooterButtons: some View {
-        HStack(spacing: Metrics.footerHSpacing) {
-            self.continueWithoutScreenButton
-            self.checkAgainButton
-        }
-    }
-
-    var normalFooterButtons: some View {
-        HStack(spacing: Metrics.footerHSpacing) {
-            if viewModel.canRecordWithoutAudio {
-                Button("Записать без звука") {
-                    onProceedToMain()
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(Color.accentColor)
-            }
-            self.continueWithoutScreenButton
-            if !viewModel.effectivePermissions.canRecord {
-                Button("Позже") {
-                    onProceedToMain()
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-            }
-            Button("Продолжить") {
-                onProceedToMain()
+            Button(primary.label) {
+                self.perform(primary.action)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(!viewModel.canContinue)
+            .disabled(!primary.isEnabled)
+        }
+    }
+
+    /// Dispatches a footer action to the correct handler.
+    private func perform(_ action: OnboardingFooterDescriptor.Action) {
+        switch action {
+        case .proceed:
+            onProceedToMain()
+
+        case .recheck:
+            viewModel.checkNow()
         }
     }
 }

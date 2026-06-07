@@ -96,4 +96,31 @@ import SwiftUI
             )
         ) {}
     }
+
+    #Preview("Screen denied, camera+mic granted — Продолжить без экрана") {
+        // Screen denied + camera+mic authorized → single "Продолжить без экрана" primary.
+        let viewModel = OnboardingViewModel(
+            permissions: PreviewPermissionsService(
+                screen: .denied,
+                camera: .authorized,
+                microphone: .authorized
+            )
+        )
+        // Simulate awaiting so the "Проверить снова" footer is shown (matches the design ref PNG).
+        viewModel.requestScreenRecording()
+        return OnboardingView(viewModel: viewModel) {}
+    }
+
+    #Preview("Camera only, no mic — Продолжить без экрана (overlap cell)") {
+        // S=0, C=1, M=0: cameraOnly and noAudio both true → resolves to camera-only label.
+        OnboardingView(
+            viewModel: OnboardingViewModel(
+                permissions: PreviewPermissionsService(
+                    screen: .notDetermined,
+                    camera: .authorized,
+                    microphone: .denied
+                )
+            )
+        ) {}
+    }
 #endif
