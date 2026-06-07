@@ -406,7 +406,9 @@ struct VideoEncoderTests {
         let encoder = await makeEncoder(mock: mock, anchor: anchor)
         try await encoder.start()
 
-        await encoder.clockTick()
+        // nowSeconds is immaterial: lastPixelBuffer is nil so clockTick returns early
+        // before any normalizer or encoding call regardless of the injected time.
+        await encoder.clockTick(nowSeconds: CMTimeGetSeconds(anchor.anchorTime) + 1.0)
 
         #expect(mock.encodedBuffers.isEmpty)
         #expect(await encoder.cfrNormalizationDropCount == 0)

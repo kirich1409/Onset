@@ -539,14 +539,6 @@ actor VideoEncoder {
         self.clockTick(nowSeconds: nowSeconds)
     }
 
-    /// Test-only entry: reads the real clock and drives a tick without recording tick-lag.
-    ///
-    /// Used by tests that verify no-op behavior before the first frame (no target deadline
-    /// is meaningful in that context). Production code uses the `targetDeadlineSeconds` path.
-    func clockTick() {
-        self.clockTick(nowSeconds: CMTimeGetSeconds(PipelineClock.currentHostTime()))
-    }
-
     /// Test-only entry: drives a clock tick at an injected `nowSeconds` without recording
     /// tick-lag (no target deadline is available in this path).
     ///

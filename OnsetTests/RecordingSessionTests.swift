@@ -1213,7 +1213,7 @@ private func l5CameraName() -> String? {
 ///   Logs whether the filter matched (boolean flag only — no name in the log).
 private func pickCamera(from cameras: [CameraDevice], nameFilter: String) -> CameraDevice? {
     let discoverySession = AVCaptureDevice.DiscoverySession(
-        deviceTypes: [.builtInWideAngleCamera, .external, .continuityCamera],
+        deviceTypes: DeviceDiscovery.cameraDeviceTypes,
         mediaType: .video,
         position: .unspecified
     )
