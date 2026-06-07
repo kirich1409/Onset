@@ -10,9 +10,9 @@
 
 ---
 
-**Последнее обновление:** 2026-06-07
+**Последнее обновление:** 2026-06-07 (v0.2)
 **Владелец:** @kirich1409
-**Статус критериев:** черновик (v0.1) — требует уточнения после #104 и #97/#98
+**Статус критериев:** черновик (v0.2) — расширен до пяти осей; камера-метрики обновлены данными #112 (2026-06-07)
 
 ---
 
@@ -33,16 +33,18 @@
 
 ### 2.1 Камера
 
+Требуемый минимум production bar (владелец продукта, 2026-06-07; детали → [#113](https://github.com/kirich1409/Onset/issues/113)):
+
 | Устройство | Режим | Статус поддержки |
 |---|---|---|
-| Logitech MX Brio | 1080p30 (auto, текущий) | ✅ проверяется |
-| Logitech MX Brio | 4K30 (авто при поддержке устройством) | ⏳ не проверялось — `CameraFormatSelector` выбирает максимально пиксельный формат ≥30fps, но тест в этом режиме не проводился |
-| Logitech MX Brio | 1080p60 | ❌ gap — ручного выбора режима камеры нет (issue будет заведён отдельно); при наличии 4K30 формата автовыбор уйдёт туда, 1080p60 недостижим |
-| MacBook Pro (FaceTime HD) | нативный формат (авто) | ⏳ не проверялось — автовыбор максимального формата ≥30fps работает, конкретный формат зависит от модели MacBook |
+| Logitech MX Brio | **4K30** (production minimum) | ❌ gap — автовыбор max-пиксельного уйдёт сюда при наличии формата, но режим не тестировался; критерии качества (#112) не верифицированы (#113) |
+| Logitech MX Brio | **1080p60** (production minimum) | ❌ gap — ручного выбора нет; при наличии 4K30 формата недостижим (#113) |
+| Logitech MX Brio | 1080p30 (auto, текущий стенд замеров) | ✅ функционально работает; критерии качества ❌ (#112) |
+| MacBook Pro (встроенная камера) | нативные режимы (авто, ≥30fps) | ⏳ не проверялось (#113) |
 
 > **Текущее состояние кода:** `CameraFormatSelector.pickBestFormat` выбирает формат с
 > наибольшим числом пикселей (width × height) при условии `maxFps ≥ minCameraFps` (30 по
-> умолчанию). Ручного выбора режима в UI нет — это gap для 4K30/1080p60 матрицы выше.
+> умолчанию). Ручного выбора режима в UI нет — это gap для матрицы 4K30/1080p60 выше.
 
 ### 2.2 Экран
 
@@ -67,14 +69,20 @@
 
 ### 3.1 Камера (текущий стенд: MX Brio 1080p30)
 
+Критерии применяются к каждому поддерживаемому режиму из §2.1. Данные ниже — замеры 2026-06-07 в режиме 1080p30 при дневном свете, пользователь в кадре (контент-валидно; активная agent-сессия на экране — фон умерено загрязнён, но порядок величин однозначен; детали → [#112](https://github.com/kirich1409/Onset/issues/112)).
+
 | Критерий | Порог | Метод | Статус |
 |---|---|---|---|
 | Выживаемость enc_real | ≥ 95% поданных кадров | телеметрия `enc_real / capture` | ❌ ~84% (enc_real 20.0 / capture 23.8 при тихом прогоне, `cfr-clock-acceptance.md`) |
-| Fresh-content rate (mpdecimate) | ≥ 25 fps | `verify-cfr.sh` ассерт C | ⏳ не измерено в чистых условиях (content-confounded в dark room: 0.01fps; для строгой проверки нужен тихий прогон с движением, телеметрическое доказательство: enc_real ≈ 20fps) |
+| Fresh-content rate (mpdecimate) | ≥ 95% номинала (≥ 28.5 fps при 30, ≥ 57 fps при 60) | `verify-cfr.sh` ассерт C + mpdecimate | ❌ **~43% номинала** (12.4–13.5 fps из 30; 3 прогона 2026-06-07 при дневном свете — [#112](https://github.com/kirich1409/Onset/issues/112)) — **блокер релиза** |
+| Capture overflow | ≈ 0/с | телеметрия `capture_overflow` | ❌ 12–15/с (стенд 2026-06-07, [#112](https://github.com/kirich1409/Onset/issues/112)) |
+| tick_lag (camera-актор) | медиана ≤ 10 мс, max ≤ 50 мс | телеметрия `tick_lag_ms` | ❌ avg 33–40 мс, max до 133 мс (2026-06-07, [#112](https://github.com/kirich1409/Onset/issues/112)) |
 | Серии дублей — мода | ≤ 2 кадра | `verify-cfr.sh` ассерт D: `MAX_RUN_MODE=2` | ✅ закрыто #102 (до: ~13, после: ≤2) |
 | Серии дублей — нет длинных | ни одна серия длиной ≥ 5 не повторяется ≥ 10 раз | `verify-cfr.sh` `LONG_RUN_LEN=5, LONG_RUN_MAX=10` | ✅ закрыто #102 |
-| Пакетный rate | отклонение ≤ 2% от номинала | `verify-cfr.sh` ассерт A: `RATE_TOL_PCT=2` | ❌ ~67% номинала (20.0/30) — обусловлено кросс-полосной конкуренцией VT (#104) |
+| Пакетный rate (файл pkt/s) | отклонение ≤ 2% от номинала | `verify-cfr.sh` ассерт A: `RATE_TOL_PCT=2` | ❌ 25–27 pkt/s из 30 (~83–90%; замер 2026-06-07, [#112](https://github.com/kirich1409/Onset/issues/112)); ранее: ~67% (20.0/30, тихий прогон, `cfr-clock-acceptance.md`) |
 | Равномерность PTS-дельт | ≤ 10 гэпов/мин > 1.5 слота | `verify-cfr.sh` ассерт B | ✅ закрыто #102 (B-frame sorting fix) |
+| Пиксельный формат | 420v (`kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange`) | `ffprobe -show_streams` `pix_fmt` | ✅ `RecordingConfiguration.mvpDefault`: pixelFormat=[.biPlanar420v, .biPlanar420f]; 420v — первый/приоритетный |
+| Кодек видео | HEVC / hvc1 | `ffprobe -show_streams` `codec_name`, `codec_tag_string` | ✅ `mvpDefault`: codec=HEVC, sampleEntry=hvc1 (h264 в спеках не заявлен) |
 
 ### 3.2 Экран (4K60, основной дисплей)
 
@@ -89,17 +97,33 @@
 
 | Критерий | Порог | Метод | Статус |
 |---|---|---|---|
-| Валидные файлы с любым системным миком | 0 writer faults, hevc+aac, moov на месте | `ffprobe` оба файла | ✅ закрыто #105 |
+| Валидные файлы с любым системным миком (mono/stereo/USB) | 0 writer faults, hevc+aac, moov на месте | `ffprobe` оба файла | ✅ закрыто #105, canary-подтверждено |
+| Выходной формат | AAC 48 kHz / mono / 128 kbps (текущий MVP; стерео — post-MVP, [#92](https://github.com/kirich1409/Onset/issues/92)) | `ffprobe -show_streams` `codec_name`, `sample_rate`, `channels`, `bit_rate` | ✅ `RecordingConfiguration.mvpDefault` + `CameraSourceAudioSettings` |
 | Стабильность аудио-формата | canary-лог `DualFileOutputStage` молчит | `log show --predicate 'category == "recording"'` | ✅ закрыто #105 (0 FMT CHANGE в прогонах acceptance) |
 | Нет append rejected / writer faulted | 0 в логах за всю запись | `log show` | ✅ закрыто #105 |
+| A/V-дрейф | ≤ 50 мс на полной длине записи | PTS-сверка первых/последних пакетов обеих дорожек: `ffprobe -show_packets -select_streams a:0 -read_intervals "%+#5" <file>` + аналогично `v:0`; Δ между первыми PTS audio/video и между последними | ⏳ не измерялся; screen и camera разделяют одну аудио-дорожку с общего T0 — дрейф ожидается низким, требует верификации |
 
 ### 3.4 Надёжность и UX
 
 | Критерий | Порог | Метод | Статус |
 |---|---|---|---|
-| Фатальный writer fault сёрфейсится немедленно | alert до стопа записи | ручная проверка | ✅ закрыто #105 (fail-fast, покрыто юнит-тестами) |
-| Дропы атрибутируются честно | backpressure-дропы vs gate_drop отличимы | телеметрия `category=telemetry` | ❌ конфляция источников в `.encoderBackpressureDrops` (#100) |
+| Старт/стоп записи через UI | кнопка Record + Stop работает без зависаний | ручная проверка | ✅ базово работает |
+| Глобальный хоткей ⌘⌥⌃R | старт/стоп из фона | ручная проверка | ⏳ не верифицировано системно |
+| Сессии ≥ 20 мин без прогрессирующей деградации | pkt/s стабилен на протяжении всей записи | ручной прогон + `verify-cfr.sh` | ❌ при экстремальном контенте: 35→6 pkt/s за 5 мин (#104); стабильность при обычном контенте на ≥20 мин — ⏳ |
+| Crash-recovery (fragmented MP4) | файл играбелен после kill; `movieFragmentInterval` = 4 с | `ffprobe` после kill -9; `mvpDefault.movieFragmentInterval` = 4 с | ✅ `mvpDefault` пишет fragmented mp4 (movieFragmentInterval = 4 с) — потеря ≤4 с при crash |
+| Fail-fast фатальных фолтов | alert до стопа записи | ручная проверка | ✅ закрыто #105 (покрыто юнит-тестами) |
+| Дропы атрибутируются честно | backpressure-дропы vs gate_drop отличимы | телеметрия `category=telemetry` | ❌ конфляция источников в `.encoderBackpressureDrops` ([#100](https://github.com/kirich1409/Onset/issues/100)) |
 | Выбор устройства сохраняется между запусками | камера/микрофон восстанавливаются | ручная проверка | ❌ не имплементировано (#109) |
+
+### 3.5 Итоговые файлы
+
+| Критерий | Порог | Метод | Статус |
+|---|---|---|---|
+| Контейнер | MP4 (`.mp4`); `.mov` в спеках не заявлен | `ffprobe -show_format` `format_name` | ✅ `RecordingConfiguration.mvpDefault`: container=.mp4; `.mov` не используется |
+| Схема имён | `Onset-<unix_ts>-screen.mp4` и `Onset-<unix_ts>-camera.mp4` | `ls ~/Movies/Onset/` | ✅ подтверждено в реальных прогонах |
+| Оба файла играбельны | moov atom на месте, длительность == записи ±0.5 с, видео-дорожка + аудио-дорожка | `ffprobe -show_streams -show_format` оба файла | ✅ при штатном завершении; crash-recovery — fragmented mp4 (см. §3.4) |
+| Целостность после crash | файл открывается в QuickTime / VLC, длительность ≥ записи − 4 с | `ffprobe` после kill -9 | ✅ fragmented mp4, потеря ≤ `movieFragmentInterval` (4 с) |
+| Обе дорожки (video + audio) в каждом файле | `nb_streams ≥ 2`, `codec_type` = video + audio | `ffprobe -show_streams` | ✅ закрыто #105 |
 
 ## 4. Методология измерения
 
@@ -133,16 +157,50 @@ Baseline записи с багом (до #102): camera 2.88 fps fresh, screen 4
 
 ## 5. Известные разрывы → issues
 
-| Разрыв | Issue | Суть |
-|---|---|---|
-| VT-потолок / кросс-полосная конкуренция | [#104](https://github.com/kirich1409/Onset/issues/104) | Screen encoder упирается в ~20–42 кадр/с (на 4K) из-за насыщенности VT-сервиса и кросс-полосного lag между акторами; camera страдает косвенно (tick_lag_ms_avg 38ms) |
-| Конфляция источников дропов | [#100](https://github.com/kirich1409/Onset/issues/100) | Backpressure-gate drops, capture drops и CFR-normalization drops суммируются в `encoderBackpressureDrops`; честная атрибуция не реализована |
-| EngineBudgetCap требует калибровки | [#97](https://github.com/kirich1409/Onset/issues/97) / [#98](https://github.com/kirich1409/Onset/issues/98) | `EngineBudgetCap` (995M px/s) — плейсхолдер, требует рантайм-бенчмарка на целевом железе; `CapabilityResolver` молча применяет downscale без user-visible сигнала |
-| Персистенция выбора устройств | [#109](https://github.com/kirich1409/Onset/issues/109) | Камера и микрофон сбрасываются на значения по умолчанию при каждом перезапуске |
-| Выбор режима камеры (4K30 / 1080p60) | gap, issue будет заведён отдельно | `CameraFormatSelector` делает автовыбор max-пиксельного формата ≥30fps; ручного выбора нет; 1080p60 недостижим при наличии 4K30; 4K30 не тестировалось |
+| Разрыв | Issue | Приоритет | Суть |
+|---|---|---|---|
+| Потери кадров камеры — 43% номинала | [#112](https://github.com/kirich1409/Onset/issues/112) | 🔴 блокер релиза | capture overflow 12–15/с + tick_lag до 133 мс → fresh content 12.4–13.5 fps из 30; данные: 3 прогона 2026-06-07 при дневном свете |
+| Поддержка режимов камеры (4K30 / 1080p60 / встроенная) | [#113](https://github.com/kirich1409/Onset/issues/113) | 🔴 блокер релиза | 4K30 не тестировался; 1080p60 недостижим; встроенная камера не проверена; ручного выбора нет |
+| VT-потолок / кросс-полосная конкуренция | [#104](https://github.com/kirich1409/Onset/issues/104) | 🔴 блокер | Screen encoder ~20–42 fps (4K); camera страдает косвенно (tick_lag_ms_avg 38 мс); корень проблемы #112 (H-A) |
+| Конфляция источников дропов | [#100](https://github.com/kirich1409/Onset/issues/100) | 🟠 важный | Backpressure-gate drops, capture drops и CFR-normalization drops суммируются в `encoderBackpressureDrops`; честная атрибуция не реализована |
+| EngineBudgetCap требует калибровки | [#97](https://github.com/kirich1409/Onset/issues/97) / [#98](https://github.com/kirich1409/Onset/issues/98) | 🟡 | `EngineBudgetCap` (995M px/s) — плейсхолдер; `CapabilityResolver` молча применяет downscale без user-visible сигнала |
+| Персистенция выбора устройств | [#109](https://github.com/kirich1409/Onset/issues/109) | 🟡 | Камера и микрофон сбрасываются на значения по умолчанию при каждом перезапуске |
 
-## 6. История изменений
+## 6. Матрица верификации форматов
+
+Прогоняется при приёмке каждого релиза и каждого перф-фикса. Для каждой строки матрицы — отдельный прогон `verify-cfr.sh` + `ffprobe` + телеметрия. **Требует реализации #113** прежде, чем строки Brio 4K30 и 1080p60 могут быть закрыты.
+
+### 6.1 Конфигурации
+
+| Камера | Микрофон | Экран | Ожидаемый номинал камеры | Ожидаемый номинал экрана |
+|---|---|---|---|---|
+| MX Brio 4K30 | Brio USB | 4K60 | 30 fps | 60 fps |
+| MX Brio 4K30 | встроенный MacBook | 4K60 | 30 fps | 60 fps |
+| MX Brio 1080p60 | Brio USB | 4K60 | 60 fps | 60 fps |
+| MX Brio 1080p60 | встроенный MacBook | 4K60 | 60 fps | 60 fps |
+| Встроенная камера (нативный режим) | встроенный MacBook | 4K60 | нативный (≥30 fps) | 60 fps |
+
+### 6.2 Чеклист для каждой конфигурации
+
+Для каждой строки §6.1 все пункты должны быть PASS:
+
+| Проверка | Инструмент / команда | Порог |
+|---|---|---|
+| ffprobe-валидность screen.mp4 | `ffprobe -show_streams -show_format Onset-*-screen.mp4` | moov, 2 потока (video hevc/hvc1 + audio aac), duration ≠ N/A, pix_fmt = yuv420p (420v) |
+| ffprobe-валидность camera.mp4 | `ffprobe -show_streams -show_format Onset-*-camera.mp4` | те же требования |
+| verify-cfr экран | `scripts/verify-cfr.sh <screen.mp4> <camera.mp4> 60 <cam_fps>` — ассерт A | rate ≤ 2% отклонения от номинала |
+| verify-cfr камера (ассерт A) | то же — ассерт A | rate ≤ 2% от номинала |
+| verify-cfr ассерт B (PTS-равномерность) | то же | ≤ 10 гэпов/мин > 1.5 слота для каждого потока |
+| verify-cfr ассерт C (fresh-content) | то же — ассерт C | ≥ 95% номинала по mpdecimate (тихая машина, дневной свет, движение) |
+| verify-cfr ассерт D (dup-run мода) | то же | мода ≤ 2 |
+| A/V-дрейф | `ffprobe -show_packets -select_streams a:0 -read_intervals "%+#5"` + `v:0` → разница первых PTS и последних PTS | ≤ 50 мс |
+| Телеметрия: capture overflow | `log show --predicate 'subsystem == "dev.onset"' --style json \| jq '.[] \| select(.eventMessage \| contains("overflow"))'` | ≈ 0/с |
+| Телеметрия: writer faults | `log show --predicate 'subsystem == "dev.onset" and category == "recording"'` | 0 faults, canary молчит |
+| Телеметрия: tick_lag | то же | avg ≤ 10 мс, max ≤ 50 мс |
+
+## 7. История изменений
 
 | Дата | Версия | Что изменилось |
 |---|---|---|
+| 2026-06-07 | v0.2 | Расширен до пяти осей: матрица режимов камеры (#113), обновлены метрики камеры данными #112 (43% номинала, замеры 2026-06-07), добавлены §3.3 аудио-формат + A/V-дрейф, §3.4 UX+hotkey+crash-recovery, §3.5 итоговые файлы, §6 матрица верификации форматов; §5 дополнен приоритетами |
 | 2026-06-07 | v0.1 | Первая публикация — черновик на основе acceptance-отчётов #102/#105 и issues #100/#104/#109 |
