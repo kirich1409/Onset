@@ -25,25 +25,53 @@ struct CameraFormatSelectorTests {
         CameraFormat(pixelWidth: width, pixelHeight: height, minFps: minFps, maxFps: maxFps)
     }
 
-    // MARK: - Primary selection rule
+    // MARK: - 16:9 preference over square / non-16:9
 
-    @Test("Largest resolution among ≥30fps formats wins (AC-5)")
-    func largestResolutionAmongQualifiedWins() throws {
-        // 4K@30 wins over 1080p@60 and 720p@120 by pixel count.
+    @Test("Square 1552×1552@60 loses to 1920×1080@30 — 16:9 preferred over larger pixel count")
+    func squareFormatLosesToSixteenByNine() throws {
+        // The square format has more pixels (2.41 MP vs 2.07 MP) but is not 16:9.
+        // Selector must return 1920×1080, not 1552×1552.
         let formats = [
-            format(width: 3840, height: 2160, maxFps: 30), // 4K@30 — largest resolution
-            format(width: 1920, height: 1080, maxFps: 60), // 1080p@60
-            format(width: 1280, height: 720, maxFps: 120), // 720p@120
+            format(width: 1552, height: 1552, maxFps: 60), // Center-Stage square — NOT 16:9
+            format(width: 1920, height: 1080, maxFps: 30), // 16:9 — wins despite fewer pixels
         ]
         let best = try CameraFormatSelector.pickBestFormat(from: formats, minFps: 30)
-        #expect(best.pixelWidth == 3840)
-        #expect(best.pixelHeight == 2160)
+        #expect(best.pixelWidth == 1920)
+        #expect(best.pixelHeight == 1080)
         #expect(best.maxFps == 30)
     }
 
-    // MARK: - Tie-break rule
+    // MARK: - Only 720p 16:9 available
 
-    @Test("Same resolution: larger maxFps wins")
+    @Test("Only 1280×720@30 16:9 → returns 720p")
+    func onlySingleSixteenByNineReturnsIt() throws {
+        let formats = [
+            format(width: 1280, height: 720, maxFps: 30),
+        ]
+        let best = try CameraFormatSelector.pickBestFormat(from: formats, minFps: 30)
+        #expect(best.pixelWidth == 1280)
+        #expect(best.pixelHeight == 720)
+        #expect(best.maxFps == 30)
+    }
+
+    // MARK: - Full HD cap: never pick above 1080p when ≤1080p 16:9 exists
+
+    @Test("4K@30 + 1080p@30 → picks 1080p (capped at Full HD)")
+    func fourKLosesToFullHD() throws {
+        // Even though 4K is 16:9 and has more pixels, 1080p is the preferred target.
+        let formats = [
+            format(width: 3840, height: 2160, maxFps: 30), // 4K 16:9
+            format(width: 1920, height: 1080, maxFps: 30), // 1080p 16:9 — wins (≤ 1080p)
+        ]
+        let best = try CameraFormatSelector.pickBestFormat(from: formats, minFps: 30)
+        #expect(best.pixelWidth == 1920)
+        #expect(best.pixelHeight == 1080)
+        #expect(best.maxFps == 30)
+    }
+
+    // MARK: - Fps tie-break on same resolution
+
+    @Test("1920×1080@30 vs 1920×1080@60 → returns the @60 one")
     func tieBreakOnFps() throws {
         // Both are 1080p; the 60fps format wins the tie-break.
         let formats = [
@@ -56,6 +84,50 @@ struct CameraFormatSelectorTests {
         #expect(best.maxFps == 60)
     }
 
+    // MARK: - All 16:9 above 1080p → pick smallest
+
+    @Test("Only above-1080p 16:9 formats → picks smallest (2560×1440 over 3840×2160)")
+    func allSixteenByNineAboveFullHDPicksSmallest() throws {
+        // Camera offers no ≤ 1080p 16:9 option — fall back to closest from above.
+        let formats = [
+            format(width: 3840, height: 2160, maxFps: 30), // 4K — larger, not picked
+            format(width: 2560, height: 1440, maxFps: 30), // 1440p — smallest above target, wins
+        ]
+        let best = try CameraFormatSelector.pickBestFormat(from: formats, minFps: 30)
+        #expect(best.pixelWidth == 2560)
+        #expect(best.pixelHeight == 1440)
+        #expect(best.maxFps == 30)
+    }
+
+    @Test("All above-1080p 16:9, same resolution different fps → fps tie-break picks @60")
+    func allAboveFullHDSameResolutionPicksHigherFps() throws {
+        // Both 2560×1440 formats are 16:9 and above 1080p — smallestByPixelCount branch.
+        // Equal pixel counts; fps tie-break must return the @60 one.
+        let formats = [
+            format(width: 2560, height: 1440, maxFps: 30),
+            format(width: 2560, height: 1440, maxFps: 60),
+        ]
+        let best = try CameraFormatSelector.pickBestFormat(from: formats, minFps: 30)
+        #expect(best.pixelWidth == 2560)
+        #expect(best.pixelHeight == 1440)
+        #expect(best.maxFps == 60)
+    }
+
+    // MARK: - Fallback: no 16:9 at all → largest pixel count
+
+    @Test("No 16:9 formats: 1552×1552@60 + 1440×1440@30 → fallback picks largest pixel count")
+    func noSixteenByNineFallsBackToLargestPixelCount() throws {
+        // Neither format is 16:9 — selector falls back to the original max-pixel rule.
+        let formats = [
+            format(width: 1552, height: 1552, maxFps: 60), // 2.41 MP — wins by pixel count
+            format(width: 1440, height: 1440, maxFps: 30), // 2.07 MP
+        ]
+        let best = try CameraFormatSelector.pickBestFormat(from: formats, minFps: 30)
+        #expect(best.pixelWidth == 1552)
+        #expect(best.pixelHeight == 1552)
+        #expect(best.maxFps == 60)
+    }
+
     // MARK: - Threshold boundary
 
     @Test("Format with maxFps just below 30 is excluded (NTSC 29.97 excluded by design)")
@@ -63,7 +135,7 @@ struct CameraFormatSelectorTests {
         // 4K@24 must be excluded even though it's the largest resolution.
         // 1080p@30 is the only qualifying format.
         let formats = [
-            format(width: 3840, height: 2160, maxFps: 24), // excluded: <30fps
+            format(width: 3840, height: 2160, maxFps: 24), // excluded: < 30fps
             format(width: 1920, height: 1080, maxFps: 30), // qualifies
         ]
         let best = try CameraFormatSelector.pickBestFormat(from: formats, minFps: 30)
@@ -117,18 +189,18 @@ struct CameraFormatSelectorTests {
 
     // MARK: - Realistic mix
 
-    @Test("Realistic mix: built-in 1080p/720p + external Brio 4K30 → picks Brio 4K30")
-    func realisticMixPicksBrio4K30() throws {
-        // Simulates a MacBook with a built-in FaceTime camera (720p@30, 1080p@30)
-        // plus a connected Logitech Brio (4K@30). Expected winner: Brio 4K@30.
+    @Test("Realistic mix: 720p@30 + 1080p@30 + 4K@30 → picks 1080p (Full HD cap, all 16:9)")
+    func realisticMixPicksFullHD() throws {
+        // Simulates a camera advertising multiple 16:9 resolutions. 1080p wins because
+        // it is the largest 16:9 format at or below the Full HD cap.
         let formats = [
-            format(width: 1280, height: 720, maxFps: 30), // built-in 720p@30
-            format(width: 1920, height: 1080, maxFps: 30), // built-in 1080p@30
-            format(width: 3840, height: 2160, maxFps: 30), // Brio 4K@30 — largest
+            format(width: 1280, height: 720, maxFps: 30), // 720p 16:9
+            format(width: 1920, height: 1080, maxFps: 30), // 1080p 16:9 — wins
+            format(width: 3840, height: 2160, maxFps: 30), // 4K 16:9 — above cap
         ]
         let best = try CameraFormatSelector.pickBestFormat(from: formats, minFps: 30)
-        #expect(best.pixelWidth == 3840)
-        #expect(best.pixelHeight == 2160)
+        #expect(best.pixelWidth == 1920)
+        #expect(best.pixelHeight == 1080)
         #expect(best.maxFps == 30)
     }
 }
