@@ -191,6 +191,18 @@ struct OnboardingViewModelTests {
         #expect(fake.pollingTaskWasCancelled)
     }
 
+    // MARK: - checkNow pass-through
+
+    @Test("checkNow() delegates to service checkScreenStatusNow")
+    func checkNow_delegatesToService() {
+        let fake = FakePermissionsService(screen: .notDetermined)
+        let sut = OnboardingViewModel(permissions: fake)
+
+        sut.checkNow()
+
+        #expect(fake.checkScreenStatusNowCallCount == 1)
+    }
+
     // MARK: - refresh pass-through
 
     @Test("refresh() delegates to service refresh")

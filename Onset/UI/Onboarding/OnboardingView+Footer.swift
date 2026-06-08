@@ -83,7 +83,7 @@ extension OnboardingView {
                     self.perform(link.action)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(link.action == .proceed ? Color.accentColor : Color.secondary)
+                .foregroundStyle(link.style == .feature ? Color.accentColor : Color.secondary)
             }
             self.primaryButton(descriptor.primary)
         }

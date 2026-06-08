@@ -12,6 +12,7 @@ import Testing
 ///
 /// `nonisolated` — the mapper is a pure function; no actor context needed.
 @Suite("OnboardingFooterMapper")
+// swiftlint:disable:next type_body_length
 struct OnboardingFooterMapperTests {
     // MARK: - Helpers
 
@@ -38,6 +39,7 @@ struct OnboardingFooterMapperTests {
 
         #expect(desc.gracefulLink?.label == "Продолжить без экрана")
         #expect(desc.gracefulLink?.action == .proceed)
+        #expect(desc.gracefulLink?.style == .feature)
         #expect(desc.primary.label == "Проверить снова")
         #expect(desc.primary.action == .recheck)
         #expect(desc.primary.isEnabled)
@@ -48,6 +50,8 @@ struct OnboardingFooterMapperTests {
         let desc = self.make(isAwaiting: true, screen: false, camera: true, mic: true)
 
         #expect(desc.gracefulLink?.label == "Продолжить без экрана")
+        #expect(desc.gracefulLink?.action == .proceed)
+        #expect(desc.gracefulLink?.style == .feature)
         #expect(desc.primary.label == "Проверить снова")
         #expect(desc.primary.action == .recheck)
     }
@@ -68,6 +72,52 @@ struct OnboardingFooterMapperTests {
 
         #expect(desc.gracefulLink == nil)
         #expect(desc.primary.label == "Проверить снова")
+        #expect(desc.primary.action == .recheck)
+        #expect(desc.primary.isEnabled)
+    }
+
+    // MARK: - Awaiting state: screen granted (window between grant and relaunch)
+
+    @Test("Awaiting + screen granted + no camera → no graceful link, Проверить снова only (AC-7)")
+    func awaiting_screenGranted_noCamera_noGracefulLink() {
+        // Screen just granted, app not relaunched yet — cameraOnlyAvailable is false
+        // (screen=true), so no graceful escape is offered; polling loop is still active.
+        let desc = self.make(isAwaiting: true, screen: true, camera: false, mic: false)
+
+        #expect(desc.gracefulLink == nil)
+        #expect(desc.primary.label == "Проверить снова")
+        #expect(desc.primary.action == .recheck)
+        #expect(desc.primary.isEnabled)
+    }
+
+    @Test("Awaiting + screen granted + no camera + mic granted → no graceful link, Проверить снова only (AC-7)")
+    func awaiting_screenGranted_noCamera_micGranted_noGracefulLink() {
+        let desc = self.make(isAwaiting: true, screen: true, camera: false, mic: true)
+
+        #expect(desc.gracefulLink == nil)
+        #expect(desc.primary.label == "Проверить снова")
+        #expect(desc.primary.action == .recheck)
+        #expect(desc.primary.isEnabled)
+    }
+
+    @Test("Awaiting + screen granted + camera → no graceful link, Проверить снова only (AC-7)")
+    func awaiting_screenGranted_cameraGranted_noGracefulLink() {
+        let desc = self.make(isAwaiting: true, screen: true, camera: true, mic: false)
+
+        #expect(desc.gracefulLink == nil)
+        #expect(desc.primary.label == "Проверить снова")
+        #expect(desc.primary.action == .recheck)
+        #expect(desc.primary.isEnabled)
+    }
+
+    @Test("Awaiting + screen granted + camera + mic granted → no graceful link, Проверить снова only (AC-7)")
+    func awaiting_screenGranted_cameraAndMicGranted_noGracefulLink() {
+        let desc = self.make(isAwaiting: true, screen: true, camera: true, mic: true)
+
+        #expect(desc.gracefulLink == nil)
+        #expect(desc.primary.label == "Проверить снова")
+        #expect(desc.primary.action == .recheck)
+        #expect(desc.primary.isEnabled)
     }
 
     // MARK: - Normal: full mode (S+C+M)
@@ -90,6 +140,7 @@ struct OnboardingFooterMapperTests {
 
         #expect(desc.gracefulLink?.label == "Позже")
         #expect(desc.gracefulLink?.action == .proceed)
+        #expect(desc.gracefulLink?.style == .escape)
         #expect(desc.primary.label == "Продолжить")
         #expect(desc.primary.action == .proceed)
         #expect(!desc.primary.isEnabled)
@@ -100,6 +151,8 @@ struct OnboardingFooterMapperTests {
         let desc = self.make(screen: false, camera: false, mic: true)
 
         #expect(desc.gracefulLink?.label == "Позже")
+        #expect(desc.gracefulLink?.action == .proceed)
+        #expect(desc.gracefulLink?.style == .escape)
         #expect(!desc.primary.isEnabled)
         #expect(desc.primary.label == "Продолжить")
     }
@@ -124,6 +177,7 @@ struct OnboardingFooterMapperTests {
 
         #expect(desc.gracefulLink == nil)
         #expect(desc.primary.label == "Продолжить без экрана")
+        #expect(desc.primary.action == .proceed)
         #expect(desc.primary.isEnabled)
     }
 
@@ -135,6 +189,7 @@ struct OnboardingFooterMapperTests {
 
         #expect(desc.gracefulLink?.label == "Записать без звука")
         #expect(desc.gracefulLink?.action == .proceed)
+        #expect(desc.gracefulLink?.style == .feature)
         #expect(desc.primary.label == "Продолжить")
         #expect(!desc.primary.isEnabled)
     }
@@ -144,6 +199,8 @@ struct OnboardingFooterMapperTests {
         let desc = self.make(screen: true, camera: true, mic: false)
 
         #expect(desc.gracefulLink?.label == "Записать без звука")
+        #expect(desc.gracefulLink?.action == .proceed)
+        #expect(desc.gracefulLink?.style == .feature)
         #expect(desc.primary.label == "Продолжить")
         #expect(!desc.primary.isEnabled)
     }
@@ -158,6 +215,8 @@ struct OnboardingFooterMapperTests {
         #expect(desc.primary.label == "Продолжить")
         #expect(desc.primary.action == .proceed)
         #expect(desc.primary.isEnabled)
+        // Verify invariant: no two enabled proceed buttons
+        #expect(self.enabledProceedCount(in: desc) == 1)
     }
 
     // MARK: - Invariants: no two enabled proceed buttons
