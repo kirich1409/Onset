@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import os
 import ScreenCaptureKit
@@ -49,8 +50,25 @@ extension DeviceDiscovery {
             throw RecordingError.displayDiscoveryFailed(error)
         }
 
-        let displays = content.displays.map { scDisplay in
-            Self.makeDisplay(from: scDisplay)
+        // Resolve NSScreen names on MainActor in one hop — NSScreen.screens is @MainActor.
+        // Building the full map here avoids a per-display MainActor hop (O(n) vs O(n²)).
+        // CGDirectDisplayID is UInt32. The "NSScreenNumber" entry is an ObjC NSNumber bridged
+        // to Swift; cast to Int (not UInt32 — UInt32 bridging silently returns nil) then widen.
+        let screenNamesByID: [CGDirectDisplayID: String] = await MainActor.run {
+            var map: [CGDirectDisplayID: String] = [:]
+            for screen in NSScreen.screens {
+                if let screenNumber = screen.deviceDescription[
+                    NSDeviceDescriptionKey("NSScreenNumber")
+                ] as? Int {
+                    let id = CGDirectDisplayID(screenNumber)
+                    map[id] = screen.localizedName
+                }
+            }
+            return map
+        }
+
+        let displays = content.displays.enumerated().map { index, scDisplay in
+            Self.makeDisplay(from: scDisplay, screenNames: screenNamesByID, ordinal: index + 1)
         }
 
         // PII policy: log counts only, never displayIDs or resolution values.
@@ -60,22 +78,41 @@ extension DeviceDiscovery {
 
     // MARK: - Pure mapper (testability seam)
 
-    /// Produces a `Display` from a raw `SCDisplay`.
+    /// Produces a `Display` from a raw `SCDisplay` with pre-resolved NSScreen names.
     ///
     /// Pixel dimensions are sourced from `CGDisplayCopyDisplayMode` — not from
     /// `SCDisplay.width`/`.height` which are in **points**, not pixels.
     ///
-    /// - Parameter scDisplay: The `SCDisplay` from `SCShareableContent`.
-    /// - Returns: An immutable `Display` snapshot.
-    nonisolated static func makeDisplay(from scDisplay: SCDisplay) -> Display {
+    /// Display name is resolved from `screenNames`; see `DisplayLabelMapper.name(localizedName:isBuiltin:ordinal:)`
+    /// for the fallback chain.
+    ///
+    /// - Parameters:
+    ///   - scDisplay: The `SCDisplay` from `SCShareableContent`.
+    ///   - screenNames: A `[CGDirectDisplayID: String]` map built from `NSScreen.screens`
+    ///     on the MainActor before this call.
+    ///   - ordinal: 1-based index of this display in the enumeration; used in the
+    ///     fallback name `"Дисплей N"` when no NSScreen match exists.
+    nonisolated static func makeDisplay(
+        from scDisplay: SCDisplay,
+        screenNames: [CGDirectDisplayID: String],
+        ordinal: Int
+    )
+    -> Display {
         let displayID = scDisplay.displayID
         let mode = CGDisplayCopyDisplayMode(displayID)
         let pixelWidth = mode.map(\.pixelWidth) ?? 0
         let pixelHeight = mode.map(\.pixelHeight) ?? 0
         let refreshHz = mode.map(\.refreshRate) ?? 0.0
+        let isBuiltin = CGDisplayIsBuiltin(displayID) != 0
+        let name = DisplayLabelMapper.name(
+            localizedName: screenNames[displayID],
+            isBuiltin: isBuiltin,
+            ordinal: ordinal
+        )
 
         return Display(
             displayID: displayID,
+            name: name,
             pixelWidth: pixelWidth,
             pixelHeight: pixelHeight,
             refreshHz: refreshHz
@@ -91,11 +128,14 @@ extension DeviceDiscovery {
     ///
     /// - Parameters:
     ///   - displayID: The `CGDirectDisplayID` for this display.
+    ///   - name: Human-readable display name (use ``DisplayLabelMapper/name(localizedName:isBuiltin:ordinal:)``
+    ///     for the standard fallback chain, or pass a synthetic value in tests).
     ///   - pixelWidth: Physical pixel width (0 when the mode is unavailable).
     ///   - pixelHeight: Physical pixel height (0 when the mode is unavailable).
     ///   - refreshHz: Refresh rate in Hz (0.0 for built-in displays or unavailable mode).
     nonisolated static func makeDisplay(
         displayID: CGDirectDisplayID,
+        name: String,
         pixelWidth: Int,
         pixelHeight: Int,
         refreshHz: Double
@@ -103,6 +143,7 @@ extension DeviceDiscovery {
     -> Display {
         Display(
             displayID: displayID,
+            name: name,
             pixelWidth: pixelWidth,
             pixelHeight: pixelHeight,
             refreshHz: refreshHz

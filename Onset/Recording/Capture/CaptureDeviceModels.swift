@@ -15,6 +15,13 @@ nonisolated struct Display {
     /// The Core Graphics display identifier.
     let displayID: CGDirectDisplayID
 
+    /// Human-readable display name resolved from `NSScreen.localizedName` at enumeration time.
+    ///
+    /// Falls back to `"Встроенный дисплей"` for built-in displays (when `CGDisplayIsBuiltin`
+    /// returns `true` and `NSScreen` yields no name), or `"Дисплей N"` (1-based enumeration
+    /// ordinal) for external displays with no matching `NSScreen` entry.
+    let name: String
+
     /// Physical pixel width from the display's current mode (`CGDisplayMode.pixelWidth`).
     /// 0 when no mode is available (display disconnecting, TCC race, etc.).
     let pixelWidth: Int

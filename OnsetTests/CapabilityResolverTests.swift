@@ -11,7 +11,13 @@ private func makeDisplay(
     refreshHz: Double
 )
 -> Display {
-    Display(displayID: displayID, pixelWidth: pixelWidth, pixelHeight: pixelHeight, refreshHz: refreshHz)
+    Display(
+        displayID: displayID,
+        name: "Test Display",
+        pixelWidth: pixelWidth,
+        pixelHeight: pixelHeight,
+        refreshHz: refreshHz
+    )
 }
 
 private func makeCamera(pixelWidth: Int32, pixelHeight: Int32, maxFps: Double) -> CameraFormat {
