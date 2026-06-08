@@ -242,7 +242,7 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
         self.captureState = .stopped
         NotificationCenter.default.removeObserver(shims.video)
         session.stopRunning()
-        cameraSourceLogger.error("Camera session fault — stopping: \(reason)")
+        cameraSourceLogger.error("Camera session fault — stopping: \(reason, privacy: .public)")
         self.eventsContinuation.yield(.cameraDisconnected)
         self.finishAllStreams()
     }

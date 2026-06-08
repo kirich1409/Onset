@@ -468,6 +468,9 @@ nonisolated enum SourceEvent {
     ///
     /// Emitted by `CameraSource` (#29) when AVCaptureDevice posts
     /// `.AVCaptureDeviceWasDisconnected` or the device becomes unavailable mid-session.
+    /// Also reused for `AVCaptureSession` runtime errors and interruptions (session fault
+    /// path). When issue #164 (diagnostics) is implemented, this case may need an
+    /// associated reason value to distinguish a physical disconnect from a session fault.
     case cameraDisconnected
 
     /// The source encountered a non-fatal error that required an internal restart.
