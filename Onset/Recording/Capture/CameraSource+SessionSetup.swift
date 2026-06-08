@@ -16,14 +16,21 @@ extension CameraSource {
         // has adopted whatever clock it will use (commonly the audio device clock).
         let syncClock = session.synchronizationClock ?? CMClockGetHostTimeClock()
 
-        let onDisconnect: @Sendable () async -> Void = { [weak self] in
-            await self?.handleCameraDisconnect()
-        }
+        let onDisconnect: @Sendable ()
+            async -> Void = { [weak self] in
+                await self?.handleCameraDisconnect()
+            }
+        let onSessionFault: @Sendable (String)
+            async -> Void = { [weak self] reason in
+                await self?.handleCameraSessionFault(reason: reason)
+            }
 
         let shims = self.makeShims(
+            session: session,
             sessionStart: anchor.anchorTime,
             syncClock: syncClock,
-            onDisconnect: onDisconnect
+            onDisconnect: onDisconnect,
+            onSessionFault: onSessionFault
         )
         try self.attachOutputs(to: session, shims: shims)
 
@@ -44,8 +51,8 @@ extension CameraSource {
             return
         }
 
-        // Observer registered after startRunning so a failed-start path never needs to remove it.
-        self.registerDisconnectObserver(shims: shims)
+        // Observers registered after startRunning so a failed-start path never needs to remove them.
+        self.registerDisconnectObserver(shims: shims, session: session)
         self.captureState = .running(session: session, shims: shims)
         cameraSourceLogger.info(
             "Capture started — dims: \(self.format.pixelWidth)×\(self.format.pixelHeight)"
@@ -155,9 +162,11 @@ extension CameraSource {
     }
 
     func makeShims(
+        session: AVCaptureSession,
         sessionStart: CMTime,
         syncClock: CMClock,
-        onDisconnect: @escaping @Sendable () async -> Void
+        onDisconnect: @escaping @Sendable () async -> Void,
+        onSessionFault: @escaping @Sendable (String) async -> Void
     )
     -> CameraCaptureShims {
         let video = VideoOutputShim(
@@ -166,7 +175,9 @@ extension CameraSource {
             framesContinuation: self.framesContinuation,
             dropsContinuation: self.dropsContinuation,
             onDisconnect: onDisconnect,
+            onSessionFault: onSessionFault,
             cameraUniqueID: self.cameraDevice.uniqueID,
+            captureSessionID: ObjectIdentifier(session),
             rateLock: self.captureRateLock
         )
         let audio = AudioOutputShim(
@@ -222,7 +233,7 @@ extension CameraSource {
         }
     }
 
-    func registerDisconnectObserver(shims: CameraCaptureShims) {
+    func registerDisconnectObserver(shims: CameraCaptureShims, session: AVCaptureSession) {
         // AVCaptureDeviceWasDisconnected is posted on the main thread; the shim captures
         // only the notification and dispatches to its async closure.
         NotificationCenter.default.addObserver(
@@ -230,6 +241,21 @@ extension CameraSource {
             selector: #selector(VideoOutputShim.deviceDidDisconnect(_:)),
             name: AVCaptureDevice.wasDisconnectedNotification,
             object: nil
+        )
+        // Session-level fault notifications use `object: session` so NotificationCenter
+        // delivers only notifications for our specific session. The shim also guards by
+        // ObjectIdentifier as defense-in-depth against the preview session (#119).
+        NotificationCenter.default.addObserver(
+            shims.video,
+            selector: #selector(VideoOutputShim.sessionRuntimeError(_:)),
+            name: AVCaptureSession.runtimeErrorNotification,
+            object: session
+        )
+        NotificationCenter.default.addObserver(
+            shims.video,
+            selector: #selector(VideoOutputShim.sessionWasInterrupted(_:)),
+            name: AVCaptureSession.wasInterruptedNotification,
+            object: session
         )
     }
 }
