@@ -25,7 +25,7 @@ private enum MainViewModelPreviewConstants {
 // MARK: - MainViewModel — Preview lifecycle
 
 extension MainViewModel {
-    /// Manages the camera preview for `cameraID`. Call via `.task(id: selectedCameraID)`.
+    /// Manages the camera preview for `cameraID`. Call via `.task(id: activeCamera?.uniqueID)`.
     ///
     /// Stops any existing `previewSource` first (device contention), then creates, starts,
     /// and exposes the new source's `SessionHandle`. On cancellation (camera deselected or
