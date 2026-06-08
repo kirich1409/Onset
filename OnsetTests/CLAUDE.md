@@ -21,6 +21,11 @@ covered in the root `CLAUDE.md` § Testing.
 - App windows and the global hotkey are suppressed when running under tests
   (see `OnsetApp.swift`) — the suite must not pop onboarding windows; keep new
   app-level surfaces behind the same guard.
+- Persistence: never call `UserDefaults(suiteName:)` directly in a test. Use
+  `withScopedDefaults { defaults in … }` (`ScopedDefaults.swift`) — it vends an
+  `InMemoryUserDefaults` instance backed by a plain dictionary; cfprefsd is never
+  involved so no `.plist` file is written to `~/Library/Preferences/` (issue #110).
+  Violating this leaves one plist per test invocation on the developer's machine.
 - SwiftLint: test files commonly carry `no_magic_numbers` / `file_length` exemptions
   for fixtures and synthetic data (CMSampleBuffer factories) — keep exemptions
   file-scoped, don't relax global config.
