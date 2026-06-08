@@ -43,3 +43,131 @@ struct SessionOutputInitTests {
         #expect(SessionOutput(screen: nil, camera: nil) == nil)
     }
 }
+
+// MARK: - RecordingResult enum cases
+
+/// Verifies that `RecordingResult` enum cases carry the correct payloads and that all
+/// computed properties derive correctly from both `.completed` and `.empty`.
+@Suite("RecordingResult — enum shape and computed properties")
+struct RecordingResultTests {
+    private let screenURL = URL(filePath: "/tmp/screen.mp4")
+    private let cameraURL = URL(filePath: "/tmp/camera.mp4")
+    private let zeroDrops = DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0)
+
+    // MARK: .empty
+
+    @Test(".empty carries drops and has nil screen/camera")
+    func empty_dropsAndNilProjections() {
+        let result = RecordingResult.empty(self.zeroDrops)
+        #expect(result.drops == self.zeroDrops)
+        #expect(result.screen == nil)
+        #expect(result.camera == nil)
+        #expect(result.outputURLs.isEmpty)
+        #expect(result.degradedWarning == false)
+        #expect(result.hasWriteFailure == false)
+        #expect(result.writeFailureReason == nil)
+    }
+
+    // MARK: .completed — drops passthrough
+
+    @Test(".completed carries drops from the associated DropCounters")
+    func completed_dropsPassthrough() {
+        let drops = DropCounters(encoderBackpressureDrops: 5, captureDrops: 2, cfrNormalizationDrops: 1)
+        let result = RecordingResult.completed(.screenOnly(.completed(url: self.screenURL)), drops)
+        #expect(result.drops == drops)
+    }
+
+    // MARK: degradedWarning
+
+    @Test("degradedWarning is false when encoderBackpressureDrops is 0")
+    func degradedWarning_falseWhenNoBackpressure() {
+        let result = RecordingResult.completed(
+            .screenOnly(.completed(url: self.screenURL)),
+            DropCounters(encoderBackpressureDrops: 0, captureDrops: 10, cfrNormalizationDrops: 5)
+        )
+        #expect(result.degradedWarning == false)
+    }
+
+    @Test("degradedWarning is true when encoderBackpressureDrops > 0")
+    func degradedWarning_trueWhenBackpressureDrops() {
+        let result = RecordingResult.completed(
+            .screenOnly(.completed(url: self.screenURL)),
+            DropCounters(encoderBackpressureDrops: 1, captureDrops: 0, cfrNormalizationDrops: 0)
+        )
+        #expect(result.degradedWarning == true)
+    }
+
+    @Test("degradedWarning is false for .empty with zero drops (stop-before-start no-op path)")
+    func degradedWarning_falseForEmpty_zeroDrops() {
+        // In the stop-before-start no-op specifically, drops are all-zero because nothing
+        // ran; the instant-stop path carries real drops — see empty_carriesRealCaptureDrops.
+        let result = RecordingResult.empty(
+            DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0)
+        )
+        #expect(result.degradedWarning == false)
+    }
+
+    @Test(".empty is a transparent DropCounters carrier — non-zero captureDrops pass through")
+    func empty_carriesRealCaptureDrops() {
+        // The instant-stop path (session ran, no writer produced output) forwards the
+        // real DropMonitor snapshot, which can include capture drops that occurred
+        // before the first sample reached DualFileOutputStage.
+        let result = RecordingResult.empty(
+            DropCounters(encoderBackpressureDrops: 0, captureDrops: 5, cfrNormalizationDrops: 0)
+        )
+        #expect(result.drops.captureDrops == 5)
+    }
+
+    // MARK: screen / camera projections
+
+    @Test(".completed(.screenOnly) projects screen URL, nil camera")
+    func completed_screenOnly_projections() {
+        let result = RecordingResult.completed(.screenOnly(.completed(url: self.screenURL)), self.zeroDrops)
+        #expect(result.screen?.url == self.screenURL)
+        #expect(result.camera == nil)
+        #expect(result.outputURLs == [self.screenURL])
+    }
+
+    @Test(".completed(.cameraOnly) projects camera URL, nil screen")
+    func completed_cameraOnly_projections() {
+        let result = RecordingResult.completed(.cameraOnly(.completed(url: self.cameraURL)), self.zeroDrops)
+        #expect(result.screen == nil)
+        #expect(result.camera?.url == self.cameraURL)
+        #expect(result.outputURLs == [self.cameraURL])
+    }
+
+    @Test(".completed(.both) projects both URLs in screen-then-camera order")
+    func completed_both_projections() {
+        let result = RecordingResult.completed(
+            .both(screen: .completed(url: self.screenURL), camera: .completed(url: self.cameraURL)),
+            self.zeroDrops
+        )
+        #expect(result.screen?.url == self.screenURL)
+        #expect(result.camera?.url == self.cameraURL)
+        #expect(result.outputURLs == [self.screenURL, self.cameraURL])
+    }
+
+    // MARK: write failure
+
+    @Test("hasWriteFailure is false when all writers completed")
+    func hasWriteFailure_falseWhenAllCompleted() {
+        let result = RecordingResult.completed(.screenOnly(.completed(url: self.screenURL)), self.zeroDrops)
+        #expect(result.hasWriteFailure == false)
+        #expect(result.writeFailureReason == nil)
+    }
+
+    @Test("hasWriteFailure is true and writeFailureReason is non-nil when screen writer failed")
+    func hasWriteFailure_trueWhenScreenFailed() {
+        struct DiskFull: Error, LocalizedError {
+            var errorDescription: String? {
+                "The disk is full."
+            }
+        }
+        let result = RecordingResult.completed(
+            .screenOnly(.failed(url: self.screenURL, error: DiskFull())),
+            self.zeroDrops
+        )
+        #expect(result.hasWriteFailure == true)
+        #expect(result.writeFailureReason == "The disk is full.")
+    }
+}
