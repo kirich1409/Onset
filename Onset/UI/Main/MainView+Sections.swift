@@ -62,8 +62,17 @@ extension MainView {
         if self.model.isCameraActive {
             CameraPreviewRepresentable(sessionHandle: self.model.previewHandle)
                 .id(self.model.previewGeneration)
-                .frame(height: Metrics.previewHeight)
+                .aspectRatio(Metrics.previewAspectRatio, contentMode: .fit)
+                // Cap on maxWidth (concrete in ScrollView) so the card is ≤140pt tall.
+                // maxHeight is also set for documentation intent; maxWidth is the reliable
+                // binding dimension since ScrollView propagates width, not height.
+                .frame(
+                    maxWidth: Metrics.previewMaxHeight * Metrics.previewAspectRatio,
+                    maxHeight: Metrics.previewMaxHeight
+                )
                 .clipShape(RoundedRectangle(cornerRadius: Metrics.previewCornerRadius))
+                // Center the narrower card within the section's full width.
+                .frame(maxWidth: .infinity)
                 .task(id: self.model.activeCamera?.uniqueID) {
                     await self.model.managePreview(for: self.model.activeCamera?.uniqueID)
                 }

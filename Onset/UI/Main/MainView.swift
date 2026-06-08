@@ -30,7 +30,10 @@ struct MainView: View {
         static let outerPaddingH: CGFloat = 20
         static let outerPaddingV: CGFloat = 16
         static let sectionSpacing: CGFloat = 12
-        static let previewHeight: CGFloat = 130
+        /// Aspect ratio for the camera preview card (16:9 landscape).
+        static let previewAspectRatio: CGFloat = 16.0 / 9.0 // swiftlint:disable:this no_magic_numbers
+        /// Maximum height for the camera preview card so it stays compact inside the fixed window (#74).
+        static let previewMaxHeight: CGFloat = 140
         static let recordButtonHeight: CGFloat = 44
         static let rowSpacing: CGFloat = 8
         static let iconColumnWidth: CGFloat = 16
