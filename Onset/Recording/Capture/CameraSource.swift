@@ -226,6 +226,27 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
         self.finishAllStreams()
     }
 
+    /// Called by the delegate shim when the `AVCaptureSession` faults (runtime error or
+    /// interruption). Treated as terminal — consistent with the one-shot / no-restart design.
+    ///
+    /// Reuses the `.cameraDisconnected` event path so the existing consumer
+    /// (`stopAndFinalizePipeline(.camera)`) produces a valid, finalized camera MP4 up to the
+    /// fault point while the screen pipeline continues unaffected.
+    ///
+    /// The `.running` guard provides idempotency: a simultaneous disconnect + fault race
+    /// is safe — the second caller finds `.stopped` and returns without double-finishing.
+    func handleCameraSessionFault(reason: String) async {
+        self.captureTelemetryTask?.cancel()
+        self.captureTelemetryTask = nil
+        guard case let .running(session, shims) = self.captureState else { return }
+        self.captureState = .stopped
+        NotificationCenter.default.removeObserver(shims.video)
+        session.stopRunning()
+        cameraSourceLogger.error("Camera session fault — stopping: \(reason, privacy: .public)")
+        self.eventsContinuation.yield(.cameraDisconnected)
+        self.finishAllStreams()
+    }
+
     // MARK: - Preview
 
     /// Returns a `SessionHandle` wrapping the live `AVCaptureSession`, or `nil` when
