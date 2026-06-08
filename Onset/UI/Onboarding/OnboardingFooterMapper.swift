@@ -18,18 +18,6 @@ struct OnboardingFooterDescriptor {
         case recheck
     }
 
-    // MARK: - GracefulLink.Style
-
-    /// Visual role of a graceful link: governs its color in the footer.
-    enum GracefulLinkStyle {
-        /// Escape hatch (gray / `.secondary`) — lets the user leave without granting
-        /// anything. Example: "Позже".
-        case escape
-        /// Graceful feature path (accent color) — proceeds to a limited recording mode.
-        /// Example: "Продолжить без экрана", "Записать без звука".
-        case feature
-    }
-
     // MARK: - GracefulLink
 
     /// A secondary plain-text link shown to the left of the primary button.
@@ -38,8 +26,6 @@ struct OnboardingFooterDescriptor {
         nonisolated let label: String
         /// The action triggered when the link is tapped.
         nonisolated let action: Action
-        /// Visual role: escape hatch (gray) or graceful feature path (accent).
-        nonisolated let style: GracefulLinkStyle
     }
 
     // MARK: - PrimaryButton
@@ -83,22 +69,6 @@ extension OnboardingFooterDescriptor.Action: Equatable {
     -> Bool {
         switch (lhs, rhs) {
         case (.proceed, .proceed), (.recheck, .recheck):
-            true
-
-        default:
-            false
-        }
-    }
-}
-
-extension OnboardingFooterDescriptor.GracefulLinkStyle: Equatable {
-    nonisolated static func == (
-        lhs: OnboardingFooterDescriptor.GracefulLinkStyle,
-        rhs: OnboardingFooterDescriptor.GracefulLinkStyle
-    )
-    -> Bool {
-        switch (lhs, rhs) {
-        case (.escape, .escape), (.feature, .feature):
             true
 
         default:
@@ -164,7 +134,7 @@ nonisolated enum OnboardingFooterMapper {
         // "Продолжить без экрана" appears as a graceful link only when camera is already
         // available — the user can leave the awaiting state without granting screen.
         let graceful: OnboardingFooterDescriptor.GracefulLink? = cameraOnly
-            ? .init(label: "Продолжить без экрана", action: .proceed, style: .feature)
+            ? .init(label: "Продолжить без экрана", action: .proceed)
             : nil
         return OnboardingFooterDescriptor(
             gracefulLink: graceful,
@@ -190,7 +160,7 @@ nonisolated enum OnboardingFooterMapper {
             // No video source at all — escape link + disabled proceed signpost.
             // "Позже" lets the user leave without granting anything; main screen blocks recording.
             return OnboardingFooterDescriptor(
-                gracefulLink: .init(label: "Позже", action: .proceed, style: .escape),
+                gracefulLink: .init(label: "Позже", action: .proceed),
                 primary: .init(label: "Продолжить", action: .proceed, isEnabled: false)
             )
         }
@@ -206,7 +176,7 @@ nonisolated enum OnboardingFooterMapper {
         if noAudio {
             // Has video (screen, or screen+camera), mic pending — graceful no-audio path.
             return OnboardingFooterDescriptor(
-                gracefulLink: .init(label: "Записать без звука", action: .proceed, style: .feature),
+                gracefulLink: .init(label: "Записать без звука", action: .proceed),
                 primary: .init(label: "Продолжить", action: .proceed, isEnabled: false)
             )
         }

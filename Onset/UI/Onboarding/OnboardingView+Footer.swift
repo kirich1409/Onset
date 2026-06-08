@@ -83,7 +83,7 @@ extension OnboardingView {
                     self.perform(link.action)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(link.style == .feature ? Color.accentColor : Color.secondary)
+                .foregroundStyle(Color.accentColor)
             }
             self.primaryButton(descriptor.primary)
         }
@@ -102,12 +102,18 @@ extension OnboardingView {
             }
             .buttonStyle(.bordered)
             .disabled(!primary.isEnabled)
+            .accessibilityHint(
+                primary.isEnabled ? Text("") : Text("Сначала выдайте недостающие разрешения")
+            )
         } else {
             Button(primary.label) {
                 self.perform(primary.action)
             }
             .buttonStyle(.borderedProminent)
             .disabled(!primary.isEnabled)
+            .accessibilityHint(
+                primary.isEnabled ? Text("") : Text("Сначала выдайте недостающие разрешения")
+            )
         }
     }
 

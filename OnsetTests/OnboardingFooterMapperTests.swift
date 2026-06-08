@@ -12,7 +12,6 @@ import Testing
 ///
 /// `nonisolated` — the mapper is a pure function; no actor context needed.
 @Suite("OnboardingFooterMapper")
-// swiftlint:disable:next type_body_length
 struct OnboardingFooterMapperTests {
     // MARK: - Helpers
 
@@ -39,7 +38,6 @@ struct OnboardingFooterMapperTests {
 
         #expect(desc.gracefulLink?.label == "Продолжить без экрана")
         #expect(desc.gracefulLink?.action == .proceed)
-        #expect(desc.gracefulLink?.style == .feature)
         #expect(desc.primary.label == "Проверить снова")
         #expect(desc.primary.action == .recheck)
         #expect(desc.primary.isEnabled)
@@ -51,7 +49,6 @@ struct OnboardingFooterMapperTests {
 
         #expect(desc.gracefulLink?.label == "Продолжить без экрана")
         #expect(desc.gracefulLink?.action == .proceed)
-        #expect(desc.gracefulLink?.style == .feature)
         #expect(desc.primary.label == "Проверить снова")
         #expect(desc.primary.action == .recheck)
     }
@@ -140,7 +137,6 @@ struct OnboardingFooterMapperTests {
 
         #expect(desc.gracefulLink?.label == "Позже")
         #expect(desc.gracefulLink?.action == .proceed)
-        #expect(desc.gracefulLink?.style == .escape)
         #expect(desc.primary.label == "Продолжить")
         #expect(desc.primary.action == .proceed)
         #expect(!desc.primary.isEnabled)
@@ -152,7 +148,6 @@ struct OnboardingFooterMapperTests {
 
         #expect(desc.gracefulLink?.label == "Позже")
         #expect(desc.gracefulLink?.action == .proceed)
-        #expect(desc.gracefulLink?.style == .escape)
         #expect(!desc.primary.isEnabled)
         #expect(desc.primary.label == "Продолжить")
     }
@@ -189,7 +184,6 @@ struct OnboardingFooterMapperTests {
 
         #expect(desc.gracefulLink?.label == "Записать без звука")
         #expect(desc.gracefulLink?.action == .proceed)
-        #expect(desc.gracefulLink?.style == .feature)
         #expect(desc.primary.label == "Продолжить")
         #expect(!desc.primary.isEnabled)
     }
@@ -200,7 +194,6 @@ struct OnboardingFooterMapperTests {
 
         #expect(desc.gracefulLink?.label == "Записать без звука")
         #expect(desc.gracefulLink?.action == .proceed)
-        #expect(desc.gracefulLink?.style == .feature)
         #expect(desc.primary.label == "Продолжить")
         #expect(!desc.primary.isEnabled)
     }
