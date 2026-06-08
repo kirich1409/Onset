@@ -154,8 +154,7 @@ struct RecordingContentView: View {
     // MARK: Drop pill section
 
     @ViewBuilder private var dropPillSection: some View {
-        let dropCount = self.drops.encoderBackpressureDrops
-        let pillLabel = RecordingDisplayMapper.pillAccessibilityLabel(dropCount: dropCount)
+        let pillLabel = RecordingDisplayMapper.pillAccessibilityLabel(state: self.state, drops: self.drops)
         HStack(spacing: Metrics.pillDotSpacing) {
             Circle()
                 .fill(RecordingDisplayMapper.pillDotColor(for: self.state))
@@ -362,13 +361,11 @@ nonisolated enum RecordingDisplayMapper {
 
     /// Accessibility label for the drop-pill element.
     ///
-    /// Returns «Нет пропущенных кадров» when count is zero, otherwise
-    /// a correctly pluralized «Пропущен(о) N кадр(а/ов)».
-    static func pillAccessibilityLabel(dropCount: Int) -> String {
-        guard dropCount > 0 else { return "Нет пропущенных кадров" }
-        let verb = RussianPluralForm.select(count: dropCount, one: "Пропущен", few: "Пропущено", many: "Пропущено")
-        let noun = RussianPluralForm.select(count: dropCount, one: "кадр", few: "кадра", many: "кадров")
-        return "\(verb) \(dropCount) \(noun)"
+    /// Returns «Нет пропущенных кадров» when the encoder-backpressure drop counter is zero.
+    /// Otherwise delegates to `pillText(state:drops:)` so visual and accessibility labels match.
+    static func pillAccessibilityLabel(state: RecordingState, drops: DropCounters) -> String {
+        guard drops.encoderBackpressureDrops > 0 else { return "Нет пропущенных кадров" }
+        return self.pillText(state: state, drops: drops)
     }
 
     /// Color of the small dot inside the pill.

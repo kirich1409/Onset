@@ -121,7 +121,7 @@ private enum CoordinatorFixtures {
             micDevice: nil,
             permissions: self.permissions(),
             checklist: RecordingChecklist(
-                screenDescription: "1280×720 @ 60 Hz",
+                screenDescription: "1280×720 @ 60 Гц",
                 cameraDescription: nil,
                 microphoneDescription: nil
             ),
@@ -170,7 +170,7 @@ private enum CoordinatorFixtures {
             micDevice: nil,
             permissions: self.permissions(),
             checklist: RecordingChecklist(
-                screenDescription: "1280×720 @ 60 Hz",
+                screenDescription: "1280×720 @ 60 Гц",
                 cameraDescription: "FaceTime HD · 1080p30",
                 microphoneDescription: "MacBook Pro — микрофон"
             ),
@@ -228,7 +228,7 @@ struct RecordingCoordinatorTests {
         #expect(coordinator.phase == .recording)
         #expect(fake.startCalled)
         // All three checklist rows must be captured from the request.
-        #expect(coordinator.checklist.screenDescription == "1280×720 @ 60 Hz")
+        #expect(coordinator.checklist.screenDescription == "1280×720 @ 60 Гц")
         #expect(coordinator.checklist.cameraDescription == "FaceTime HD · 1080p30")
         #expect(coordinator.checklist.microphoneDescription == "MacBook Pro — микрофон")
         #expect(openedRecording, "recording window must open on start (AC-3)")

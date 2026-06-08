@@ -278,6 +278,16 @@ struct MainViewModelTests {
         #expect(label == "1920×1080 @ 60 Гц")
     }
 
+    @Test("Display with refreshHz 59.94 → label rounds to 60 Гц")
+    func displayLabel_fractionalRefreshHz() {
+        let display = Display(displayID: 1, pixelWidth: 1920, pixelHeight: 1080, refreshHz: 59.94)
+        let (sut, _) = self.makeSUT()
+
+        let label = sut.displayLabel(for: display)
+
+        #expect(label == "1920×1080 @ 60 Гц")
+    }
+
     // MARK: - Production preview wiring
 
     /// Verifies the production default `makeCameraSource` closure always produces a `.preview`-role

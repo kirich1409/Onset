@@ -6,6 +6,9 @@
 // Tests the pure static mappers in `RecordingDisplayMapper` and `ElapsedFormatter`.
 // No SwiftUI rendering — all assertions are against value returns, making these fast L2 tests.
 //
+// swiftlint:disable file_length
+// Rationale: covers multiple orthogonal mapper surfaces (status, pill text, pill a11y, checklist
+// liveness, stateword) in a single file — splitting would hurt locality more than it helps.
 @testable import Onset
 import SwiftUI
 import Testing
@@ -211,6 +214,60 @@ struct RecordingDisplayMapperPillTests {
     @Test("Degraded pill dot is orange")
     func degradedPillDot() {
         #expect(RecordingDisplayMapper.pillDotColor(for: .degraded) == .orange)
+    }
+}
+
+// MARK: - RecordingDisplayMapper — Accessibility label
+
+@Suite("RecordingDisplayMapper pill accessibility label")
+@MainActor
+struct RecordingDisplayMapperPillA11yTests {
+    private func drops(backpressure: Int = 0) -> DropCounters {
+        DropCounters(
+            encoderBackpressureDrops: backpressure,
+            captureDrops: 0,
+            cfrNormalizationDrops: 0
+        )
+    }
+
+    @Test("Zero drops → Нет пропущенных кадров")
+    func zeroDrops_returnsNone() {
+        let label = RecordingDisplayMapper.pillAccessibilityLabel(state: .normal, drops: self.drops())
+        #expect(label == "Нет пропущенных кадров")
+    }
+
+    @Test("Zero drops in degraded state → Нет пропущенных кадров")
+    func zeroDropsDegraded_returnsNone() {
+        let label = RecordingDisplayMapper.pillAccessibilityLabel(state: .degraded, drops: self.drops())
+        #expect(label == "Нет пропущенных кадров")
+    }
+
+    @Test("Normal 1 drop → matches pillText")
+    func normalOne_matchesPillText() {
+        let counters = self.drops(backpressure: 1)
+        let label = RecordingDisplayMapper.pillAccessibilityLabel(state: .normal, drops: counters)
+        #expect(label == RecordingDisplayMapper.pillText(state: .normal, drops: counters))
+    }
+
+    @Test("Normal 2 drops → matches pillText")
+    func normalTwo_matchesPillText() {
+        let counters = self.drops(backpressure: 2)
+        let label = RecordingDisplayMapper.pillAccessibilityLabel(state: .normal, drops: counters)
+        #expect(label == RecordingDisplayMapper.pillText(state: .normal, drops: counters))
+    }
+
+    @Test("Normal 5 drops → matches pillText")
+    func normalFive_matchesPillText() {
+        let counters = self.drops(backpressure: 5)
+        let label = RecordingDisplayMapper.pillAccessibilityLabel(state: .normal, drops: counters)
+        #expect(label == RecordingDisplayMapper.pillText(state: .normal, drops: counters))
+    }
+
+    @Test("Degraded 1 drop → matches degraded pillText")
+    func degradedOne_matchesPillText() {
+        let counters = self.drops(backpressure: 1)
+        let label = RecordingDisplayMapper.pillAccessibilityLabel(state: .degraded, drops: counters)
+        #expect(label == RecordingDisplayMapper.pillText(state: .degraded, drops: counters))
     }
 }
 
