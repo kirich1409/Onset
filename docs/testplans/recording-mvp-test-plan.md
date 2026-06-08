@@ -198,6 +198,42 @@ platform: [desktop]
 | Platform | Apple Silicon, macOS 26.x |
 | Source | Spec §AC-9; `RecordingCoordinatorTests.swift` |
 
+#### REC-TC-33 — MainViewModel: переключатель камеры исключает камеру из записи [unit]
+| | |
+|---|---|
+| Priority | P1 |
+| Type | unit |
+| AC ref | AC-2, AC-11 |
+| Preconditions | `FakePermissionsService`, `FakeRecordingControlling`; камера доступна |
+| Steps | (а) `cameraEnabled = false` → `isCameraActive == false`; `activeCamera == nil`; `resolveCameraFormat()` возвращает `nil`; `buildChecklist` не содержит строку камеры. (б) `cameraEnabled = true` при ненулевом `selectedCamera` → `isCameraActive == true`; `activeCamera != nil`. (в) `canRecord` НЕ изменяется при обоих состояниях переключателя (экран обязателен; камера опциональна). (г) Цикл off→on: `cameraEnabled = false`, затем `= true` → `selectFirstCameraIfNeeded()` вызван, `selectedCamera` восстановлен. (д) `cameraEnabled = false` не очищает `selectedCameraID` (исчезновение камеры из пикера — маскировка, не сброс). |
+| Expected Result | Отключённая камера полностью исключается из `RecordingRequest`; `canRecord` не зависит от переключателя; повторное включение восстанавливает выбор |
+| Platform | Apple Silicon, macOS 26.x |
+| Source | `MainViewModelCameraToggleTests.swift` (покрывает все sub-кейсы); `MainViewModel.swift` — `activeCamera`, `isCameraActive`, `cameraEnabled.didSet` |
+
+#### REC-TC-34 — DisplayLabelMapper: два разных формата для пикера и HUD [unit]
+| | |
+|---|---|
+| Priority | P1 |
+| Type | unit |
+| AC ref | AC-1 |
+| Preconditions | — |
+| Steps | (а) `label(name:pixelWidth:pixelHeight:refreshHz:)` с `"Внешний дисплей", 3840, 2160, 60` → `"Внешний дисплей — 3840×2160 @ 60"` (без единицы «Гц»). (б) `recordingScreenLabel(pixelWidth:pixelHeight:refreshHz:)` с `3840, 2160, 60` → `"3840×2160 @ 60 Гц"` (с «Гц», без имени). (в) Убедиться: форматы НЕ совпадают (разные поверхности — пикер vs HUD); объединять нельзя. (г) `refreshHz == 0` → `@ Hz` / `@ Hz Гц` часть опускается в обоих вариантах. |
+| Expected Result | Пикер: `"{Name} — {W}×{H} @ {Hz}"` без единицы. HUD: `"{W}×{H} @ {Hz} Гц"` с именем «Гц», без имени дисплея |
+| Platform | Apple Silicon, macOS 26.x |
+| Source | `DisplayLabelMapperTests.swift` (суиты `label(...)` и `recordingScreenLabel(...)`); `DisplayLabelMapper.swift` — docstring запрещает унификацию форматов |
+
+#### REC-TC-39 — CameraFormatSelector: матрица выбора формата [unit]
+| | |
+|---|---|
+| Priority | P1 |
+| Type | unit |
+| AC ref | AC-1 |
+| Preconditions | — |
+| Steps | `CameraFormatSelectorTests.swift` (PR #146) исчерпывает логику `CameraFormatSelector.pickBestFormat`. Ключевые ветки: (а) квадратный формат (напр. 1552×1552) проигрывает 16:9 1080p при одновременном наличии обоих; (б) 4K (3840×2160) проигрывает 1080p — действует ограничение FullHD (`height ≤ 1080`); (в) все 16:9-форматы выше 1080p → выбирается наименьший из них (минимальная избыточность); (г) тай-брейк по fps при одинаковом разрешении — побеждает более высокий fps; (д) нет 16:9-формата → fallback на формат с максимальным числом пикселей; (е) ни один формат не обеспечивает fps ≥ 30 → бросается `noSuitableCameraFormat`. |
+| Expected Result | Каждая ветка выбора верна; `noSuitableCameraFormat` брошен строго при отсутствии форматов с fps ≥ 30 |
+| Platform | Apple Silicon, macOS 26.x |
+| Source | `CameraFormatSelectorTests.swift`, `CameraFormatSelector.swift` — `pickBestFormat` (код приземляется через PR #146) |
+
 ---
 
 ### Phase 2 — Live app (L5, running Onset.app на macOS 26.x, M3 Max)
@@ -287,6 +323,8 @@ platform: [desktop]
 | Expected Result | Degraded активируется/деактивируется по backpressure-счётчику; счётчик в UI отображает раздельные категории |
 | Platform | Apple Silicon, macOS 26.x |
 | Source | Spec §AC-8; `DropMonitorTests.swift` |
+
+> **ПРИМЕЧАНИЕ — чувствительность к активности дисплея (2026-06-08, issue #100/#65):** измерение дропов на L5 зависит от активности на записываемом дисплее. Тихая машина без движения на экране стабильно показывает 0 дропов (верифицировано 2026-06-08 на M3 Max). Тяжёлая автоматика (MCP UI-тесты поверх записи) даёт ложно высокий счётчик (~191 за 64 с). Использовать **репрезентативную нагрузку пользователя** (скроллинг, переключение окон) — не idle и не UI-стресс. Не утверждать конкретный числовой порог дропов в L5-сценарии; допустимый диапазон определяется `RecordingConfiguration` символически.
 
 #### REC-TC-21 — Три пути остановки: кнопка, hotkey, menu bar (AC-9)
 | | |
@@ -432,15 +470,87 @@ platform: [desktop]
 | Platform | Apple Silicon, macOS 26.x |
 | Source | Spec §Prerequisites |
 
+#### REC-TC-35 — Переключатель «Камера»: OFF скрывает пикер и превью, не блокирует запись (AC-2)
+| | |
+|---|---|
+| Priority | P1 |
+| Type | ui-scenario |
+| AC ref | AC-2, AC-11 |
+| Preconditions | Камера подключена и разрешение выдано; экран и микрофон готовы |
+| Steps | **Кейс А — камера выключена:** 1. Переключить «Камера» → OFF. 2. Проверить: пикер камеры и live-превью скрываются. 3. Кнопка «Записать» остаётся активна. 4. Нажать «Записать», записать 5s, остановить. 5. В `~/Movies/Onset/`: присутствует `Screen.mp4`, `Camera.mp4` отсутствует (или не создан). **Кейс Б — повторное включение:** 6. Вернуть переключатель → ON. 7. Проверить: пикер и превью появляются; в пикере видно ранее выбранное устройство (сброса нет). 8. Нажать «Записать», записать 5s, остановить. 9. В `~/Movies/Onset/`: оба файла присутствуют. |
+| Expected Result | OFF: только Screen.mp4; утечки сессии нет. ON: оба файла; выбор камеры сохранён без сброса |
+| Platform | Apple Silicon, macOS 26.x |
+| Source | `MainViewModel.swift` — `activeCamera`, `cameraEnabled.didSet`, `selectFirstCameraIfNeeded`; `MainView+Sections.swift` — секция камеры гейтится на `model.cameraEnabled` |
+
+#### REC-TC-36 — Превью камеры: соотношение 16:9, ограничение высоты 140pt, кнопка «Записать» видна (AC-1) [P2-edge]
+| | |
+|---|---|
+| Priority | P2 |
+| Type | ui-scenario |
+| AC ref | AC-1 |
+| Preconditions | Камера включена и разрешение выдано; подписанный build |
+| Steps | 1. Запустить Onset.app с камерой (встроенная или внешняя). 2. Наблюдать превью камеры в главном окне. 3. Визуально проверить: превью не искажено (изображение не сжато и не растянуто); соотношение сторон видимо ≈16:9 (не квадратное, не 4:3). 4. Измерить высоту превью: ≤140pt (не выходит за секцию). 5. Убедиться: кнопка «Записать» видна без прокрутки при стандартном размере окна 460×560pt. 6. (Опционально) Подключить вторую камеру с иным native AR → превью адаптируется к 16:9 без деформации (letterbox/pillarbox). |
+| Expected Result | Превью: 16:9, maxHeight≤140pt, без дисторсии; кнопка «Записать» доступна без скролла |
+| Platform | Apple Silicon, macOS 26.x |
+| Source | `MainView.swift` — `Metrics.previewAspectRatio = 16/9`, `Metrics.previewMaxHeight = 140`; `MainView+Sections.swift` — `.aspectRatio(Metrics.previewAspectRatio, contentMode: .fit).frame(maxWidth: 140*(16/9), maxHeight: 140)` |
+
+#### REC-TC-37 — Пикер дисплея: формат метки «{Имя} — {W}×{H} @ {Hz}» (AC-1)
+| | |
+|---|---|
+| Priority | P1 |
+| Type | ui-scenario |
+| AC ref | AC-1 |
+| Preconditions | ≥2 дисплея подключено; подписанный build |
+| Steps | 1. Запустить Onset.app → главный экран. 2. Открыть пикер дисплея. 3. Проверить каждую строку: формат `"{Имя} — {W}×{H} @ {Hz}"` (например: `"Внешний дисплей — 3840×2160 @ 60"`). 4. Убедиться: единица «Гц» НЕ присутствует после числа (только число, без русской единицы). 5. Убедиться: имя дисплея присутствует в строке (не просто разрешение). |
+| Expected Result | Каждая строка пикера: `"{Имя} — {W}×{H} @ {Hz}"` без суффикса «Гц» |
+| Platform | Apple Silicon, macOS 26.x |
+| Source | `DisplayLabelMapper.label(for:)` / `label(name:pixelWidth:pixelHeight:refreshHz:)` — L2 покрыто `DisplayLabelMapperTests.swift` (суит `label(...)`) |
+
+#### REC-TC-38 — HUD дисплея в окне записи: формат «{W}×{H} @ {Hz} Гц» (AC-3) [P2]
+| | |
+|---|---|
+| Priority | P2 |
+| Type | ui-scenario |
+| AC ref | AC-3 |
+| Preconditions | Активная запись на именованном внешнем дисплее |
+| Steps | 1. Начать запись. 2. В окне записи найти HUD/чек-лист источников — строку «Экран». 3. Проверить формат: `"{W}×{H} @ {Hz} Гц"` (например: `"3840×2160 @ 60 Гц"`). 4. Убедиться: имя дисплея (например «Внешний дисплей») в этой строке ОТСУТСТВУЕТ. 5. Убедиться: суффикс «Гц» присутствует (в отличие от пикера, где он отсутствует). |
+| Expected Result | HUD строки источника: `"{W}×{H} @ {Hz} Гц"` без имени дисплея; отличается от формата пикера |
+| Platform | Apple Silicon, macOS 26.x |
+| Source | `DisplayLabelMapper.recordingScreenLabel(pixelWidth:pixelHeight:refreshHz:)` — L2 покрыто `DisplayLabelMapperTests.swift` (суит `recordingScreenLabel(...)`) |
+
+#### REC-TC-40 — Авто-выбор формата: встроенная FaceTime-камера → 16:9 1920×1080 (AC-1) [P1]
+| | |
+|---|---|
+| Priority | P1 |
+| Type | e2e |
+| AC ref | AC-1 |
+| Preconditions | Встроенная FaceTime-камера (macOS 26.x, M3 Max); подписанный build; ffprobe доступен; PR #146 (`CameraFormatSelector`) вмержен |
+| Steps | 1. Запустить Onset.app; камера — встроенная FaceTime (по умолчанию). 2. Начать запись, записать ≥5s, остановить. 3. `ffprobe -v quiet -print_format json -show_streams ~/Movies/Onset/<session>-Camera.mp4 \| python3 -c "import sys,json; s=[x for x in json.load(sys.stdin)['streams'] if x['codec_type']=='video'][0]; print(s['width'], s['height'])"` → `1920 1080`. 4. Убедиться: разрешение НЕ 1552×1552 (квадратный формат FaceTime-камеры) и НЕ иное соотношение ≠ 16:9. |
+| Expected Result | Camera.mp4: разрешение 1920×1080 (16:9, FullHD); не 1552×1552. Верифицировано 2026-06-08 на M3 Max встроенная FaceTime |
+| Platform | Apple Silicon, macOS 26.x |
+| Source | `CameraFormatSelector.pickBestFormat` (PR #146); ffprobe верификация |
+
+#### REC-TC-41 — Авто-выбор формата: Logitech MX Brio → 1080p60, не 4K30 (AC-1) [P1]
+| | |
+|---|---|
+| Priority | P1 |
+| Type | e2e |
+| AC ref | AC-1 |
+| Preconditions | Logitech MX Brio подключён; подписанный build; ffprobe доступен; PR #146 вмержен |
+| Steps | 1. Запустить Onset.app; в пикере камеры выбрать Logitech MX Brio. 2. Начать запись, записать ≥5s, остановить. 3. `ffprobe -v quiet -print_format json -show_streams ~/Movies/Onset/<session>-Camera.mp4 \| python3 -c "import sys,json; s=[x for x in json.load(sys.stdin)['streams'] if x['codec_type']=='video'][0]; print(s['width'], s['height'], s.get('r_frame_rate',''))"` → `1920 1080 60/1`. 4. Убедиться: разрешение НЕ 3840×2160 (4K) и fps НЕ 30 (иначе выбран неверный формат). 5. Убедиться: 4K30 достижим только через ручной выбор формата (#113) — автоматика не должна его предпочитать. |
+| Expected Result | Camera.mp4: 1920×1080 @ 60fps (16:9, ≤1080, максимальный fps на этом разрешении); не 3840×2160 @ 30fps |
+| Platform | Apple Silicon, macOS 26.x; Logitech MX Brio (reference hardware) |
+| Source | `CameraFormatSelector.pickBestFormat` (PR #146); ffprobe верификация; `docs/quality/production-quality-bar.md` (Brio как reference hardware) |
+
 ---
 
 ## Coverage Matrix
 
 | AC | TCs | Кол-во TCs |
 |---|---|---|
-| AC-1 | REC-TC-14, REC-TC-29 | 2 |
-| AC-2 | REC-TC-12, REC-TC-15 | 2 |
-| AC-3 | REC-TC-16, REC-TC-28 | 2 |
+| AC-1 | REC-TC-14, REC-TC-29, REC-TC-34, REC-TC-36, REC-TC-37, REC-TC-39, REC-TC-40, REC-TC-41 | 8 |
+| AC-2 | REC-TC-12, REC-TC-15, REC-TC-33, REC-TC-35 | 4 |
+| AC-3 | REC-TC-16, REC-TC-28, REC-TC-38 | 3 |
 | AC-4 | REC-TC-01, REC-TC-05, REC-TC-06, REC-TC-17, REC-TC-32 | 5 |
 | AC-5 | REC-TC-01, REC-TC-03, REC-TC-04, REC-TC-17 | 4 |
 | AC-6 | REC-TC-02, REC-TC-05, REC-TC-18 | 3 |
@@ -448,7 +558,7 @@ platform: [desktop]
 | AC-8 | REC-TC-04, REC-TC-05, REC-TC-07, REC-TC-20, REC-TC-28 | 5 |
 | AC-9 | REC-TC-09, REC-TC-13, REC-TC-21, REC-TC-27, REC-TC-31 | 5 |
 | AC-10 | REC-TC-06, REC-TC-22, REC-TC-30 | 3 |
-| AC-11 | REC-TC-10, REC-TC-23, REC-TC-24, REC-TC-25 | 4 |
+| AC-11 | REC-TC-10, REC-TC-23, REC-TC-24, REC-TC-25, REC-TC-33, REC-TC-35 | 6 |
 | AC-12 | REC-TC-11, REC-TC-26 | 2 |
 
 ---
@@ -464,6 +574,14 @@ platform: [desktop]
 - **Кадры с PTS < T0** — отбрасываются (unit: REC-TC-08); не попадают в файл.
 - **`DataRateLimits` не поддерживается энкодером** — graceful fallback к AverageBitRate (unit: REC-TC-05).
 - **5K/6K дисплей → downscale до ≤4K60** — pre-flight cap (unit: REC-TC-03); не рантайм-деградация.
+- **Камера OFF → только Screen.mp4, кнопка «Записать» активна** (unit: REC-TC-33, L5: REC-TC-35) — camera is optional per AC-11 (amended).
+- **Цикл camera OFF→ON** — `selectedCameraID` не сбрасывается при OFF; при ON `selectFirstCameraIfNeeded()` восстанавливает выбор (unit: REC-TC-33).
+- **Формат метки дисплея — пикер ≠ HUD** (unit: REC-TC-34, L5: REC-TC-37/38) — два намеренно разных формата; унификация недопустима per `DisplayLabelMapper.swift` docstring.
+- **Квадратный формат камеры (1552×1552) → проигрывает 16:9 1080p** (unit: REC-TC-39, L5: REC-TC-40) — `pickBestFormat` всегда предпочитает 16:9 при его наличии.
+- **4K (3840×2160) → проигрывает 1080p** (unit: REC-TC-39, L5: REC-TC-41) — ограничение FullHD (`height ≤ 1080`) не даёт выбрать 4K автоматически; достижим только вручную (#113).
+- **Все 16:9-форматы выше 1080p → выбирается наименьший** (unit: REC-TC-39) — минимизация избыточности при отсутствии 1080p.
+- **Нет 16:9-формата → fallback на max-pixel** (unit: REC-TC-39) — `pickBestFormat` не бросает ошибку, если нет 16:9, но есть другой формат с fps ≥ 30.
+- **Нет форматов с fps ≥ 30 → `noSuitableCameraFormat`** (unit: REC-TC-39) — старт блокируется, не происходит silent fallback.
 
 ---
 
@@ -503,6 +621,15 @@ platform: [desktop]
 | REC-TC-30 | L5 e2e | ⬜ acceptance #42 | kill -9 |
 | REC-TC-31 | L5 manual | ⬜ acceptance #42 | После TC-19 |
 | REC-TC-32 | L5 manual | ⬜ acceptance #42 | rm ~/Movies/Onset |
+| REC-TC-33 | L2 unit | ✅ реализован | `MainViewModelCameraToggleTests.swift` |
+| REC-TC-34 | L2 unit | ✅ реализован | `DisplayLabelMapperTests.swift` |
+| REC-TC-35 | L5 manual | ⬜ acceptance #42 | Камера OFF/ON, оба файла |
+| REC-TC-36 | L5 manual | ⬜ acceptance #42 | Визуально 16:9, ≤140pt |
+| REC-TC-37 | L5 manual | ⬜ acceptance #42 | Пикер: имя + разрешение без «Гц» |
+| REC-TC-38 | L5 manual | ⬜ acceptance #42 | HUD: разрешение + «Гц» без имени |
+| REC-TC-39 | L2 unit | ⬜ via #146 | `CameraFormatSelectorTests.swift` (PR #146) |
+| REC-TC-40 | L5 e2e | ✅ verified 2026-06-08 | ffprobe Camera.mp4 = 1920×1080; встроенная FaceTime |
+| REC-TC-41 | L5 e2e | ⬜ pending Brio | ffprobe Camera.mp4 = 1920×1080 @ 60fps; Logitech MX Brio required |
 
 ---
 
