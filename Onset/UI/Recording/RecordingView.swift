@@ -473,7 +473,7 @@ nonisolated enum RecordingDisplayMapper {
         sourceLiveness: .allLive,
         onStop: {}
     )
-    .frame(width: 370, height: 420)
+    .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
     .preferredColorScheme(.light)
 }
 
@@ -490,7 +490,7 @@ nonisolated enum RecordingDisplayMapper {
         sourceLiveness: .allLive,
         onStop: {}
     )
-    .frame(width: 370, height: 420)
+    .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
     .preferredColorScheme(.dark)
 }
 
@@ -507,7 +507,7 @@ nonisolated enum RecordingDisplayMapper {
         sourceLiveness: .allLive,
         onStop: {}
     )
-    .frame(width: 370, height: 420)
+    .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
     .preferredColorScheme(.dark)
 }
 
@@ -524,7 +524,7 @@ nonisolated enum RecordingDisplayMapper {
         sourceLiveness: .allLive,
         onStop: {}
     )
-    .frame(width: 370, height: 420)
+    .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
     .preferredColorScheme(.light)
 }
 
@@ -541,7 +541,7 @@ nonisolated enum RecordingDisplayMapper {
         sourceLiveness: .init(screen: true, camera: false, microphone: false),
         onStop: {}
     )
-    .frame(width: 370, height: 420)
+    .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
     .preferredColorScheme(.dark)
 }
 
