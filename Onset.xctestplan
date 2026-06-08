@@ -9,6 +9,17 @@
     }
   ],
   "defaultOptions" : {
+    "codeCoverage" : {
+      "enabled" : true,
+      "onlyGenerateCoverageForSpecifiedTargets" : true,
+      "targets" : [
+        {
+          "containerPath" : "container:Onset.xcodeproj",
+          "identifier" : "56D93BBB2FCE9DF30027E5F0",
+          "name" : "Onset"
+        }
+      ]
+    },
     "testTimeoutsEnabled" : true
   },
   "testTargets" : [

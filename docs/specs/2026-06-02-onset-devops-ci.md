@@ -72,6 +72,9 @@ Onset разрабатывается полностью агентами (см. 
 | `Onset.xcodeproj/project.pbxproj` | Modified | Swift 6, sandbox=NO, привязать xcconfig |
 | `.gitignore` | New | Игнор DerivedData/xcuserdata/.DS_Store/swarm-report |
 | `scripts/check-entitlements.sh`, `scripts/check-no-network.sh` | New | Allow/deny-list по **собранному** .app; static-proxy AC-8 |
+| `Onset.xctestplan` | Modified | Включён code coverage, scoped на таргет `Onset` (не тест-бандл) |
+| `scripts/coverage-summary.sh` | New | Сводка результатов тестов + покрытия из `.xcresult` в `$GITHUB_STEP_SUMMARY`; опциональный порог `ONSET_COVERAGE_MIN` |
+| `.github/workflows/pr-gate.yml` (`unit`/`build`) | Modified | `unit`: `-resultBundlePath` + `-enableCodeCoverage`, job-summary, артефакт `.xcresult`. Оба job: `xcpretty` → `xcbeautify --renderer github-actions` |
 
 ## Technical Approach
 
@@ -94,7 +97,7 @@ Agent-driven модель полагается на CI-гейты и auto-merge 
 - **Быстрый PR-гейт (required, цель — единицы минут):** три параллельные джобы.
   - `build` — `xcodebuild build -scheme Onset -destination 'platform=macOS'`, **Debug** (`-Onone`, `ONLY_ACTIVE_ARCH=YES`, без WMO — на порядки быстрее Release), под полной строгостью (строгость — frontend-фаза, сборку не раздувает). DerivedData-кэш (ключ `hashFiles(project.pbxproj, **/*.xcconfig)` + runner OS).
   - `lint` — SwiftLint strict + SwiftFormat --lint, **параллельно** (не build-phase; не требует сборки — самая быстрая).
-  - `unit` — Swift Testing; при модуляризации — `swift test` на SPM-пакете (быстрее xcodebuild test с bundle/signing).
+  - `unit` — Swift Testing; при модуляризации — `swift test` на SPM-пакете (быстрее xcodebuild test с bundle/signing). Собирает code coverage (scoped на таргет `Onset` через `Onset.xctestplan`), пишет `-resultBundlePath`, рендерит сводку тестов + покрытия в `$GITHUB_STEP_SUMMARY` (`scripts/coverage-summary.sh`) и грузит `.xcresult` артефактом. Покрытие — **информационное, не блокирует** (опциональный порог `ONSET_COVERAGE_MIN` по умолчанию выключен, чтобы не тормозить гейт и не давать флаки-падений). Вывод тестов форматирует `xcbeautify --renderer github-actions` (предустановлен на `macos-26`) → падения тестов становятся inline-аннотациями в diff PR; шаг `gem install xcpretty` убран из `unit`/`build`.
   - В каждой джобе: `env: DEVELOPER_DIR: /Applications/Xcode_26.5.app`.
 - **Async-слой (non-required):** CodeQL (weekly + push:main + dispatch — он пересобирает проект, отсюда 20–30 мин; убран с PR-пути), notarization (tags), dependency-scan (weekly). L5 — не в CI (локально, см. AC-7).
 - **`concurrency: cancel-in-progress`** при `github.event_name == 'pull_request'`; исключить `merge_group` (ломает auto-merge финал) и `push:main` (история).
@@ -108,6 +111,7 @@ Agent-driven модель полагается на CI-гейты и auto-merge 
 | build (Debug, полная строгость — флаги той же джобы, не отдельная) | per-PR-required | ✅ | критический путь гейта; строгость = frontend-фаза, не раздувает codegen |
 | lint (SwiftLint strict + SwiftFormat --lint) | per-PR-required | ✅ | параллельно build, сборки не требует — быстрейшая |
 | unit (Swift Testing / `swift test` на SPM) | per-PR-required | ✅ | L2 чистая логика без устройств, параллельно |
+| code coverage + сводка тестов (job-summary + `.xcresult` артефакт) | per-PR (в `unit`-джобе) | ❌ информационно | Видимость покрытия таргета `Onset` и pass/fail без внешнего сервиса; порог `ONSET_COVERAGE_MIN` по умолчанию выкл |
 | entitlements-check (по собранному .app) | per-PR-required | ✅ | downstream build (секвенс в гейте); ловит config-drift (sandbox=YES, network.client) день-в-день; дёшево |
 | no-network static-proxy (nm/otool) | per-PR-required | ✅ | downstream build; статическая гарантия AC-8; дёшево |
 | privacy-manifest lint (PrivacyInfo.xcprivacy) | per-PR-required | ✅ | дёшево, детерминированно |
@@ -214,6 +218,9 @@ GitHub-hosted (виртуальные) не имеют capture-hardware / AVCapt
 | Copilot Autofix | Включить (verify Swift-поддержку); fix-PR через обычный гейт+ревью | Бесплатен для public с CodeQL; дефект всплывает с готовым фиксом в async-слое |
 | Offload | Тяжёлое не-hardware → GitHub-hosted CI; hardware (L5) → локально на dev-машине вне CI | Не грузить dev-машину сборками; минуты бесплатны; L5 нельзя на виртуальных, self-hosted не используется |
 | External-PR безопасность | pull_request (не target) + least-privilege permissions + human-review на fork | Public repo: чужой PR запускает pipeline — threat model шире |
+| Видимость coverage/тестов | Self-contained: `$GITHUB_STEP_SUMMARY` + `.xcresult` артефакт + `xcbeautify`-аннотации; НЕ Codecov / check-action | Lean-этика, no external service, least-privilege (`contents: read` сохранён); Codecov потребовал бы внешний сервис и токен |
+| Coverage-гейт | Report-only (порог `ONSET_COVERAGE_MIN` по умолчанию выкл) | Нет калиброванной базовой линии; жёсткий порог дал бы флаки-падения и тормозил AC-1 fast-gate |
+| Форматтер логов | `xcbeautify` (предустановлен на `macos-26`) вместо `xcpretty` (`gem install`) | Inline-аннотации падений + лучше парсит Swift Testing; минус одна зависимость и шаг установки |
 
 ## Risks and Concerns
 
@@ -250,6 +257,8 @@ GitHub-hosted (виртуальные) не имеют capture-hardware / AVCapt
   - Recommendation: verify на docs.github.com; если SPM поддержан — dependency-review в required PR-гейт; иначе полагаться на Dependabot
 - [ ] Поддержка Swift у Copilot Autofix — *non-blocking, implementation-time*
   - Recommendation: verify на docs.github.com (CodeQL Swift = GA, но Autofix coverage у́же); если Swift не поддержан — отложить Autofix, CodeQL-алерты ревьюит агент
+- [ ] Блокирующий coverage-порог и/или Codecov-интеграция — *deferred, post-MVP*
+  - Recommendation: сначала накопить данные по `$GITHUB_STEP_SUMMARY` (report-only), затем калибровать `ONSET_COVERAGE_MIN`; Codecov/check-action — только при появлении устойчивого к новому формату `.xcresult` варианта, чтобы не нарушать lean-этику
 
 ## Future Phases
 
