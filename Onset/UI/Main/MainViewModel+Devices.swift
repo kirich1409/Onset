@@ -42,21 +42,111 @@ extension MainViewModel {
         }
     }
 
+    // Rationale: two parallel resolver switch blocks — splitting would obscure the
+    // camera/mic symmetry; logic belongs together in the same function.
+    // swiftlint:disable:next function_body_length
     func loadCamerasAndMicrophones() {
         let cameraAuthorized = self.permissions.cameraStatus == .authorized
         let micAuthorized = self.permissions.microphoneStatus == .authorized
 
         let foundCameras = self.discoverCameras(cameraAuthorized)
         self.cameras = foundCameras
-        self.selectFirstCameraIfNeeded()
 
         let foundMics = self.discoverMicrophones(micAuthorized)
         self.microphones = foundMics
         // Do NOT auto-select microphone (spec: no mic auto-select)
 
+        // Restore saved selections under the guard flag so didSet does not overwrite
+        // the just-loaded record. `DeviceSelectionResolver` encodes the invariant that
+        // `.disconnected` and auto-selected fallback never coexist: `selectFirstCameraIfNeeded`
+        // is called only from the `.noSavedSelection` branch.
+        self.isApplyingPersistedSelection = true
+        defer { self.isApplyingPersistedSelection = false }
+
+        let store = self.makeStore()
+
+        switch DeviceSelectionResolver.resolveCamera(
+            saved: store.loadCamera(),
+            availableIDs: foundCameras.map(\.uniqueID)
+        ) {
+        case .disabled:
+            // User explicitly disabled the camera — honour the choice; do NOT auto-select.
+            self.cameraEnabled = false
+            self.selectedCameraID = nil
+            self.disconnectedCameraName = nil
+            mainViewModelLogger.debug("Restored camera state — disabled by user")
+
+        case let .restore(id):
+            self.cameraEnabled = true
+            self.selectedCameraID = id
+            self.disconnectedCameraName = nil
+            mainViewModelLogger.debug("Restored camera selection — device present")
+
+        case let .disconnected(name):
+            self.cameraEnabled = true
+            self.selectedCameraID = nil
+            self.disconnectedCameraName = name
+            mainViewModelLogger.info("Saved camera not available — showing disconnected notice")
+
+        case .noSavedSelection:
+            // First launch or explicitly cleared — apply the first-camera default.
+            self.selectFirstCameraIfNeeded()
+        }
+
+        switch DeviceSelectionResolver.resolve(
+            saved: store.loadMicrophone(),
+            availableIDs: foundMics.map(\.uniqueID)
+        ) {
+        case let .restore(id):
+            self.selectedMicID = id
+            self.disconnectedMicName = nil
+            mainViewModelLogger.debug("Restored microphone selection — device present")
+
+        case let .disconnected(name):
+            self.selectedMicID = nil
+            self.disconnectedMicName = name
+            mainViewModelLogger.info("Saved microphone not available — showing disconnected notice")
+
+        case .noSavedSelection:
+            break // mic never auto-selects (spec)
+        }
+
         mainViewModelLogger.info(
             "Capture devices loaded — cameras: \(foundCameras.count), mics: \(foundMics.count)"
         )
+    }
+}
+
+// MARK: - MainViewModel — Camera persistence
+
+extension MainViewModel {
+    /// Persists the current effective camera choice as a tri-state `PersistedCameraSelection`.
+    ///
+    /// Called from `selectedCameraID.didSet` and `cameraEnabled.didSet` (when not under the
+    /// `isApplyingPersistedSelection` guard). Reading both `cameraEnabled` and `selectedCameraID`
+    /// in one place ensures the stored value always reflects the user's full intent:
+    /// - Camera OFF → `.disabled` (regardless of `selectedCameraID`).
+    /// - Camera ON, device selected → `.enabled(record)`.
+    /// - Camera ON, no device selected → `clearCamera()` (no selection to persist).
+    ///
+    /// Never called during restore (`isApplyingPersistedSelection == true` at call sites).
+    func persistCameraSelection() {
+        let store = self.makeStore()
+        guard self.cameraEnabled else {
+            store.saveCamera(.disabled)
+            return
+        }
+        if let id = self.selectedCameraID {
+            // Resolve the label at persist time — name is PII, stored for UI only, never logged.
+            let name = if let device = self.cameras.first(where: { $0.uniqueID == id }) {
+                self.cameraLabel(for: device)
+            } else {
+                "Камера"
+            }
+            store.saveCamera(.enabled(DeviceSelectionRecord(uniqueID: id, localizedName: name)))
+        } else {
+            store.clearCamera()
+        }
     }
 }
 
