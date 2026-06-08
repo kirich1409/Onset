@@ -129,15 +129,14 @@ private enum CoordinatorFixtures {
         )
     }
 
-    static func result(degradedWarning: Bool = false, backpressureDrops: Int = 0) -> RecordingResult {
-        RecordingResult(
-            output: .screenOnly(.completed(url: URL(fileURLWithPath: "/tmp/onset-coordinator-screen.mp4"))),
-            drops: DropCounters(
+    static func result(backpressureDrops: Int = 0) -> RecordingResult {
+        .completed(
+            .screenOnly(.completed(url: URL(fileURLWithPath: "/tmp/onset-coordinator-screen.mp4"))),
+            DropCounters(
                 encoderBackpressureDrops: backpressureDrops,
                 captureDrops: 0,
                 cfrNormalizationDrops: 0
-            ),
-            degradedWarning: degradedWarning
+            )
         )
     }
 
@@ -148,13 +147,12 @@ private enum CoordinatorFixtures {
                 "The disk is full."
             }
         }
-        return RecordingResult(
-            output: .screenOnly(.failed(
+        return .completed(
+            .screenOnly(.failed(
                 url: URL(fileURLWithPath: "/tmp/onset-coordinator-screen.mp4"),
                 error: FakeWriteError()
             )),
-            drops: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
-            degradedWarning: false
+            DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0)
         )
     }
 
@@ -315,7 +313,7 @@ struct RecordingCoordinatorTests {
     @Test("stop computes the degraded warning from the result")
     func stop_computesDegradedWarning() async throws {
         let fake = FakeRecordingControlling(
-            result: CoordinatorFixtures.result(degradedWarning: true, backpressureDrops: 128)
+            result: CoordinatorFixtures.result(backpressureDrops: 128)
         )
         let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
 
@@ -397,11 +395,11 @@ struct RecordingCoordinatorTests {
     func degradedWarning_lifecycle() async throws {
         // Session 1: result carries degradedWarning=true.
         let fake1 = FakeRecordingControlling(
-            result: CoordinatorFixtures.result(degradedWarning: true, backpressureDrops: 64)
+            result: CoordinatorFixtures.result(backpressureDrops: 64)
         )
         // Session 2 fake is returned on the second factory call (stateful factory box, see Counter pattern).
         let fake2 = FakeRecordingControlling(
-            result: CoordinatorFixtures.result(degradedWarning: false)
+            result: CoordinatorFixtures.result()
         )
         // Thread-safe call counter: Counter is @unchecked Sendable (see class declaration above);
         // used here so the @Sendable factory closure can switch between fake1/fake2 without a
