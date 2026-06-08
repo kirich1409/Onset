@@ -155,7 +155,7 @@ struct RecordingContentView: View {
 
     @ViewBuilder private var dropPillSection: some View {
         let dropCount = self.drops.encoderBackpressureDrops
-        let pillLabel = dropCount == 0 ? "Нет пропущенных кадров" : "Пропущено кадров: \(dropCount)"
+        let pillLabel = RecordingDisplayMapper.pillAccessibilityLabel(dropCount: dropCount)
         HStack(spacing: Metrics.pillDotSpacing) {
             Circle()
                 .fill(RecordingDisplayMapper.pillDotColor(for: self.state))
@@ -329,21 +329,46 @@ nonisolated enum RecordingDisplayMapper {
 
     // MARK: Drop pill
 
-    /// The full pill text.
+    /// The full pill text, with correct Russian pluralization.
     ///
-    /// - Normal: «N пропущенных кадров» (where N = encoderBackpressureDrops)
-    /// - Degraded: «Пропущено N кадров · диск» (where N = encoderBackpressureDrops)
-    ///
-    /// Note: «диск» is fixed per the mockup — `DropCounters` carries no reason field.
-    /// Russian pluralization of «кадров»/«кадр»/«кадра» is left as a follow-up (out of MVP scope).
+    /// - Normal: «1 пропущенный кадр» / «2 пропущенных кадра» / «5 пропущенных кадров»
+    ///   (where N = encoderBackpressureDrops)
+    /// - Degraded: «Пропущен 1 кадр» / «Пропущено 2 кадра» / «Пропущено 5 кадров»
+    ///   (where N = encoderBackpressureDrops; no disk attribution — `DropCounters` carries no reason)
     static func pillText(state: RecordingState, drops: DropCounters) -> String {
+        let count = drops.encoderBackpressureDrops
         switch state {
         case .normal:
-            "\(drops.encoderBackpressureDrops) пропущенных кадров"
+            let adjective = RussianPluralForm.select(
+                count: count,
+                one: "пропущенный",
+                few: "пропущенных",
+                many: "пропущенных"
+            )
+            let noun = RussianPluralForm.select(count: count, one: "кадр", few: "кадра", many: "кадров")
+            return "\(count) \(adjective) \(noun)"
 
         case .degraded:
-            "Пропущено \(drops.encoderBackpressureDrops) кадров · диск"
+            let verb = RussianPluralForm.select(
+                count: count,
+                one: "Пропущен",
+                few: "Пропущено",
+                many: "Пропущено"
+            )
+            let noun = RussianPluralForm.select(count: count, one: "кадр", few: "кадра", many: "кадров")
+            return "\(verb) \(count) \(noun)"
         }
+    }
+
+    /// Accessibility label for the drop-pill element.
+    ///
+    /// Returns «Нет пропущенных кадров» when count is zero, otherwise
+    /// a correctly pluralized «Пропущен(о) N кадр(а/ов)».
+    static func pillAccessibilityLabel(dropCount: Int) -> String {
+        guard dropCount > 0 else { return "Нет пропущенных кадров" }
+        let verb = RussianPluralForm.select(count: dropCount, one: "Пропущен", few: "Пропущено", many: "Пропущено")
+        let noun = RussianPluralForm.select(count: dropCount, one: "кадр", few: "кадра", many: "кадров")
+        return "\(verb) \(dropCount) \(noun)"
     }
 
     /// Color of the small dot inside the pill.

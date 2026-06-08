@@ -105,16 +105,46 @@ struct RecordingDisplayMapperPillTests {
         )
     }
 
-    @Test("Normal state pill shows 0 dropped frames")
+    // MARK: Normal — many form (0, 5, 11)
+
+    @Test("Normal 0 → many: 0 пропущенных кадров")
     func normalPillZero() {
         let text = RecordingDisplayMapper.pillText(state: .normal, drops: self.drops())
         #expect(text == "0 пропущенных кадров")
     }
 
-    @Test("Normal state pill shows exact backpressure count")
+    @Test("Normal 5 → many: 5 пропущенных кадров")
     func normalPillNonZero() {
         let text = RecordingDisplayMapper.pillText(state: .normal, drops: self.drops(backpressure: 5))
         #expect(text == "5 пропущенных кадров")
+    }
+
+    @Test("Normal 11 → many: 11 пропущенных кадров")
+    func normalPillEleven() {
+        let text = RecordingDisplayMapper.pillText(state: .normal, drops: self.drops(backpressure: 11))
+        #expect(text == "11 пропущенных кадров")
+    }
+
+    // MARK: Normal — one form (1, 21)
+
+    @Test("Normal 1 → one: 1 пропущенный кадр")
+    func normalPillOne() {
+        let text = RecordingDisplayMapper.pillText(state: .normal, drops: self.drops(backpressure: 1))
+        #expect(text == "1 пропущенный кадр")
+    }
+
+    @Test("Normal 21 → one: 21 пропущенный кадр")
+    func normalPillTwentyOne() {
+        let text = RecordingDisplayMapper.pillText(state: .normal, drops: self.drops(backpressure: 21))
+        #expect(text == "21 пропущенный кадр")
+    }
+
+    // MARK: Normal — few form (2)
+
+    @Test("Normal 2 → few: 2 пропущенных кадра")
+    func normalPillTwo() {
+        let text = RecordingDisplayMapper.pillText(state: .normal, drops: self.drops(backpressure: 2))
+        #expect(text == "2 пропущенных кадра")
     }
 
     @Test("Normal state pill ignores captureDrops")
@@ -123,11 +153,45 @@ struct RecordingDisplayMapperPillTests {
         #expect(text == "0 пропущенных кадров")
     }
 
-    @Test("Degraded state pill shows Пропущено N кадров · диск")
+    // MARK: Degraded — many form (128)
+
+    @Test("Degraded 128 → many: Пропущено 128 кадров")
     func degradedPillText() {
         let text = RecordingDisplayMapper.pillText(state: .degraded, drops: self.drops(backpressure: 128))
-        #expect(text == "Пропущено 128 кадров · диск")
+        #expect(text == "Пропущено 128 кадров")
     }
+
+    // MARK: Degraded — one form (1, 21)
+
+    @Test("Degraded 1 → one: Пропущен 1 кадр")
+    func degradedPillOne() {
+        let text = RecordingDisplayMapper.pillText(state: .degraded, drops: self.drops(backpressure: 1))
+        #expect(text == "Пропущен 1 кадр")
+    }
+
+    @Test("Degraded 21 → one: Пропущен 21 кадр")
+    func degradedPillTwentyOne() {
+        let text = RecordingDisplayMapper.pillText(state: .degraded, drops: self.drops(backpressure: 21))
+        #expect(text == "Пропущен 21 кадр")
+    }
+
+    // MARK: Degraded — few form (2)
+
+    @Test("Degraded 2 → few: Пропущено 2 кадра")
+    func degradedPillTwo() {
+        let text = RecordingDisplayMapper.pillText(state: .degraded, drops: self.drops(backpressure: 2))
+        #expect(text == "Пропущено 2 кадра")
+    }
+
+    // MARK: Degraded — many teen form (11)
+
+    @Test("Degraded 11 → many: Пропущено 11 кадров")
+    func degradedPillEleven() {
+        let text = RecordingDisplayMapper.pillText(state: .degraded, drops: self.drops(backpressure: 11))
+        #expect(text == "Пропущено 11 кадров")
+    }
+
+    // MARK: Visual state mappers
 
     @Test("Degraded state pill background is orange")
     func degradedPillBackground() {
