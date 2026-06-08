@@ -66,6 +66,14 @@ final class MainViewModel {
     let makeCameraSource:
         (CameraDevice, CameraFormat, MicrophoneDevice?, RecordingConfiguration) -> CameraSource
 
+    /// Closure seam for device-selection persistence — injectable for tests.
+    ///
+    /// The default closure builds a `UserDefaultsDeviceSelectionStore` backed by
+    /// `.standard`. Tests inject an `InMemoryUserDefaults`-backed store via
+    /// `withScopedDefaults`.
+    @ObservationIgnored
+    let makeStore: () -> any DeviceSelectionPersisting
+
     /// Test seam: when non-nil, replaces `coordinator.start(_:)` in `startRecording`.
     ///
     /// Injected by `MainViewModelTests` to spy on coordinator invocations without constructing
@@ -80,16 +88,63 @@ final class MainViewModel {
     var cameras: [CameraDevice] = []
     var microphones: [MicrophoneDevice] = []
 
+    // MARK: - Persistence state
+
+    /// When `true`, `selectedCameraID` and `selectedMicID` `didSet` observers skip
+    /// persistence writes. Set to `true` around the entire device-load/restore/auto-select
+    /// block in `loadCamerasAndMicrophones()` so programmatic restores do not overwrite
+    /// the just-loaded record.
+    @ObservationIgnored
+    var isApplyingPersistedSelection = false
+
+    // MARK: - Disconnected-device notices
+
+    /// Human-readable name of the previously selected camera that is no longer available,
+    /// or `nil` when the camera is present or was never selected.
+    ///
+    /// Set during device load when a saved `uniqueID` cannot be matched against the
+    /// current device list. Cleared when a matching camera is found, or when the user
+    /// explicitly selects a different camera.
+    var disconnectedCameraName: String?
+
+    /// Human-readable name of the previously selected microphone that is no longer available,
+    /// or `nil` when the microphone is present or was never selected.
+    var disconnectedMicName: String?
+
     // MARK: - User selections (ID-typed for Hashable Picker compatibility)
 
     /// The `CGDirectDisplayID` of the selected display, or `nil` when no selection.
     var selectedDisplayID: CGDirectDisplayID?
 
     /// The `uniqueID` of the selected camera device, or `nil` for none.
-    var selectedCameraID: String?
+    var selectedCameraID: String? {
+        didSet {
+            guard !self.isApplyingPersistedSelection else { return }
+            // Clear the disconnected notice when the user makes a new selection.
+            self.disconnectedCameraName = nil
+            self.persistCameraSelection()
+        }
+    }
 
     /// The `uniqueID` of the selected microphone device, or `nil` for none.
-    var selectedMicID: String?
+    var selectedMicID: String? {
+        didSet {
+            guard !self.isApplyingPersistedSelection else { return }
+            // Clear the disconnected notice when the user makes a new selection.
+            self.disconnectedMicName = nil
+            let store = self.makeStore()
+            if let id = self.selectedMicID {
+                let name = if let device = self.microphones.first(where: { $0.uniqueID == id }) {
+                    self.microphoneLabel(for: device)
+                } else {
+                    "Микрофон"
+                }
+                store.saveMicrophone(DeviceSelectionRecord(uniqueID: id, localizedName: name))
+            } else {
+                store.clearMicrophone()
+            }
+        }
+    }
 
     /// Whether the camera is enabled for recording (#77, #76).
     ///
@@ -101,6 +156,15 @@ final class MainViewModel {
             // Auto-select first camera when re-enabling with no prior selection.
             if self.cameraEnabled {
                 self.selectFirstCameraIfNeeded()
+            }
+            // Persist the enable/disable choice so the user's decision survives restart.
+            // `persistCameraSelection` reads both `cameraEnabled` and `selectedCameraID`,
+            // so it correctly writes `.disabled` here and `.enabled(record)` on re-enable.
+            // Not guarded by `isApplyingPersistedSelection` — the cameraEnabled.didSet
+            // path is only reached from the `.disabled` restore branch (where we explicitly
+            // skip persist by staying under the guard in loadCamerasAndMicrophones).
+            if !self.isApplyingPersistedSelection {
+                self.persistCameraSelection()
             }
         }
     }
@@ -266,6 +330,11 @@ final class MainViewModel {
     /// one place. Does not reference `cameraEnabled` — call-site guards apply that condition.
     ///
     /// Not `private` so `MainViewModel+Devices.swift` can call it from the same type.
+    ///
+    /// The auto-selected camera is intentionally NOT persisted: this method only runs from
+    /// the `.noSavedSelection` branch under the `isApplyingPersistedSelection` guard, so
+    /// `selectedCameraID.didSet` skips the save. This avoids a false "disconnected" notice
+    /// if the default camera disappears before the user ever explicitly chose one.
     func selectFirstCameraIfNeeded() {
         if self.selectedCameraID == nil, let first = self.cameras.first {
             self.selectedCameraID = first.uniqueID
@@ -291,7 +360,10 @@ final class MainViewModel {
         )
             -> CameraSource = { device, format, mic, config in
                 CameraSource(cameraDevice: device, format: format, micDevice: mic, config: config, role: .preview)
-            }
+            },
+        makeStore: @escaping () -> any DeviceSelectionPersisting = {
+            UserDefaultsDeviceSelectionStore()
+        }
     ) {
         self.permissions = permissions
         self.coordinator = coordinator
@@ -299,5 +371,6 @@ final class MainViewModel {
         self.discoverCameras = discoverCameras
         self.discoverMicrophones = discoverMicrophones
         self.makeCameraSource = makeCameraSource
+        self.makeStore = makeStore
     }
 }

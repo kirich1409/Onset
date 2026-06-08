@@ -24,12 +24,15 @@ struct MainViewModelCameraToggleTests {
     -> MainViewModel {
         let perms = FakePermissionsService(screen: screen, camera: camera, microphone: microphone)
         let coordinator = RecordingCoordinator()
+        // swiftlint:disable:next force_unwrapping
+        let store = InMemoryUserDefaults(suiteName: nil)!
         return MainViewModel(
             permissions: perms,
             coordinator: coordinator,
             discoverDisplays: { _ in displays },
             discoverCameras: { _ in cameras },
-            discoverMicrophones: { _ in [] }
+            discoverMicrophones: { _ in [] },
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: store) }
         )
     }
 
