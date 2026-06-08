@@ -465,8 +465,13 @@ private func makeSession(
 }
 
 /// Polls an actor-isolated condition with a bounded timeout — replaces fragile fixed sleeps.
+/// 8s upper bound: eventually returns immediately once the condition holds, so this only
+/// widens the failure-path budget — the success path is unaffected. Swift Testing runs @Test funcs
+/// in parallel; under CI scheduler contention the stop()/stream await-chain can exceed a 2s
+/// wall-clock deadline (issue #172). The coordinator stop-funnel is race-free (isStopping flips
+/// synchronously before the first await), so a larger budget cannot mask a hang — it still fails, later.
 private func eventually(
-    timeoutMs: Int = 2000,
+    timeoutMs: Int = 8000,
     _ condition: @Sendable () async -> Bool
 ) async
 -> Bool {

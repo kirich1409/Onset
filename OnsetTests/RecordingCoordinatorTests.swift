@@ -191,8 +191,13 @@ private final class Counter: @unchecked Sendable {
 }
 
 /// Polls a `@MainActor` condition with a bounded timeout (mirrors `eventually` in session tests).
+/// 8s upper bound: eventuallyMain returns immediately once the condition holds, so this only
+/// widens the failure-path budget — the success path is unaffected. Swift Testing runs @Test funcs
+/// in parallel; under CI scheduler contention the stop()/stream await-chain can exceed a 2s
+/// wall-clock deadline (issue #172). The coordinator stop-funnel is race-free (isStopping flips
+/// synchronously before the first await), so a larger budget cannot mask a hang — it still fails, later.
 @MainActor
-private func eventuallyMain(timeoutMs: Int = 2000, _ condition: () -> Bool) async -> Bool {
+private func eventuallyMain(timeoutMs: Int = 8000, _ condition: () -> Bool) async -> Bool {
     let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
     while Date() < deadline {
         if condition() { return true }
