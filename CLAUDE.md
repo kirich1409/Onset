@@ -49,12 +49,9 @@ Artifact checks (CI `artifact-checks` job):
   it hides that summary.
 - L5 (real hardware) suites are opt-in via env vars: `ONSET_RUN_L5_CAPTURE=1`
   (CameraSource, RecordingSession), `ONSET_RUN_L5_ENCODE=1` (VideoEncoder, FileWriter).
-  From agent/CI shells env vars do NOT propagate via `xcodebuild test` — inject them
-  into a copy of the generated `.xctestrun`
-  (`TestConfigurations:0:TestTargets:0:EnvironmentVariables` via PlistBuddy) and run
-  `test-without-building -xctestrun`; full recipe in
-  `docs/quality/production-quality-bar.md` §4.3. `-only-testing` matches suites, not
-  test functions.
+  Use `xcodebuild test -scheme Onset -testPlan Onset-L5` — the plan sets both vars
+  automatically. See `docs/quality/production-quality-bar.md` §4.3.
+  `-only-testing` matches suites, not test functions.
 - L5 requires a SIGNED build — drop `CODE_SIGNING_ALLOWED=NO` for build-for-testing;
   an unsigned test host writes a sticky TCC deny for screen capture (recovery:
   `tccutil reset ScreenCapture` + manual re-grant).
