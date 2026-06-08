@@ -1,5 +1,73 @@
 import Foundation
 
+// MARK: - SessionOutput
+
+/// The file-level output of a completed recording session.
+///
+/// Mirrors the three valid combinations of pipelines that `RecordingStartPlan` can produce —
+/// screen-only, camera-only, or both — making `(screen: nil, camera: nil)` unrepresentable at
+/// the type level. A failable `init?` bridges from the dictionary produced by
+/// `DualFileOutputStage.finishAll()` for the few remaining non-typesafe sites.
+///
+/// `SessionOutput` is intentionally NOT `Equatable` — `FinishResult.failed` carries an `Error`
+/// payload and `Error` has no guaranteed `Equatable` conformance.
+///
+/// Note: `RecordingOutput` is already taken (a utility namespace in `Storage/RecordingOutput.swift`).
+nonisolated enum SessionOutput {
+    /// Only the screen pipeline ran and produced a result.
+    case screenOnly(FinishResult)
+    /// Only the camera pipeline ran and produced a result.
+    case cameraOnly(FinishResult)
+    /// Both pipelines ran and produced results.
+    case both(screen: FinishResult, camera: FinishResult)
+
+    // MARK: - Failable init
+
+    /// Builds a `SessionOutput` from optional per-pipeline results.
+    ///
+    /// Returns `nil` when both arguments are `nil` (degenerate empty — stop fired before any
+    /// sample reached a writer). All other combinations map to one of the three enum cases.
+    nonisolated init?(screen screenResult: FinishResult?, camera cameraResult: FinishResult?) {
+        switch (screenResult, cameraResult) {
+        case let (scr?, cam?):
+            self = .both(screen: scr, camera: cam)
+
+        case let (scr?, nil):
+            self = .screenOnly(scr)
+
+        case let (nil, cam?):
+            self = .cameraOnly(cam)
+
+        case (nil, nil):
+            return nil
+        }
+    }
+
+    // MARK: - Accessors
+
+    /// The screen file's finish outcome, or `nil` when the screen pipeline did not run.
+    nonisolated var screen: FinishResult? {
+        switch self {
+        case let .screenOnly(result), let .both(screen: result, camera: _):
+            result
+
+        case .cameraOnly:
+            nil
+        }
+    }
+
+    /// The camera file's finish outcome, or `nil` when the camera pipeline did not run.
+    nonisolated var camera: FinishResult? {
+        switch self {
+        case let .cameraOnly(result), let .both(screen: _, camera: result):
+            result
+
+        case .screenOnly:
+            nil
+        }
+    }
+}
+
 // MARK: - RecordingResult
 
 /// The terminal outcome of a recording session, assembled by `RecordingSession.stop()` (AC-9).
@@ -9,18 +77,20 @@ import Foundation
 ///
 /// ### Independence of writers (AC-9)
 /// The two writers finalise in parallel (`async let`); one writer ending in `.failed` does NOT
-/// prevent the other from completing. Both `screen` and `camera` are optional because a session
-/// may run only one pipeline (AC-11) or finalise one early on permission revoke (AC-12) — the
-/// surviving pipeline's result is still present.
+/// prevent the other from completing.
+///
+/// ### Invalid-state reduction
+/// The `output` field uses `SessionOutput?` instead of independent `screen`/`camera` optionals.
+/// When `output` is non-nil, at least one pipeline produced a file — `(screen: nil, camera: nil)`
+/// is unrepresentable within `SessionOutput`. `output == nil` remains a reachable degenerate case
+/// (stop fired before any writer was created — no samples reached `DualFileOutputStage`).
 ///
 /// All members are `nonisolated` so this value type crosses the session-actor boundary as the
-/// `start()` return without an actor hop.
+/// `stop()` return without an actor hop.
 nonisolated struct RecordingResult {
-    /// The screen file's finish outcome, or `nil` when the screen pipeline did not run.
-    nonisolated let screen: FinishResult?
-
-    /// The camera file's finish outcome, or `nil` when the camera pipeline did not run.
-    nonisolated let camera: FinishResult?
+    /// The per-pipeline file outcomes, or `nil` in the degenerate case where stop was called
+    /// before any writer was created (no samples reached `DualFileOutputStage`).
+    nonisolated let output: SessionOutput?
 
     /// Cumulative per-reason drop tallies for the whole session (from `DropMonitor.snapshot`).
     nonisolated let drops: DropCounters
@@ -32,6 +102,18 @@ nonisolated struct RecordingResult {
     /// experience; capture / CFR-normalization drops are tracked but do not warn (mirrors the
     /// `RecordingState.degraded` trigger policy in `DropMonitor`).
     nonisolated let degradedWarning: Bool
+
+    // MARK: - Per-pipeline projections
+
+    /// The screen file's finish outcome, or `nil` when the screen pipeline did not run.
+    nonisolated var screen: FinishResult? {
+        self.output?.screen
+    }
+
+    /// The camera file's finish outcome, or `nil` when the camera pipeline did not run.
+    nonisolated var camera: FinishResult? {
+        self.output?.camera
+    }
 }
 
 extension RecordingResult {
@@ -65,26 +147,5 @@ extension RecordingResult {
         let reasons = [self.screen?.failureError, self.camera?.failureError]
             .compactMap { $0?.localizedDescription }
         return reasons.joined(separator: "\n")
-    }
-}
-
-// MARK: - FinishResult accessors
-
-extension FinishResult {
-    /// The output file URL, available in every terminal case (the path is reserved regardless
-    /// of completed / cancelled / failed — see `FinishResult` doc).
-    nonisolated var url: URL {
-        switch self {
-        case let .completed(url),
-             let .cancelled(url),
-             let .failed(url, _):
-            url
-        }
-    }
-
-    /// The write error when this result is `.failed`; `nil` for `.completed` and `.cancelled`.
-    nonisolated var failureError: (any Error)? {
-        guard case let .failed(_, error) = self else { return nil }
-        return error
     }
 }

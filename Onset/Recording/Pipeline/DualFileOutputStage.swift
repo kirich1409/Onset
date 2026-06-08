@@ -78,13 +78,30 @@ actor DualFileOutputStage {
 
     // MARK: - Per-pipeline writer state
 
-    /// A writer plus its terminal status, tracked so an early-finalised pipeline (AC-12) still
+    /// Lifecycle state of a single pipeline writer.
+    ///
+    /// Replaces the `FinishResult?` nullable: `nil` mapped to "not yet finalised" was stringly typed —
+    /// any code path forgetting the nil-check would silently route audio/video into a sealed writer.
+    /// With `WriterState`, the compiler enforces exhaustive handling via `switch`.
+    private enum WriterState {
+        /// The writer is open and accepting audio/video.
+        case live
+        /// The writer has been finalised (either early via AC-12 or in `finishAll`).
+        case finalized(FinishResult)
+    }
+
+    /// A writer plus its lifecycle state, tracked so an early-finalised pipeline (AC-12) still
     /// contributes its `FinishResult` to the final `RecordingResult`.
     private struct PipelineWriter {
         let writer: any WriterControlling
-        /// Set when the writer has been finalised early (AC-12). When non-nil the writer is no
-        /// longer in the fan-out set and must not receive further audio/video.
-        var finishResult: FinishResult?
+        /// Lifecycle state: `.live` while accepting input; `.finalized` once sealed.
+        var state: WriterState = .live
+
+        /// `true` while the writer is open and accepting audio/video.
+        var isLive: Bool {
+            if case .live = self.state { return true }
+            return false
+        }
     }
 
     private var writers: [RecordingPipelineKind: PipelineWriter] = [:]
@@ -147,7 +164,7 @@ actor DualFileOutputStage {
         let pipelineWriter: PipelineWriter
         if let existing = self.writers[kind] {
             // An early-finalised writer (AC-12) drops further video silently — its file is sealed.
-            guard existing.finishResult == nil else { return }
+            guard existing.isLive else { return }
             pipelineWriter = existing
         } else {
             guard let created = await self.createWriter(for: kind, firstSample: sample) else {
@@ -189,7 +206,7 @@ actor DualFileOutputStage {
             return nil
         }
 
-        let pipelineWriter = PipelineWriter(writer: writer, finishResult: nil)
+        let pipelineWriter = PipelineWriter(writer: writer)
         self.writers[kind] = pipelineWriter
 
         // Register the writer's backpressure channel with DropMonitor (AC-8/AC-9) — without this a
@@ -225,7 +242,7 @@ actor DualFileOutputStage {
     private func recordFault(for kind: RecordingPipelineKind) async {
         self.faultedWriterKinds.insert(kind)
 
-        let liveKinds = Set(self.writers.filter { $0.value.finishResult == nil }.keys)
+        let liveKinds = Set(self.writers.filter(\.value.isLive).keys)
         guard !liveKinds.isEmpty else { return }
 
         if liveKinds.isSubset(of: self.faultedWriterKinds) {
@@ -309,7 +326,7 @@ actor DualFileOutputStage {
 
         let carrier = RetimedAudioBuffer(buffer: retimed)
 
-        guard self.writers.contains(where: { $0.value.finishResult == nil }) else {
+        guard self.writers.contains(where: \.value.isLive) else {
             self.bufferPendingAudio(carrier)
             return
         }
@@ -317,7 +334,7 @@ actor DualFileOutputStage {
         // Same retimed buffer reference handed to every writer (carrier wraps one CMSampleBuffer —
         // retain, no second copy). Each writer actor serialises its own appendAudio behind its
         // readiness gate.
-        for (_, pipelineWriter) in self.writers where pipelineWriter.finishResult == nil {
+        for (_, pipelineWriter) in self.writers where pipelineWriter.isLive {
             await pipelineWriter.writer.appendAudio(carrier)
         }
 
@@ -473,7 +490,7 @@ actor DualFileOutputStage {
     /// No-op if the pipeline never produced a writer (e.g. a static screen that sent no frames
     /// before the revoke) or was already finalised.
     func finalizePipeline(_ kind: RecordingPipelineKind) async {
-        guard var pipelineWriter = self.writers[kind], pipelineWriter.finishResult == nil else {
+        guard var pipelineWriter = self.writers[kind], pipelineWriter.isLive else {
             return
         }
         // Cancel the fault-observer task before markFinished() so the faults stream finishing
@@ -484,7 +501,7 @@ actor DualFileOutputStage {
 
         await pipelineWriter.writer.markFinished()
         let result = await pipelineWriter.writer.finish()
-        pipelineWriter.finishResult = result
+        pipelineWriter.state = .finalized(result)
         self.writers[kind] = pipelineWriter
         if case let .failed(url, error) = result {
             let name = url.lastPathComponent
@@ -514,7 +531,7 @@ actor DualFileOutputStage {
         self.faultObserverTasks.removeAll()
 
         // Seal every still-open writer's inputs before finishing.
-        for (kind, pipelineWriter) in self.writers where pipelineWriter.finishResult == nil {
+        for (kind, pipelineWriter) in self.writers where pipelineWriter.isLive {
             await pipelineWriter.writer.markFinished()
             self.logger.info("Marked \(String(describing: kind)) writer finished")
         }
@@ -535,12 +552,12 @@ actor DualFileOutputStage {
     /// Finishes one pipeline's writer if it is open, or returns its already-captured result.
     private func finishIfOpen(_ kind: RecordingPipelineKind) async -> FinishResult? {
         guard let pipelineWriter = self.writers[kind] else { return nil }
-        if let existing = pipelineWriter.finishResult {
+        if case let .finalized(existing) = pipelineWriter.state {
             return existing
         }
         let result = await pipelineWriter.writer.finish()
         var updated = pipelineWriter
-        updated.finishResult = result
+        updated.state = .finalized(result)
         self.writers[kind] = updated
         if case let .failed(url, error) = result {
             self.logger.error(
