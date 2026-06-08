@@ -216,8 +216,4 @@ struct OnboardingView: View {
             nil
         }
     }
-
-    // MARK: - «Проверить снова» button
-
-    // Declared in OnboardingView+Footer.swift as `checkAgainButton`.
 }
