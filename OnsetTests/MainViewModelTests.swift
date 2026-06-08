@@ -4,7 +4,7 @@ import Testing
 
 // MARK: - MainViewModelTests
 
-// swiftlint:disable type_body_length
+// swiftlint:disable type_body_length file_length
 // Rationale: covers full MainViewModel device/label/record/preview surface; extraction
 // would scatter closely related AC tests across multiple files and reduce readability.
 
@@ -22,23 +22,35 @@ struct MainViewModelTests {
     // MARK: - Helpers
 
     /// Creates a `MainViewModel` with injected device lists and a fake permissions service.
+    ///
+    /// Passes an in-memory `DeviceSelectionStore` backed by `InMemoryUserDefaults` so
+    /// no `.plist` files are written to `~/Library/Preferences/` during tests.
+    /// Use `withScopedDefaults` at the call site and pass the vended instance here.
     private func makeSUT(
         screen: PermissionStatus = .authorized,
         camera: PermissionStatus = .authorized,
         microphone: PermissionStatus = .authorized,
         displays: [Display] = [],
         cameras: [CameraDevice] = [],
-        microphones: [MicrophoneDevice] = []
+        microphones: [MicrophoneDevice] = [],
+        defaults: InMemoryUserDefaults? = nil
     )
     -> (sut: MainViewModel, perms: FakePermissionsService) {
         let perms = FakePermissionsService(screen: screen, camera: camera, microphone: microphone)
         let coordinator = RecordingCoordinator()
+        let store: InMemoryUserDefaults = if let provided = defaults {
+            provided
+        } else {
+            // swiftlint:disable:next force_unwrapping
+            InMemoryUserDefaults(suiteName: nil)!
+        }
         let sut = MainViewModel(
             permissions: perms,
             coordinator: coordinator,
             discoverDisplays: { _ in displays },
             discoverCameras: { _ in cameras },
-            discoverMicrophones: { _ in microphones }
+            discoverMicrophones: { _ in microphones },
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: store) }
         )
         return (sut, perms)
     }
@@ -344,12 +356,15 @@ struct MainViewModelBuildChecklistTests {
     private func makeSUT() -> MainViewModel {
         let perms = FakePermissionsService()
         let coordinator = RecordingCoordinator()
+        // swiftlint:disable:next force_unwrapping
+        let store = InMemoryUserDefaults(suiteName: nil)!
         return MainViewModel(
             permissions: perms,
             coordinator: coordinator,
             discoverDisplays: { _ in [] },
             discoverCameras: { _ in [] },
-            discoverMicrophones: { _ in [] }
+            discoverMicrophones: { _ in [] },
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: store) }
         )
     }
 
