@@ -284,6 +284,83 @@ extension DropReason: Hashable {
     }
 }
 
+// MARK: - DropSource
+
+/// The pipeline stage that detected a frame or sample drop.
+///
+/// Carried on every `DropEvent` so `DropMonitor` can accumulate a per-source breakdown
+/// and emit a single diagnostic summary line at session stop. This is a DIAGNOSTIC
+/// dimension only — it does NOT alter the existing per-`DropReason` counter accounting
+/// (`DropCounters`) or the UI-facing `RecordingState` logic.
+nonisolated enum DropSource {
+    /// SCStream video frame overflowed the capture → encoder `AsyncStream` buffer.
+    case captureScreen
+
+    /// AVCapture camera video frame overflowed the capture → encoder `AsyncStream` buffer.
+    case captureCameraVideo
+
+    /// AVCapture microphone audio sample overflowed the capture → encoder `AsyncStream` buffer.
+    case captureCameraAudio
+
+    /// VideoEncoder pending-frame gate dropped a frame before VT compression.
+    case encode
+
+    /// FileWriter input was not ready (writer/disk backpressure); compressed sample dropped.
+    case writer
+}
+
+// Under SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor + InferIsolatedConformances, synthesised
+// Equatable and Hashable witnesses are inferred @MainActor. Manual nonisolated witnesses match
+// the pattern used by DropReason and DropCounters so DropSource is usable from nonisolated code.
+// swiftformat:disable:next redundantEquatable
+extension DropSource: Equatable {
+    /// Manual `nonisolated` implementation (mirrors `DropReason`).
+    nonisolated static func == (lhs: DropSource, rhs: DropSource) -> Bool {
+        switch (lhs, rhs) {
+        case (.captureScreen, .captureScreen),
+             (.captureCameraVideo, .captureCameraVideo),
+             (.captureCameraAudio, .captureCameraAudio),
+             (.encode, .encode),
+             (.writer, .writer):
+            true
+
+        default:
+            false
+        }
+    }
+}
+
+extension DropSource: Hashable {
+    /// Manual `nonisolated` implementation.
+    ///
+    /// Swift auto-synthesises `Hashable` for enums with no associated values. Under
+    /// `InferIsolatedConformances`, the synthesised `hash(into:)` witness is inferred
+    /// `@MainActor`, making `DropSource` unusable from `nonisolated` contexts. Providing
+    /// an explicit manual witness with `nonisolated` overrides the synthesised form
+    /// (mirrors the identical pattern on `DropReason`).
+    nonisolated func hash(into hasher: inout Hasher) {
+        switch self {
+        case .captureScreen:
+            hasher.combine(0)
+
+        case .captureCameraVideo:
+            hasher.combine(1)
+
+        case .captureCameraAudio:
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(2)
+
+        case .encode:
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(3)
+
+        case .writer:
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(4)
+        }
+    }
+}
+
 // MARK: - DropEvent
 
 /// An event emitted by a capture source when a frame or sample was dropped.
@@ -297,6 +374,10 @@ extension DropReason: Hashable {
 nonisolated struct DropEvent {
     /// The pipeline stage where the drop occurred.
     nonisolated let reason: DropReason
+
+    /// The pipeline stage that detected the drop. Used for the diagnostic per-source
+    /// breakdown logged at session stop; does not affect counter accounting.
+    nonisolated let source: DropSource
 
     /// Number of frames or samples dropped in this event. Always ≥ 1.
     nonisolated let count: Int

@@ -50,7 +50,7 @@ nonisolated struct SessionHandle: @unchecked Sendable {
 /// Extracted as a `nonisolated` function so the mapping can be unit-tested without
 /// live AVFoundation or actor machinery.
 nonisolated func captureDropEvent(pts: CMTime, count: Int = 1) -> DropEvent {
-    DropEvent(reason: .captureDrop, count: count, detectedAt: pts)
+    DropEvent(reason: .captureDrop, source: .captureCameraVideo, count: count, detectedAt: pts)
 }
 
 /// Returns a backpressure `DropEvent` for the given `AsyncStream.Continuation.YieldResult`,
@@ -63,7 +63,7 @@ nonisolated func cameraBackpressureDropEvent(
 )
 -> DropEvent? {
     guard case .dropped = yieldResult else { return nil }
-    return DropEvent(reason: .encoderBackpressureDrops, count: 1, detectedAt: pts)
+    return DropEvent(reason: .encoderBackpressureDrops, source: .captureCameraVideo, count: 1, detectedAt: pts)
 }
 
 /// Returns a backpressure `DropEvent` for an audio `AsyncStream.Continuation.YieldResult`.
@@ -73,7 +73,7 @@ nonisolated func audioBackpressureDropEvent(
 )
 -> DropEvent? {
     guard case .dropped = yieldResult else { return nil }
-    return DropEvent(reason: .encoderBackpressureDrops, count: 1, detectedAt: pts)
+    return DropEvent(reason: .encoderBackpressureDrops, source: .captureCameraAudio, count: 1, detectedAt: pts)
 }
 
 /// Returns `true` when `frameHostTime >= sessionStart`.

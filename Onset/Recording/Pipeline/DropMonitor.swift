@@ -18,6 +18,10 @@
 // Isolation: SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor + NonisolatedNonsendingByDefault.
 // `actor DropMonitor` is explicit so the monitor runs off the main actor; all value types are
 // `nonisolated` with manual nonisolated Equatable witnesses (mirrors `DropReason`).
+//
+// file_length: DropCounters, DropBreakdown, BackpressureDegradationWindow, and DropMonitor are
+// tightly coupled (shared actor state, shared witness pattern). Splitting them across files
+// would duplicate the InferIsolatedConformances rationale. swiftlint:disable file_length
 
 import CoreMedia
 import Foundation
@@ -40,6 +44,51 @@ nonisolated struct DropCounters {
 
     /// Total `DropReason.cfrNormalizationDrops` seen this session. Never triggers degraded state.
     nonisolated let cfrNormalizationDrops: Int
+}
+
+// MARK: - DropBreakdown
+
+/// Per-source diagnostic drop counts accumulated over a session.
+///
+/// Unlike `DropCounters` (which maps to `DropReason` and drives UI state), `DropBreakdown`
+/// maps to `DropSource` and is used EXCLUSIVELY for the single `.notice` log line emitted
+/// at session stop. It does not affect UI counters, `RecordingState`, or the degraded-state
+/// window — diagnostic only.
+nonisolated struct DropBreakdown {
+    /// Drops detected by `ScreenSource` (SCStream video overflow).
+    nonisolated let captureScreen: Int
+    /// Drops detected by `CameraSource` video path (AVCapture video overflow).
+    nonisolated let captureCameraVideo: Int
+    /// Drops detected by `CameraSource` audio path (AVCapture audio overflow).
+    nonisolated let captureCameraAudio: Int
+    /// Drops dropped at the `VideoEncoder` pending-frame gate.
+    nonisolated let encode: Int
+    /// Drops dropped at `FileWriter` due to writer/disk backpressure.
+    nonisolated let writer: Int
+
+    /// Single-line `.notice`-level summary for `os.Logger`.
+    ///
+    /// All values are public (no PII) — safe at `.notice` so the line survives in release
+    /// `log show` output, satisfying AC-8's release-diagnosability requirement.
+    nonisolated var summaryLine: String {
+        "drop breakdown: capture-screen=\(self.captureScreen)" +
+            " capture-camera-video=\(self.captureCameraVideo)" +
+            " capture-camera-audio=\(self.captureCameraAudio)" +
+            " encode=\(self.encode)" +
+            " writer=\(self.writer)"
+    }
+}
+
+// swiftformat:disable:next redundantEquatable
+extension DropBreakdown: Equatable {
+    /// Manual `nonisolated` implementation (mirrors `DropCounters`).
+    nonisolated static func == (lhs: DropBreakdown, rhs: DropBreakdown) -> Bool {
+        lhs.captureScreen == rhs.captureScreen
+            && lhs.captureCameraVideo == rhs.captureCameraVideo
+            && lhs.captureCameraAudio == rhs.captureCameraAudio
+            && lhs.encode == rhs.encode
+            && lhs.writer == rhs.writer
+    }
 }
 
 // The synthesised `==` would be inferred `@MainActor` under `InferIsolatedConformances` because
@@ -204,6 +253,19 @@ actor DropMonitor {
     private var captureDrops = 0
     private var cfrNormalizationDrops = 0
 
+    // MARK: - Per-source diagnostic counters (never reset)
+
+    // These parallel the DropReason counters above but are keyed by DropSource, not DropReason.
+    // They feed the single .notice summary line at stop() — they do NOT replace or modify the
+    // DropReason accounting above. An event with reason .encoderBackpressureDrops increments
+    // both encoderBackpressureDrops (existing) AND one source bucket below (new). The totals
+    // are independent: the reason total drives UI; the source total drives diagnostics.
+    private var breakdownCaptureScreen = 0
+    private var breakdownCaptureCameraVideo = 0
+    private var breakdownCaptureCameraAudio = 0
+    private var breakdownEncode = 0
+    private var breakdownWriter = 0
+
     // MARK: - Tasks
 
     /// One child task per observed source stream. Cancelled on `stop()` / `deinit`.
@@ -267,8 +329,10 @@ actor DropMonitor {
     }
 
     /// Routes a single drop event: bumps the cumulative counter for its reason, and — for
-    /// backpressure only — feeds the window and recomputes `RecordingState`.
+    /// backpressure only — feeds the window and recomputes `RecordingState`. Also accumulates
+    /// the per-source diagnostic breakdown (independent path, no effect on reason counters).
     private func ingest(_ event: DropEvent) {
+        // Reason accounting: drives UI counters and degraded-state window.
         switch event.reason {
         case .encoderBackpressureDrops:
             self.encoderBackpressureDrops += event.count
@@ -283,6 +347,24 @@ actor DropMonitor {
         case .cfrNormalizationDrops:
             // Counted for the AC-9 end-of-session warning; never a degraded-state trigger.
             self.cfrNormalizationDrops += event.count
+        }
+
+        // Source accounting: diagnostic only — independent of reason accounting above.
+        switch event.source {
+        case .captureScreen:
+            self.breakdownCaptureScreen += event.count
+
+        case .captureCameraVideo:
+            self.breakdownCaptureCameraVideo += event.count
+
+        case .captureCameraAudio:
+            self.breakdownCaptureCameraAudio += event.count
+
+        case .encode:
+            self.breakdownEncode += event.count
+
+        case .writer:
+            self.breakdownWriter += event.count
         }
     }
 
@@ -344,6 +426,18 @@ actor DropMonitor {
         )
     }
 
+    /// Current per-source diagnostic breakdown. Counters are never reset. Used by `stop()` to
+    /// emit the session-end summary and exposed for testing.
+    func breakdownSnapshot() -> DropBreakdown {
+        DropBreakdown(
+            captureScreen: self.breakdownCaptureScreen,
+            captureCameraVideo: self.breakdownCaptureCameraVideo,
+            captureCameraAudio: self.breakdownCaptureCameraAudio,
+            encode: self.breakdownEncode,
+            writer: self.breakdownWriter
+        )
+    }
+
     // MARK: - Lifecycle
 
     /// Primary terminator: cancels and awaits the recovery tick, cancels and awaits the observe
@@ -352,6 +446,9 @@ actor DropMonitor {
     /// ensures deterministic teardown: any in-flight `ingest(_:)` call that holds the actor
     /// completes before the stream is closed, eliminating reliance on yield-after-finish being a
     /// no-op. Mirrors `VideoEncoder.stop()`'s finish-always discipline.
+    ///
+    /// Emits a single `.notice` per-source diagnostic summary after all observe tasks drain —
+    /// counts are final at this point and survive in release `log show` output (AC-8).
     func stop() async {
         self.tickTask?.cancel()
         await self.tickTask?.value
@@ -363,6 +460,8 @@ actor DropMonitor {
             await task.value
         }
         self.observeTasks.removeAll()
+        let breakdown = self.breakdownSnapshot()
+        self.logger.notice("\(breakdown.summaryLine, privacy: .public)")
         self.stateContinuation.finish()
     }
 }
