@@ -4,6 +4,10 @@ import Testing
 
 // MARK: - MainViewModelTests
 
+// swiftlint:disable type_body_length
+// Rationale: covers full MainViewModel device/label/record/preview surface; extraction
+// would scatter closely related AC tests across multiple files and reduce readability.
+
 /// Tests cover `MainViewModel`'s observable behavior via `FakePermissionsService`
 /// and injectable device-discovery seams.
 ///
@@ -41,12 +45,13 @@ struct MainViewModelTests {
 
     private static func makeDisplay(
         id: CGDirectDisplayID = 1,
+        name: String = "Test Display",
         width: Int = 1920,
         height: Int = 1080,
         refreshHz: Double = 60
     )
     -> Display {
-        Display(displayID: id, pixelWidth: width, pixelHeight: height, refreshHz: refreshHz)
+        Display(displayID: id, name: name, pixelWidth: width, pixelHeight: height, refreshHz: refreshHz)
     }
 
     private static func makeCamera(id: String = "cam-1") -> CameraDevice {
@@ -256,36 +261,54 @@ struct MainViewModelTests {
         #expect(sut.selectedCameraID == nil)
     }
 
-    // MARK: - Display label — built-in (refreshHz 0)
+    // MARK: - Display label
 
-    @Test("Display with refreshHz 0 → label shows resolution without Hz")
+    @Test("Display with refreshHz 0 → label shows name — resolution (no Hz segment)")
     func displayLabel_builtIn() {
-        let display = Display(displayID: 1, pixelWidth: 2560, pixelHeight: 1600, refreshHz: 0.0)
+        let display = Display(
+            displayID: 1,
+            name: "Встроенный дисплей",
+            pixelWidth: 2560,
+            pixelHeight: 1600,
+            refreshHz: 0.0
+        )
         let (sut, _) = self.makeSUT()
 
         let label = sut.displayLabel(for: display)
 
-        #expect(label == "2560×1600")
+        #expect(label == "Встроенный дисплей — 2560×1600")
     }
 
-    @Test("Display with refreshHz 60 → label shows resolution @ 60 Гц")
+    @Test("Display with refreshHz 60 → label shows name — resolution @ 60")
     func displayLabel_externalMonitor() {
-        let display = Display(displayID: 1, pixelWidth: 1920, pixelHeight: 1080, refreshHz: 60.0)
+        let display = Display(
+            displayID: 1,
+            name: "Внешний дисплей",
+            pixelWidth: 1920,
+            pixelHeight: 1080,
+            refreshHz: 60.0
+        )
         let (sut, _) = self.makeSUT()
 
         let label = sut.displayLabel(for: display)
 
-        #expect(label == "1920×1080 @ 60 Гц")
+        #expect(label == "Внешний дисплей — 1920×1080 @ 60")
     }
 
-    @Test("Display with refreshHz 59.94 → label rounds to 60 Гц")
+    @Test("Display with refreshHz 59.94 → label rounds Hz to 60")
     func displayLabel_fractionalRefreshHz() {
-        let display = Display(displayID: 1, pixelWidth: 1920, pixelHeight: 1080, refreshHz: 59.94)
+        let display = Display(
+            displayID: 1,
+            name: "Внешний дисплей",
+            pixelWidth: 1920,
+            pixelHeight: 1080,
+            refreshHz: 59.94
+        )
         let (sut, _) = self.makeSUT()
 
         let label = sut.displayLabel(for: display)
 
-        #expect(label == "1920×1080 @ 60 Гц")
+        #expect(label == "Внешний дисплей — 1920×1080 @ 60")
     }
 
     // MARK: - Production preview wiring
@@ -309,10 +332,12 @@ struct MainViewModelTests {
     }
 }
 
+// swiftlint:enable type_body_length
+
 // MARK: - MainViewModel — buildChecklist
 
 /// Tests for `buildChecklist(display:)`: verifies that `screenDescription` is built
-/// via `displayLabel(for:)` and therefore carries the `@ N Гц` suffix when `refreshHz != 0`.
+/// via `DisplayLabelMapper.recordingScreenLabel` — HUD format: `"{W}×{H} @ {Hz} Гц"`, no name.
 @Suite("MainViewModel — buildChecklist")
 @MainActor
 struct MainViewModelBuildChecklistTests {
@@ -328,9 +353,15 @@ struct MainViewModelBuildChecklistTests {
         )
     }
 
-    @Test("screenDescription includes @ N Гц when refreshHz is non-zero")
+    @Test("screenDescription is HUD format — resolution @ hz Гц (no name) when refreshHz is non-zero")
     func screenDescription_withHz() {
-        let display = Display(displayID: 1, pixelWidth: 3840, pixelHeight: 2160, refreshHz: 60.0)
+        let display = Display(
+            displayID: 1,
+            name: "Внешний дисплей",
+            pixelWidth: 3840,
+            pixelHeight: 2160,
+            refreshHz: 60.0
+        )
         let sut = self.makeSUT()
 
         let checklist = sut.buildChecklist(display: display)
@@ -338,9 +369,15 @@ struct MainViewModelBuildChecklistTests {
         #expect(checklist.screenDescription == "3840×2160 @ 60 Гц")
     }
 
-    @Test("screenDescription shows resolution only when refreshHz is zero")
+    @Test("screenDescription is HUD format — resolution only (no name, no hz) when refreshHz is zero")
     func screenDescription_withoutHz() {
-        let display = Display(displayID: 1, pixelWidth: 2560, pixelHeight: 1600, refreshHz: 0.0)
+        let display = Display(
+            displayID: 1,
+            name: "Встроенный дисплей",
+            pixelWidth: 2560,
+            pixelHeight: 1600,
+            refreshHz: 0.0
+        )
         let sut = self.makeSUT()
 
         let checklist = sut.buildChecklist(display: display)

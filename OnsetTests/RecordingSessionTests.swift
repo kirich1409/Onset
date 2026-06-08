@@ -310,7 +310,7 @@ private enum SessionFixtures {
     }
 
     static func display() -> Display {
-        Display(displayID: 1, pixelWidth: 1280, pixelHeight: 720, refreshHz: 60)
+        Display(displayID: 1, name: "Test Display", pixelWidth: 1280, pixelHeight: 720, refreshHz: 60)
     }
 
     static func cameraDevice() -> CameraDevice {

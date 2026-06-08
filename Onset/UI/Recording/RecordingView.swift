@@ -466,7 +466,7 @@ nonisolated enum RecordingDisplayMapper {
         elapsed: 257,
         drops: .init(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
         checklist: .init(
-            screenDescription: "3840×2160",
+            screenDescription: "3840×2160 @ 60 Гц",
             cameraDescription: "MX Brio · 1920×1080",
             microphoneDescription: "MacBook Pro"
         ),
@@ -483,7 +483,7 @@ nonisolated enum RecordingDisplayMapper {
         elapsed: 257,
         drops: .init(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
         checklist: .init(
-            screenDescription: "3840×2160",
+            screenDescription: "3840×2160 @ 60 Гц",
             cameraDescription: "MX Brio · 1920×1080",
             microphoneDescription: "MacBook Pro"
         ),
@@ -500,7 +500,7 @@ nonisolated enum RecordingDisplayMapper {
         elapsed: 257,
         drops: .init(encoderBackpressureDrops: 128, captureDrops: 0, cfrNormalizationDrops: 0),
         checklist: .init(
-            screenDescription: "3840×2160",
+            screenDescription: "3840×2160 @ 60 Гц",
             cameraDescription: "MX Brio · 1920×1080",
             microphoneDescription: "MacBook Pro"
         ),
@@ -517,7 +517,7 @@ nonisolated enum RecordingDisplayMapper {
         elapsed: 0,
         drops: .init(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
         checklist: .init(
-            screenDescription: "2560×1440",
+            screenDescription: "2560×1440 @ 60 Гц",
             cameraDescription: nil,
             microphoneDescription: nil
         ),
@@ -534,7 +534,7 @@ nonisolated enum RecordingDisplayMapper {
         elapsed: 312,
         drops: .init(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
         checklist: .init(
-            screenDescription: "3840×2160",
+            screenDescription: "3840×2160 @ 60 Гц",
             cameraDescription: "MX Brio · 1920×1080",
             microphoneDescription: "MacBook Pro"
         ),

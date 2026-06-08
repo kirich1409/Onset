@@ -40,7 +40,7 @@ struct MainViewModelCameraToggleTests {
     }
 
     private static func makeDisplay() -> Display {
-        Display(displayID: 1, pixelWidth: 1920, pixelHeight: 1080, refreshHz: 60)
+        Display(displayID: 1, name: "Test Display", pixelWidth: 1920, pixelHeight: 1080, refreshHz: 60)
     }
 
     // MARK: - Default value

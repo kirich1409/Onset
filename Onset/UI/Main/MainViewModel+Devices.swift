@@ -69,7 +69,11 @@ extension MainViewModel {
     /// camera entry from the checklist. Delegates name resolution to `cameraLabel(for:)` /
     /// `microphoneLabel(for:)`.
     func buildChecklist(display: Display) -> RecordingChecklist {
-        let screenDesc = self.displayLabel(for: display)
+        let screenDesc = DisplayLabelMapper.recordingScreenLabel(
+            pixelWidth: display.pixelWidth,
+            pixelHeight: display.pixelHeight,
+            refreshHz: display.refreshHz
+        )
 
         var cameraDesc: String?
         if let camera = self.activeCamera {
