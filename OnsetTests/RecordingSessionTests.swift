@@ -731,6 +731,61 @@ struct RecordingSessionStopTests {
         #expect(writers.screenWriter.finishCallCount == 1, "screen writer finish() must be called exactly once")
         #expect(writers.cameraWriter.finishCallCount == 1, "camera writer finish() must be called exactly once")
     }
+
+    @Test("stop() before start() returns .empty, no writers touched")
+    func stop_beforeStart_returnsEmpty() async {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        // stop() is called without a preceding start().
+        let result = await session.stop()
+
+        // Must return .empty — no pipelines were set up, no writers created.
+        guard case .empty = result else {
+            Issue.record("Expected .empty for stop-before-start, got \(result)")
+            return
+        }
+        #expect(result.outputURLs.isEmpty, "no URLs expected when stop fires before start")
+        #expect(result.degradedWarning == false, "no drops can have accumulated before start")
+        // No writer interactions must have occurred.
+        #expect(!writers.screenWriter.markFinishedCalled, "screen writer must not be touched")
+        #expect(!writers.cameraWriter.markFinishedCalled, "camera writer must not be touched")
+    }
+
+    @Test("stop() before start() does not poison stopTask — subsequent start()→stop() runs teardown")
+    func stop_beforeStart_doesNotPoisonStopTask() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        // No-op stop before start.
+        let noOpResult = await session.stop()
+        guard case .empty = noOpResult else {
+            Issue.record("Pre-start stop must return .empty")
+            return
+        }
+
+        // Now start + emit a frame so a writer is created, then stop for real.
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.screenWriter.startSourceTime != nil }
+
+        let realResult = await session.stop()
+
+        // The real stop must have run performStop — at least the screen writer was finished.
+        #expect(writers.screenWriter.finishCalled, "real stop must call finish() on screen writer")
+        // The result must not be .empty since a writer was created.
+        guard case .completed = realResult else {
+            Issue.record("Expected .completed after a real start()→stop(), got \(realResult)")
+            return
+        }
+        #expect(realResult.screen != nil, "screen output must be present after a real session")
+    }
 }
 
 // MARK: - AC-12 — revoke asymmetry

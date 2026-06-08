@@ -611,12 +611,14 @@ actor RecordingSession {
         // on the actor before the first suspension point, so a concurrent second caller entering
         // stop() always sees the non-nil task and awaits its result — no double teardown.
         if let stopTask { return await stopTask.value }
-        // Only transition to .stopped when the session was actually running.
-        // An idle session (stop called before start) stays .idle so a subsequent
-        // start() attempt is not incorrectly blocked — matching the old hasStarted:Bool behavior.
-        if case .running = self.sessionState {
-            self.sessionState = .stopped
+        // Stop-before-start guard: if the session never entered .running, no teardown is needed.
+        // Return .empty immediately without memoizing into stopTask so a subsequent start()→stop()
+        // is not poisoned by this no-op.
+        guard case .running = self.sessionState else {
+            self.logger.notice("RecordingSession.stop() before start() — no-op")
+            return .empty(DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0))
         }
+        self.sessionState = .stopped
         let task = Task { await self.performStop() }
         self.stopTask = task
         return await task.value
@@ -682,11 +684,12 @@ actor RecordingSession {
         // terminates. No task to cancel — the session yields directly from handleSourceEvent.
         self.revocationContinuation.finish()
 
-        let result = RecordingResult(
-            output: SessionOutput(screen: finishResults[.screen], camera: finishResults[.camera]),
-            drops: counters,
-            degradedWarning: counters.encoderBackpressureDrops > 0
-        )
+        let sessionOutput = SessionOutput(screen: finishResults[.screen], camera: finishResults[.camera])
+        let result: RecordingResult = if let output = sessionOutput {
+            .completed(output, counters)
+        } else {
+            .empty(counters)
+        }
         self.logger.info("RecordingSession stopped — files=\(result.outputURLs.count) warn=\(result.degradedWarning)")
         return result
     }
