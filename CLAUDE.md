@@ -16,7 +16,8 @@ Critical product requirements, in priority order: **stability**, **performance**
 ## Commands
 
 ```bash
-# Build (local — do NOT pipe to xcpretty: not installed locally, CI installs it itself)
+# Build (local — do NOT pipe to a formatter: none installed locally; CI pipes to
+# xcbeautify, which is pre-installed on the macos-26 runner)
 xcodebuild build -scheme Onset -destination 'platform=macOS' -configuration Debug \
   ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
 
@@ -62,6 +63,12 @@ Artifact checks (CI `artifact-checks` job):
   (see `docs/quality/production-quality-bar.md`).
 - Recordings land in `~/Movies/Onset/` — L5 outputs for verify-cfr/ffprobe live there.
 - Test-writing conventions (fakes, naming, suites): `OnsetTests/CLAUDE.md`.
+- Coverage is on by default in `Onset.xctestplan`, scoped to the `Onset` target (not the
+  test bundle); `Onset-L5.xctestplan` gathers none. Inspect locally: add
+  `-resultBundlePath /tmp/R.xcresult` to `xcodebuild test`, then
+  `scripts/coverage-summary.sh /tmp/R.xcresult` (prints test + coverage tables; CI writes
+  them to the job summary and uploads the `.xcresult`). Report-only — gate via
+  `ONSET_COVERAGE_MIN` (off by default).
 - OnsetUITests target exists but is not wired into the Onset scheme's Test action.
 
 ## Project structure

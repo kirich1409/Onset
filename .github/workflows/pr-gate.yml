@@ -51,9 +51,6 @@ jobs:
       - name: Confirm Xcode version
         run: xcodebuild -version
 
-      - name: Install xcpretty
-        run: gem install xcpretty --no-document
-
       - name: Cache DerivedData
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
@@ -73,7 +70,7 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            | xcpretty --color
+            | xcbeautify --renderer github-actions
 
       - name: Stage app for artifact upload
         run: |
@@ -158,24 +155,55 @@ jobs:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - name: Install xcpretty
-        run: gem install xcpretty --no-document
-
       - name: Confirm Xcode version
         run: xcodebuild -version
 
       - name: Run unit tests
         run: |
           set -o pipefail
+          RESULT_BUNDLE="$RUNNER_TEMP/OnsetTests.xcresult"
+          # Export before xcodebuild so the always() summary/upload steps below
+          # can find the bundle even when the test run fails.
+          echo "RESULT_BUNDLE=$RESULT_BUNDLE" >> "$GITHUB_ENV"
+          # $RUNNER_TEMP is wiped per job, so the path won't pre-exist
+          # (-resultBundlePath errors if it does). Coverage is scoped to the
+          # Onset target by Onset.xctestplan; -enableCodeCoverage is a guard.
           xcodebuild test \
             -scheme Onset \
             -destination 'platform=macOS' \
             -configuration Debug \
+            -resultBundlePath "$RESULT_BUNDLE" \
+            -enableCodeCoverage YES \
             ONLY_ACTIVE_ARCH=YES \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            | xcpretty --color
+            | xcbeautify --renderer github-actions
+
+      # Render test pass/fail counts + per-target coverage into the run's Summary
+      # tab. if: always() so it reports on failure too; as a separate step it
+      # cannot turn a failed test run green. Report-only — set ONSET_COVERAGE_MIN
+      # here later to enforce a floor.
+      - name: Coverage & test summary
+        if: always()
+        run: scripts/coverage-summary.sh "$RESULT_BUNDLE"
+
+      # .xcresult is a bundle (directory) — ditto, not zip, preserves its layout.
+      - name: Zip result bundle
+        if: always()
+        run: |
+          if [ -d "$RESULT_BUNDLE" ]; then
+            ditto -c -k --keepParent "$RESULT_BUNDLE" "$RUNNER_TEMP/OnsetTests.xcresult.zip"
+          fi
+
+      - name: Upload result bundle
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: OnsetTests-xcresult-${{ github.run_id }}
+          path: ${{ runner.temp }}/OnsetTests.xcresult.zip
+          if-no-files-found: warn
+          retention-days: 7
 
   # ─────────────────────────────────────────────
   # privacy-manifest
