@@ -9,6 +9,7 @@ struct DisplayMapperTests {
     func makeDisplay_preservesDisplayID() {
         let display = DeviceDiscovery.makeDisplay(
             displayID: 42,
+            name: "Test Display",
             pixelWidth: 2560,
             pixelHeight: 1600,
             refreshHz: 60.0
@@ -21,11 +22,13 @@ struct DisplayMapperTests {
     func makeDisplay_preservesPixelWidth() {
         let display = DeviceDiscovery.makeDisplay(
             displayID: 1,
+            name: "Test Display",
             pixelWidth: 3840,
             pixelHeight: 2160,
             refreshHz: 60.0
         )
 
+        #expect(display.name == "Test Display")
         #expect(display.pixelWidth == 3840)
     }
 
@@ -33,6 +36,7 @@ struct DisplayMapperTests {
     func makeDisplay_preservesPixelHeight() {
         let display = DeviceDiscovery.makeDisplay(
             displayID: 1,
+            name: "Test Display",
             pixelWidth: 3840,
             pixelHeight: 2160,
             refreshHz: 60.0
@@ -45,6 +49,7 @@ struct DisplayMapperTests {
     func makeDisplay_preservesRefreshRate() {
         let display = DeviceDiscovery.makeDisplay(
             displayID: 1,
+            name: "Test Display",
             pixelWidth: 3840,
             pixelHeight: 2160,
             refreshHz: 144.0
@@ -60,6 +65,7 @@ struct DisplayMapperTests {
         // The value MUST be carried as-is; no 60 Hz substitution.
         let display = DeviceDiscovery.makeDisplay(
             displayID: 1,
+            name: "Встроенный дисплей",
             pixelWidth: 3456,
             pixelHeight: 2234,
             refreshHz: 0.0
@@ -74,6 +80,7 @@ struct DisplayMapperTests {
         // pixel dimensions default to 0 — not a fallback resolution.
         let display = DeviceDiscovery.makeDisplay(
             displayID: 1,
+            name: "Test Display",
             pixelWidth: 0,
             pixelHeight: 0,
             refreshHz: 0.0
@@ -83,10 +90,24 @@ struct DisplayMapperTests {
         #expect(display.pixelHeight == 0)
     }
 
+    @Test("makeDisplay preserves name")
+    func makeDisplay_preservesName() {
+        let display = DeviceDiscovery.makeDisplay(
+            displayID: 1,
+            name: "LG UltraFine",
+            pixelWidth: 3840,
+            pixelHeight: 2160,
+            refreshHz: 60.0
+        )
+
+        #expect(display.name == "LG UltraFine")
+    }
+
     @Test("Display stores a 4K Retina display correctly")
     func display_4K_retina() {
         let display = DeviceDiscovery.makeDisplay(
             displayID: 7,
+            name: "Test Display",
             pixelWidth: 7680,
             pixelHeight: 4320,
             refreshHz: 60.0

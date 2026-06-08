@@ -250,12 +250,11 @@ final class MainViewModel {
         AVCaptureDevice(uniqueID: device.uniqueID)?.localizedName ?? "Микрофон"
     }
 
-    /// Human-readable description for a display (e.g. "1920×1080 @ 60 Гц").
+    /// Human-readable label for a display (e.g. "Внешний дисплей — 3840×2160 @ 60").
+    ///
+    /// Delegates to ``DisplayLabelMapper/label(for:)`` — see that type for format details.
     func displayLabel(for display: Display) -> String {
-        let res = "\(display.pixelWidth)×\(display.pixelHeight)"
-        guard display.refreshHz != 0.0 else { return res }
-        let refreshRate = Int(display.refreshHz.rounded())
-        return "\(res) @ \(refreshRate) Гц"
+        DisplayLabelMapper.label(for: display)
     }
 
     // MARK: - Private helpers

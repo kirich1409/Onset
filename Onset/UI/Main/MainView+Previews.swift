@@ -100,7 +100,13 @@ import SwiftUI
     }
 
     #Preview("Screen only — 1 display auto-selected") {
-        let display = Display(displayID: 1, pixelWidth: 1920, pixelHeight: 1080, refreshHz: 60)
+        let display = Display(
+            displayID: 1,
+            name: "Встроенный дисплей",
+            pixelWidth: 1920,
+            pixelHeight: 1080,
+            refreshHz: 60
+        )
         let model = makePreviewModel(
             screen: .authorized,
             camera: .notDetermined,
@@ -111,7 +117,7 @@ import SwiftUI
     }
 
     #Preview("Full — screen + camera + mic") {
-        let display = Display(displayID: 1, pixelWidth: 2560, pixelHeight: 1440, refreshHz: 60)
+        let display = Display(displayID: 1, name: "Внешний дисплей", pixelWidth: 2560, pixelHeight: 1440, refreshHz: 60)
         let camera = CameraDevice(uniqueID: "camera-1", formats: [
             CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30, maxFps: 60),
         ])
@@ -128,7 +134,13 @@ import SwiftUI
     }
 
     #Preview("Mic available but unselected — record disabled AC-2b") {
-        let display = Display(displayID: 1, pixelWidth: 1920, pixelHeight: 1080, refreshHz: 0)
+        let display = Display(
+            displayID: 1,
+            name: "Встроенный дисплей",
+            pixelWidth: 1920,
+            pixelHeight: 1080,
+            refreshHz: 0
+        )
         let mic = MicrophoneDevice(uniqueID: "mic-1")
         let model = makePreviewModel(
             screen: .authorized,
@@ -142,7 +154,13 @@ import SwiftUI
     }
 
     #Preview("No mic — record without audio AC-2c") {
-        let display = Display(displayID: 1, pixelWidth: 1920, pixelHeight: 1080, refreshHz: 0)
+        let display = Display(
+            displayID: 1,
+            name: "Встроенный дисплей",
+            pixelWidth: 1920,
+            pixelHeight: 1080,
+            refreshHz: 0
+        )
         let model = makePreviewModel(
             screen: .authorized,
             camera: .notDetermined,
@@ -153,7 +171,13 @@ import SwiftUI
     }
 
     #Preview("Camera toggle off — picker and preview hidden") {
-        let display = Display(displayID: 1, pixelWidth: 1920, pixelHeight: 1080, refreshHz: 60)
+        let display = Display(
+            displayID: 1,
+            name: "Встроенный дисплей",
+            pixelWidth: 1920,
+            pixelHeight: 1080,
+            refreshHz: 60
+        )
         let camera = CameraDevice(uniqueID: "camera-1", formats: [
             CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30, maxFps: 60),
         ])

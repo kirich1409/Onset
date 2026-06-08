@@ -37,7 +37,7 @@ struct MainViewModelRecordTests {
         refreshHz: Double = 60
     )
     -> Display {
-        Display(displayID: id, pixelWidth: width, pixelHeight: height, refreshHz: refreshHz)
+        Display(displayID: id, name: "Test Display", pixelWidth: width, pixelHeight: height, refreshHz: refreshHz)
     }
 
     private static func makeMic(id: String = "mic-1") -> MicrophoneDevice {
