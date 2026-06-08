@@ -107,6 +107,23 @@ nonisolated func isCaptureAuthorized(
     video == .authorized && audio == .authorized
 }
 
+/// Returns `true` when a session-level notification belongs to OUR capture session.
+///
+/// Filters out the separate preview `CameraSource`'s session (#119).
+/// Extracted from `VideoOutputShim.sessionRuntimeError(_:)` and
+/// `VideoOutputShim.sessionWasInterrupted(_:)` so the filtering predicate can be
+/// unit-tested without live `AVCaptureSession` or `Notification` machinery.
+///
+/// - Parameters:
+///   - notificationObject: The object from the `Notification` (`notification.object as AnyObject?`).
+///     `nil` when the notification carries no object — treated as non-matching.
+///   - sessionID: The `ObjectIdentifier` of the `AVCaptureSession` this source owns.
+/// - Returns: `true` only when `ObjectIdentifier(notificationObject)` equals `sessionID`.
+nonisolated func shouldHandleSessionFault(notificationObject: AnyObject?, sessionID: ObjectIdentifier) -> Bool {
+    guard let notificationObject else { return false }
+    return ObjectIdentifier(notificationObject) == sessionID
+}
+
 /// Returns `true` when the disconnected device matches the camera this source was configured for.
 ///
 /// Extracted from `VideoOutputShim.deviceDidDisconnect(_:)` so the filtering predicate can be

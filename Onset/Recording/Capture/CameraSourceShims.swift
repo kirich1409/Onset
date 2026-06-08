@@ -7,8 +7,8 @@ import os
 /// Bridges `AVCaptureVideoDataOutput` callbacks into the `frames` and `drops` streams.
 ///
 /// `@unchecked Sendable` rationale:
-/// - All stored `let` fields (continuations, sessionStart, syncClock, onDisconnect) are
-///   immutable after `init`.
+/// - All stored `let` fields (continuations, sessionStart, syncClock, onDisconnect,
+///   onSessionFault, cameraUniqueID, captureSessionID) are immutable after `init`.
 /// - `didLogBufferAnomaly` is `nonisolated(unsafe) var`, confined exclusively to `videoQueue`
 ///   (a serial queue). That queue is the synchronization mechanism.
 final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
@@ -17,9 +17,16 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
     private let framesContinuation: AsyncStream<VideoFrame>.Continuation
     private let dropsContinuation: AsyncStream<DropEvent>.Continuation
     private let onDisconnect: @Sendable () async -> Void
+    /// Called when the `AVCaptureSession` this shim belongs to faults (runtime error or
+    /// interruption). `reason` is a concise diagnostic string (no PII).
+    private let onSessionFault: @Sendable (_ reason: String) async -> Void
     /// The `uniqueID` of the camera device this shim was configured for.
     /// Used to filter `wasDisconnectedNotification` to the correct device only (B1).
     private let cameraUniqueID: String
+    /// Identity of the `AVCaptureSession` this shim was created for.
+    /// Used to filter session-level notifications to OUR session only — the app
+    /// runs a separate preview `CameraSource` with its own session (#119).
+    private let captureSessionID: ObjectIdentifier
 
     /// Rate-limiting flag for buffer-anomaly error logs.
     /// `nonisolated(unsafe)`: confined to `videoQueue` (serial). That queue is the lock.
@@ -49,7 +56,9 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         framesContinuation: AsyncStream<VideoFrame>.Continuation,
         dropsContinuation: AsyncStream<DropEvent>.Continuation,
         onDisconnect: @escaping @Sendable () async -> Void,
+        onSessionFault: @escaping @Sendable (_ reason: String) async -> Void,
         cameraUniqueID: String,
+        captureSessionID: ObjectIdentifier,
         rateLock: OSAllocatedUnfairLock<StageRateAggregator>
     ) {
         self.sessionStart = sessionStart
@@ -57,7 +66,9 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         self.framesContinuation = framesContinuation
         self.dropsContinuation = dropsContinuation
         self.onDisconnect = onDisconnect
+        self.onSessionFault = onSessionFault
         self.cameraUniqueID = cameraUniqueID
+        self.captureSessionID = captureSessionID
         self.rateLock = rateLock
     }
 
@@ -136,6 +147,59 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
             return
         }
         Task { await self.onDisconnect() }
+    }
+
+    // MARK: - Session fault
+
+    /// Handles `AVCaptureSession.runtimeErrorNotification`.
+    ///
+    /// Filters to OUR session to avoid reacting to the separate preview session (#119).
+    /// The error is read synchronously before the `Task` so `Notification` is not
+    /// captured across isolation boundaries (Swift 6 complete concurrency).
+    @objc
+    nonisolated func sessionRuntimeError(_ notification: Notification) {
+        guard shouldHandleSessionFault(
+            notificationObject: notification.object as AnyObject?,
+            sessionID: self.captureSessionID
+        ) else {
+            return
+        }
+        // AVCaptureSessionErrorKey carries an NSError; log its numeric code to avoid
+        // embedding a localizedDescription that could contain a device display name.
+        let reason =
+            if let error = notification.userInfo?[AVCaptureSessionErrorKey] as? NSError {
+                "runtime error \(error.code) (\(error.domain))"
+            } else {
+                "runtime error (unknown)"
+            }
+        Task { await self.onSessionFault(reason) }
+    }
+
+    /// Handles `AVCaptureSession.wasInterruptedNotification`.
+    ///
+    /// Filters to OUR session to avoid reacting to the separate preview session (#119).
+    /// `AVCaptureSessionInterruptionReasonKey` and `AVCaptureSession.InterruptionReason`
+    /// are iOS-only (unavailable on macOS) — the raw `Int` value from userInfo is used
+    /// instead to preserve diagnostic information without referencing unavailable symbols.
+    /// The reason value is read synchronously before the `Task` so `Notification` is not
+    /// captured across isolation boundaries (Swift 6 complete concurrency).
+    @objc
+    nonisolated func sessionWasInterrupted(_ notification: Notification) {
+        guard shouldHandleSessionFault(
+            notificationObject: notification.object as AnyObject?,
+            sessionID: self.captureSessionID
+        ) else {
+            return
+        }
+        // AVCaptureSessionInterruptionReasonKey is iOS-only; read the raw Int value
+        // under the string key so macOS builds remain warning-free under warnings-as-errors.
+        let reason =
+            if let reasonValue = notification.userInfo?["AVCaptureSessionInterruptionReason"] as? Int {
+                "interrupted (reason code \(reasonValue))"
+            } else {
+                "interrupted (reason unknown)"
+            }
+        Task { await self.onSessionFault(reason) }
     }
 }
 
