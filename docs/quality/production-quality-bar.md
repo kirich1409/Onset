@@ -172,17 +172,32 @@ stage-specific drop; подробнее — [docs/architecture/drop-accounting.m
 
 ### 4.3 Запуск L5 из не-Xcode шелла
 
-Переменные окружения (в т.ч. с префиксом `TEST_RUNNER_`) **не доходят** до test host через
-`xcodebuild test` в данной конфигурации. Рабочий путь:
+Начиная с PR #55 для L5 есть выделенный тест-план. Основной путь:
 
-1. `xcodebuild build-for-testing` (с CODE_SIGNING_ALLOWED=NO **нельзя** — см. ниже).
-2. Найти `.xctestrun` в DerivedData, скопировать рядом.
-3. `PlistBuddy -c "Set :TestConfigurations:0:TestTargets:0:EnvironmentVariables:<VAR> <VALUE>" copy.xctestrun` — инъекция нужных переменных.
-4. `xcodebuild test-without-building -xctestrun copy.xctestrun`.
+```bash
+xcodebuild test -scheme Onset -testPlan Onset-L5 \
+  -destination 'platform=macOS' -configuration Debug ONLY_ACTIVE_ARCH=YES
+```
+
+Тест-план `Onset-L5.xctestplan` автоматически выставляет `ONSET_RUN_L5_ENCODE=1` и
+`ONSET_RUN_L5_CAPTURE=1`. Запуск конкретного suite:
+
+```bash
+xcodebuild test -scheme Onset -testPlan Onset-L5 \
+  -destination 'platform=macOS' -configuration Debug ONLY_ACTIVE_ARCH=YES \
+  -only-testing:'OnsetTests/VideoEncoderLiveTests'
+```
 
 **L5 требует подписанной сборки.** `CODE_SIGNING_ALLOWED=NO` ломает TCC-грант захвата экрана:
 test host получает sticky deny до `tccutil reset ScreenCapture` + повторного явного гранта.
 Флаг `-only-testing` работает на уровне suite, не отдельной функции.
+
+**Резервный путь (PlistBuddy)** — если тест-план недоступен или нужна ручная инъекция:
+
+1. `xcodebuild build-for-testing` (без `CODE_SIGNING_ALLOWED=NO`).
+2. Найти `.xctestrun` в DerivedData, скопировать рядом.
+3. `PlistBuddy -c "Set :TestConfigurations:0:TestTargets:0:EnvironmentVariables:<VAR> <VALUE>" copy.xctestrun`.
+4. `xcodebuild test-without-building -xctestrun copy.xctestrun`.
 
 ### 4.4 Негативный контроль
 
