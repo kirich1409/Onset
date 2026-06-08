@@ -19,7 +19,6 @@ struct OnboardingView: View {
     // MARK: - Metrics
 
     enum Metrics {
-        static let windowWidth: CGFloat = 460
         static let headerIconSize: CGFloat = 56
         static let headerIconCornerRadius: CGFloat = 12
         static let headerHSpacing: CGFloat = 12
@@ -62,7 +61,7 @@ struct OnboardingView: View {
             Divider()
             footerSection
         }
-        .frame(width: Metrics.windowWidth)
+        .frame(width: WindowDefaults.width)
         // Start polling when this view is active; cancels on disappear (structured task).
         .task {
             let pollingTask = self.viewModel.startPolling()

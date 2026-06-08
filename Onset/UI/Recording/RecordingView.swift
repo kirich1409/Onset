@@ -121,7 +121,9 @@ struct RecordingContentView: View {
             self.footerSection
         }
         .padding(Metrics.outerPadding)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // Fixed size matching the window scene's .windowResizability(.contentSize).
+        // alignment: .top pins the content to the top edge when content is shorter than the window.
+        .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight, alignment: .top)
     }
 
     // MARK: Status section
@@ -471,7 +473,7 @@ nonisolated enum RecordingDisplayMapper {
         sourceLiveness: .allLive,
         onStop: {}
     )
-    .frame(width: 370, height: 420)
+    .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
     .preferredColorScheme(.light)
 }
 
@@ -488,7 +490,7 @@ nonisolated enum RecordingDisplayMapper {
         sourceLiveness: .allLive,
         onStop: {}
     )
-    .frame(width: 370, height: 420)
+    .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
     .preferredColorScheme(.dark)
 }
 
@@ -505,7 +507,7 @@ nonisolated enum RecordingDisplayMapper {
         sourceLiveness: .allLive,
         onStop: {}
     )
-    .frame(width: 370, height: 420)
+    .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
     .preferredColorScheme(.dark)
 }
 
@@ -522,7 +524,7 @@ nonisolated enum RecordingDisplayMapper {
         sourceLiveness: .allLive,
         onStop: {}
     )
-    .frame(width: 370, height: 420)
+    .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
     .preferredColorScheme(.light)
 }
 
@@ -539,7 +541,7 @@ nonisolated enum RecordingDisplayMapper {
         sourceLiveness: .init(screen: true, camera: false, microphone: false),
         onStop: {}
     )
-    .frame(width: 370, height: 420)
+    .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
     .preferredColorScheme(.dark)
 }
 

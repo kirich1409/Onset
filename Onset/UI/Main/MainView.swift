@@ -27,8 +27,6 @@ struct MainView: View {
     // MARK: - Metrics
 
     enum Metrics {
-        static let windowMinWidth: CGFloat = 460
-        static let windowMinHeight: CGFloat = 560
         static let outerPaddingH: CGFloat = 20
         static let outerPaddingV: CGFloat = 16
         static let sectionSpacing: CGFloat = 12
@@ -72,7 +70,10 @@ struct MainView: View {
                 self.mainContent
             }
         }
-        .frame(minWidth: Metrics.windowMinWidth, minHeight: Metrics.windowMinHeight)
+        // Fixed size matching the window scene's .windowResizability(.contentSize).
+        // ScrollView inside mainContent allows scrolling if content overflows at any
+        // Dynamic Type size, while the window itself remains non-resizable.
+        .frame(width: WindowDefaults.width, height: WindowDefaults.height)
         .task {
             await self.model.loadDevices()
         }

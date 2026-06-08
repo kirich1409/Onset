@@ -12,7 +12,6 @@ struct AllSetView: View {
     // MARK: - Metrics
 
     private enum Metrics {
-        static let windowWidth: CGFloat = 460
         static let checkCircleSize: CGFloat = 72
         static let checkIconSize: CGFloat = 32
         static let contentVSpacing: CGFloat = 16
@@ -45,7 +44,7 @@ struct AllSetView: View {
             Divider()
             self.footerSection
         }
-        .frame(width: Metrics.windowWidth)
+        .frame(width: WindowDefaults.width)
     }
 
     // MARK: - Header
