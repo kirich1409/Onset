@@ -278,6 +278,16 @@ struct MainViewModelTests {
         #expect(label == "1920×1080 @ 60 Гц")
     }
 
+    @Test("Display with refreshHz 59.94 → label rounds to 60 Гц")
+    func displayLabel_fractionalRefreshHz() {
+        let display = Display(displayID: 1, pixelWidth: 1920, pixelHeight: 1080, refreshHz: 59.94)
+        let (sut, _) = self.makeSUT()
+
+        let label = sut.displayLabel(for: display)
+
+        #expect(label == "1920×1080 @ 60 Гц")
+    }
+
     // MARK: - Production preview wiring
 
     /// Verifies the production default `makeCameraSource` closure always produces a `.preview`-role
@@ -296,5 +306,45 @@ struct MainViewModelTests {
         let source = sut.makeCameraSource(device, format, nil, .mvpDefault)
 
         #expect(await source.role == .preview)
+    }
+}
+
+// MARK: - MainViewModel — buildChecklist
+
+/// Tests for `buildChecklist(display:)`: verifies that `screenDescription` is built
+/// via `displayLabel(for:)` and therefore carries the `@ N Гц` suffix when `refreshHz != 0`.
+@Suite("MainViewModel — buildChecklist")
+@MainActor
+struct MainViewModelBuildChecklistTests {
+    private func makeSUT() -> MainViewModel {
+        let perms = FakePermissionsService()
+        let coordinator = RecordingCoordinator()
+        return MainViewModel(
+            permissions: perms,
+            coordinator: coordinator,
+            discoverDisplays: { _ in [] },
+            discoverCameras: { _ in [] },
+            discoverMicrophones: { _ in [] }
+        )
+    }
+
+    @Test("screenDescription includes @ N Гц when refreshHz is non-zero")
+    func screenDescription_withHz() {
+        let display = Display(displayID: 1, pixelWidth: 3840, pixelHeight: 2160, refreshHz: 60.0)
+        let sut = self.makeSUT()
+
+        let checklist = sut.buildChecklist(display: display)
+
+        #expect(checklist.screenDescription == "3840×2160 @ 60 Гц")
+    }
+
+    @Test("screenDescription shows resolution only when refreshHz is zero")
+    func screenDescription_withoutHz() {
+        let display = Display(displayID: 1, pixelWidth: 2560, pixelHeight: 1600, refreshHz: 0.0)
+        let sut = self.makeSUT()
+
+        let checklist = sut.buildChecklist(display: display)
+
+        #expect(checklist.screenDescription == "2560×1600")
     }
 }

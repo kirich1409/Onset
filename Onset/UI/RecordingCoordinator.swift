@@ -42,7 +42,7 @@ enum RecordingOrigin: Equatable {
 /// The read-only source descriptions captured at start, shown in the recording window's checklist
 /// (#37) — resolved once at start because sources cannot change mid-recording (spec).
 struct RecordingChecklist: Equatable {
-    /// e.g. "3840×2160 @ 60 Hz", or `nil` when the screen pipeline did not run.
+    /// e.g. "3840×2160 @ 60 Гц", or `nil` when the screen pipeline did not run.
     let screenDescription: String?
     /// e.g. "MX Brio · 1080p60", or `nil` when no camera.
     let cameraDescription: String?
