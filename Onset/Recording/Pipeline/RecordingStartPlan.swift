@@ -57,23 +57,59 @@ extension RecordingPipelineKind {
 /// ### Audio model (MVP)
 /// The microphone rides the camera's `AVCaptureSession` (`CameraSource` is the single source
 /// of both camera video and mic audio). Therefore audio is only includable when the camera
-/// pipeline runs: `includeAudio == true` requires `includeCamera == true`. A screen-only
-/// session has no audio in MVP. The mic buffer is still fanned out to BOTH files (#33) — the
-/// camera AVCaptureSession is merely the capture transport.
+/// pipeline runs. A screen-only session has no audio in MVP. The mic buffer is still fanned
+/// out to BOTH files (#33) — the camera AVCaptureSession is merely the capture transport.
+///
+/// ### Invalid-state elimination
+/// The three-case enum makes screen-only + audio impossible to represent at the type level,
+/// removing the invariant `includeAudio → includeCamera` that had to be asserted separately.
 ///
 /// All members are `nonisolated` so this pure value type is usable from any isolation context.
-nonisolated struct RecordingStartPlan {
+nonisolated enum RecordingStartPlan: Equatable {
+    /// Screen pipeline only — no camera, no audio.
+    case screenOnly
+    /// Camera pipeline only, with or without microphone audio.
+    case cameraOnly(includeAudio: Bool)
+    /// Both screen and camera pipelines, with or without microphone audio.
+    case both(includeAudio: Bool)
+
+    // MARK: - Computed accessors
+
     /// Whether the screen pipeline (capture → encode → screen file) runs.
-    nonisolated let includeScreen: Bool
+    nonisolated var includeScreen: Bool {
+        switch self {
+        case .screenOnly, .both:
+            true
+
+        case .cameraOnly:
+            false
+        }
+    }
 
     /// Whether the camera pipeline (capture → encode → camera file) runs.
-    nonisolated let includeCamera: Bool
+    nonisolated var includeCamera: Bool {
+        switch self {
+        case .cameraOnly, .both:
+            true
+
+        case .screenOnly:
+            false
+        }
+    }
 
     /// Whether a microphone audio track is muxed into the file(s).
     ///
-    /// INVARIANT: `includeAudio` implies `includeCamera` — the mic is captured by the camera's
-    /// `AVCaptureSession` in MVP.
-    nonisolated let includeAudio: Bool
+    /// Always `false` for `.screenOnly` — the mic is captured by the camera's
+    /// `AVCaptureSession` in MVP, so audio requires the camera pipeline.
+    nonisolated var includeAudio: Bool {
+        switch self {
+        case .screenOnly:
+            false
+
+        case let .cameraOnly(audio), let .both(audio):
+            audio
+        }
+    }
 
     /// The number of video pipelines that will run (1 or 2). `DualFileOutputStage` uses this as
     /// `expectedPipelines` to know when every writer has been created so the pending-audio buffer
@@ -81,17 +117,26 @@ nonisolated struct RecordingStartPlan {
     nonisolated var expectedPipelines: Int {
         (self.includeScreen ? 1 : 0) + (self.includeCamera ? 1 : 0)
     }
-}
 
-// swiftformat:disable:next redundantEquatable
-extension RecordingStartPlan: Equatable {
-    /// Manual `nonisolated` witness (mirrors `EffectivePermissions` / `DropCounters`): under
-    /// `InferIsolatedConformances` a synthesised conformance would be `@MainActor` and unusable
-    /// from the session actors and from `nonisolated` test contexts.
-    nonisolated static func == (lhs: RecordingStartPlan, rhs: RecordingStartPlan) -> Bool {
-        lhs.includeScreen == rhs.includeScreen
-            && lhs.includeCamera == rhs.includeCamera
-            && lhs.includeAudio == rhs.includeAudio
+    // MARK: - Equatable
+
+    /// Manual `nonisolated` witness: under `InferIsolatedConformances` a synthesised conformance
+    /// would be `@MainActor` and unusable from the session actors and from `nonisolated` test
+    /// contexts. Same pattern as `EffectivePermissions` / `DropCounters`.
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        switch (lhs, rhs) {
+        case (.screenOnly, .screenOnly):
+            true
+
+        case let (.cameraOnly(lhsAudio), .cameraOnly(rhsAudio)):
+            lhsAudio == rhsAudio
+
+        case let (.both(lhsAudio), .both(rhsAudio)):
+            lhsAudio == rhsAudio
+
+        default:
+            false
+        }
     }
 }
 
@@ -126,21 +171,22 @@ nonisolated func resolveStartPlan(
     let includeScreen = permissions.screenAvailable && screenDevicePresent
     let includeCamera = permissions.cameraAvailable && cameraDevicePresent
 
-    guard includeScreen || includeCamera else {
-        // Neither video source is recordable — AC-11 blocks the start entirely. `noVideoSource`
-        // already exists in RecordingError (do not duplicate).
-        return .failure(.noVideoSource)
-    }
-
     // Audio is gated on the camera pipeline (the mic rides the camera AVCaptureSession in MVP):
     // mic granted + present is necessary but not sufficient without a running camera pipeline.
     let includeAudio = permissions.microphoneAvailable && micDevicePresent && includeCamera
 
-    return .success(
-        RecordingStartPlan(
-            includeScreen: includeScreen,
-            includeCamera: includeCamera,
-            includeAudio: includeAudio
-        )
-    )
+    switch (includeScreen, includeCamera) {
+    case (true, true):
+        return .success(.both(includeAudio: includeAudio))
+
+    case (true, false):
+        return .success(.screenOnly)
+
+    case (false, true):
+        return .success(.cameraOnly(includeAudio: includeAudio))
+
+    case (false, false):
+        // Neither video source is recordable — AC-11 blocks the start entirely.
+        return .failure(.noVideoSource)
+    }
 }

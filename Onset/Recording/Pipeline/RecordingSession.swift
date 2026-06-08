@@ -126,7 +126,22 @@ actor RecordingSession {
     private var stage: DualFileOutputStage?
     private var dropMonitor: DropMonitor?
 
-    private var hasStarted = false
+    /// Lifecycle of the session.
+    ///
+    /// Replaces the `hasStarted: Bool` flag with an exhaustive enum so the compiler enforces
+    /// that `start()` transitions are handled and the one-shot invariant is visible at the type
+    /// level. `stopTask` is kept as a SEPARATE stored var — the memoization assign is
+    /// concurrency-load-bearing and must not be folded into the enum.
+    private enum SessionState {
+        /// Initial state: `start()` has not been called.
+        case idle
+        /// `start()` has been called (whether or not it threw — a throwing start is terminal).
+        case running
+        /// `stop()` has been called and teardown is in progress or complete.
+        case stopped
+    }
+
+    private var sessionState: SessionState = .idle
     private var stopTask: Task<RecordingResult, Never>?
 
     // MARK: - Init
@@ -200,8 +215,17 @@ actor RecordingSession {
     /// - Throws: `RecordingError` (`.noHardwareEncoder`, `.noVideoSource`, or an encoder/setup
     ///   error). On any throw nothing is left running and no writers are created.
     func start(permissions: EffectivePermissions) async throws {
-        precondition(!self.hasStarted, "RecordingSession.start() is one-shot")
-        self.hasStarted = true
+        // Exhaustive switch — intentional: a future SessionState case addition must be handled here.
+        switch self.sessionState {
+        case .idle:
+            break // proceed to start
+
+        case .running, .stopped:
+            preconditionFailure("RecordingSession.start() is one-shot")
+        }
+        // Set state BEFORE the first throwing call so that a throwing start leaves the session in
+        // `.running` — preventing a second start() attempt on an already-broken session.
+        self.sessionState = .running
 
         try self.runCapabilityPreflight() // 1. AC-6
         let startPlan = try self.resolvePlan(permissions: permissions) // 2. AC-11
@@ -587,6 +611,12 @@ actor RecordingSession {
         // on the actor before the first suspension point, so a concurrent second caller entering
         // stop() always sees the non-nil task and awaits its result — no double teardown.
         if let stopTask { return await stopTask.value }
+        // Only transition to .stopped when the session was actually running.
+        // An idle session (stop called before start) stays .idle so a subsequent
+        // start() attempt is not incorrectly blocked — matching the old hasStarted:Bool behavior.
+        if case .running = self.sessionState {
+            self.sessionState = .stopped
+        }
         let task = Task { await self.performStop() }
         self.stopTask = task
         return await task.value
@@ -653,8 +683,7 @@ actor RecordingSession {
         self.revocationContinuation.finish()
 
         let result = RecordingResult(
-            screen: finishResults[.screen],
-            camera: finishResults[.camera],
+            output: SessionOutput(screen: finishResults[.screen], camera: finishResults[.camera]),
             drops: counters,
             degradedWarning: counters.encoderBackpressureDrops > 0
         )

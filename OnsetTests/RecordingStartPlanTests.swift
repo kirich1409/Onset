@@ -32,10 +32,11 @@ struct RecordingStartPlanTests {
         audio: Bool,
         _ name: String
     ) {
-        let want = RecordingStartPlan(includeScreen: screen, includeCamera: camera, includeAudio: audio)
         switch result {
         case let .success(got):
-            #expect(got == want, "\(name): got \(got) want \(want)")
+            #expect(got.includeScreen == screen, "\(name): includeScreen expected \(screen) got \(got.includeScreen)")
+            #expect(got.includeCamera == camera, "\(name): includeCamera expected \(camera) got \(got.includeCamera)")
+            #expect(got.includeAudio == audio, "\(name): includeAudio expected \(audio) got \(got.includeAudio)")
 
         case let .failure(error):
             Issue.record("\(name): expected plan, got failure \(String(describing: error))")
@@ -120,9 +121,9 @@ struct RecordingStartPlanTests {
 
     @Test("expectedPipelines counts running video pipelines")
     func expectedPipelines_count() {
-        let both = RecordingStartPlan(includeScreen: true, includeCamera: true, includeAudio: true)
-        let screenOnly = RecordingStartPlan(includeScreen: true, includeCamera: false, includeAudio: false)
-        let cameraOnly = RecordingStartPlan(includeScreen: false, includeCamera: true, includeAudio: true)
+        let both = RecordingStartPlan.both(includeAudio: true)
+        let screenOnly = RecordingStartPlan.screenOnly
+        let cameraOnly = RecordingStartPlan.cameraOnly(includeAudio: true)
         #expect(both.expectedPipelines == 2)
         #expect(screenOnly.expectedPipelines == 1)
         #expect(cameraOnly.expectedPipelines == 1)

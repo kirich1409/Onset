@@ -80,6 +80,27 @@ nonisolated enum FinishResult {
     case failed(url: URL, error: any Error)
 }
 
+// MARK: - FinishResult accessors
+
+extension FinishResult {
+    /// The output file URL, available in every terminal case (the path is reserved regardless
+    /// of completed / cancelled / failed — see `FinishResult` doc).
+    nonisolated var url: URL {
+        switch self {
+        case let .completed(url),
+             let .cancelled(url),
+             let .failed(url, _):
+            url
+        }
+    }
+
+    /// The write error when this result is `.failed`; `nil` for `.completed` and `.cancelled`.
+    nonisolated var failureError: (any Error)? {
+        guard case let .failed(_, error) = self else { return nil }
+        return error
+    }
+}
+
 // MARK: - AudioSettingsSnapshot
 
 /// Typed snapshot of AAC audio settings — all fields `Sendable` so they can cross
