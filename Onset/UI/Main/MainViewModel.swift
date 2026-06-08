@@ -20,11 +20,17 @@ nonisolated let mainViewModelLogger = Logger(
 /// - (c) mic unavailable → record without audio, «без звука» indicator
 /// - (d) screen permission denied → empty state (return to onboarding)
 ///
+/// ### Camera toggle
+/// `cameraEnabled` (default `true`) lets the user switch camera recording on/off (#77, #76).
+/// `activeCamera` is the unified single predicate: non-nil iff `cameraEnabled == true` AND a
+/// real camera is selected. Camera is NOT a factor in `canRecord` — screen is always required.
+///
 /// ### Preview lifecycle
 /// A generation counter (`previewGeneration`) drives `.id()` on `CameraPreviewRepresentable`
 /// so SwiftUI recreates the NSView — and thus the `AVCaptureVideoPreviewLayer` — whenever the
-/// camera changes. The `CameraSource` actor for preview is started/stopped inside `.task(id: selectedCameraID)`.
-/// Old source MUST be stopped before a new one starts to avoid device contention.
+/// camera changes. The `CameraSource` actor for preview is started/stopped inside
+/// `.task(id: activeCamera?.uniqueID)`. Old source MUST be stopped before a new one starts to
+/// avoid device contention.
 ///
 /// ### Camera-only recording (no screen)
 /// Deferred post-MVP (decision B, issue #61). `RecordingRequest.display` is non-optional;
@@ -84,6 +90,36 @@ final class MainViewModel {
 
     /// The `uniqueID` of the selected microphone device, or `nil` for none.
     var selectedMicID: String?
+
+    /// Whether the camera is enabled for recording (#77, #76).
+    ///
+    /// When `false`: `activeCamera` is nil, no preview is shown, camera is excluded from
+    /// the recording request. When flipped to `true` with no prior selection, the first
+    /// available camera is auto-selected so the user gets a working default immediately.
+    var cameraEnabled = true {
+        didSet {
+            // Auto-select first camera when re-enabling with no prior selection.
+            if self.cameraEnabled {
+                self.selectFirstCameraIfNeeded()
+            }
+        }
+    }
+
+    // MARK: - Camera toggle computed properties
+
+    /// The unified "camera is active" predicate: non-nil iff `cameraEnabled` AND a real camera
+    /// is selected. Used as the single source of truth for preview lifecycle, recording request,
+    /// and UI gating (replaces per-site checks on `selectedCamera`).
+    var activeCamera: CameraDevice? {
+        self.cameraEnabled ? self.selectedCamera : nil
+    }
+
+    /// True when the camera will be included in the recording.
+    ///
+    /// Equivalent to `activeCamera != nil`; surfaced separately for readability at call sites.
+    var isCameraActive: Bool {
+        self.activeCamera != nil
+    }
 
     // MARK: - Error state
 
@@ -220,6 +256,21 @@ final class MainViewModel {
         guard display.refreshHz != 0.0 else { return res }
         let refreshRate = Int(display.refreshHz.rounded())
         return "\(res) @ \(refreshRate) Гц"
+    }
+
+    // MARK: - Private helpers
+
+    /// Selects the first available camera when none is currently selected.
+    ///
+    /// Shared by the cold-start device load (`loadCamerasAndMicrophones`) and the camera
+    /// toggle re-enable path (`cameraEnabled.didSet`) so the default-selection rule lives in
+    /// one place. Does not reference `cameraEnabled` — call-site guards apply that condition.
+    ///
+    /// Not `private` so `MainViewModel+Devices.swift` can call it from the same type.
+    func selectFirstCameraIfNeeded() {
+        if self.selectedCameraID == nil, let first = self.cameras.first {
+            self.selectedCameraID = first.uniqueID
+        }
     }
 
     // MARK: - Init
