@@ -701,7 +701,7 @@ actor VideoEncoder {
             self.encoderBackpressureDrops += 1
             self.aggregator.recordGateDrop()
             self.dropsContinuation.yield(
-                DropEvent(reason: .encoderBackpressureDrops, count: 1, detectedAt: detectedAt)
+                DropEvent(reason: .encoderBackpressureDrops, source: .encode, count: 1, detectedAt: detectedAt)
             )
             return
         }

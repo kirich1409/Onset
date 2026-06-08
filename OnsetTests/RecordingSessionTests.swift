@@ -643,7 +643,9 @@ struct RecordingSessionStopTests {
 
         // Emit a backpressure drop on the screen encoder → DropMonitor must count it.
         let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
-        encoders.screenEncoder.emitDrop(DropEvent(reason: .encoderBackpressureDrops, count: 1, detectedAt: dropPts))
+        encoders.screenEncoder.emitDrop(DropEvent(
+            reason: .encoderBackpressureDrops, source: .encode, count: 1, detectedAt: dropPts
+        ))
 
         let result = await session.stop()
         #expect(result.degradedWarning == true, "backpressure drop → degradedWarning must be true (AC-8)")
@@ -666,7 +668,9 @@ struct RecordingSessionStopTests {
         // Emit a real drop so the counters are non-zero — otherwise both calls returning zeroed
         // counters would pass vacuously even without the idempotency fix.
         let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
-        encoders.screenEncoder.emitDrop(DropEvent(reason: .encoderBackpressureDrops, count: 1, detectedAt: dropPts))
+        encoders.screenEncoder.emitDrop(DropEvent(
+            reason: .encoderBackpressureDrops, source: .encode, count: 1, detectedAt: dropPts
+        ))
 
         let first = await session.stop()
         let second = await session.stop()
@@ -705,7 +709,9 @@ struct RecordingSessionStopTests {
         // Emit a real drop so the counters are non-zero — vacuous equality would pass even without
         // the memoized-task fix (both returns of zeroed counters look "equal").
         let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
-        encoders.screenEncoder.emitDrop(DropEvent(reason: .encoderBackpressureDrops, count: 1, detectedAt: dropPts))
+        encoders.screenEncoder.emitDrop(DropEvent(
+            reason: .encoderBackpressureDrops, source: .encode, count: 1, detectedAt: dropPts
+        ))
 
         // Fire two concurrent stop() calls. Actor serialization guarantees the first to arrive
         // assigns stopTask before the second runs, so both observe the same Task and the teardown
@@ -1087,7 +1093,7 @@ struct RecordingSessionStateSurfaceTests {
         let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
         let burst = RecordingConfiguration.mvpDefault.degradedBackpressureThreshold + 1
         encoders.screenEncoder.emitDrop(
-            DropEvent(reason: .encoderBackpressureDrops, count: burst, detectedAt: dropPts)
+            DropEvent(reason: .encoderBackpressureDrops, source: .encode, count: burst, detectedAt: dropPts)
         )
 
         let first = await received.value
@@ -1113,7 +1119,9 @@ struct RecordingSessionStateSurfaceTests {
         _ = await eventually { writers.screenWriter.startSourceTime != nil }
 
         let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
-        encoders.screenEncoder.emitDrop(DropEvent(reason: .encoderBackpressureDrops, count: 3, detectedAt: dropPts))
+        encoders.screenEncoder.emitDrop(DropEvent(
+            reason: .encoderBackpressureDrops, source: .encode, count: 3, detectedAt: dropPts
+        ))
 
         // Poll currentDrops() until the asynchronously-ingested drop is reflected.
         let reflected = await eventually {

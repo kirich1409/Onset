@@ -300,6 +300,7 @@ actor FileWriter {
             self.dropsContinuation.yield(
                 DropEvent(
                     reason: .encoderBackpressureDrops,
+                    source: .writer,
                     count: 1,
                     detectedAt: sample.ptsHostTime
                 )
