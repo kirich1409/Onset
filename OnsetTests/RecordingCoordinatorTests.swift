@@ -131,8 +131,7 @@ private enum CoordinatorFixtures {
 
     static func result(degradedWarning: Bool = false, backpressureDrops: Int = 0) -> RecordingResult {
         RecordingResult(
-            screen: .completed(url: URL(fileURLWithPath: "/tmp/onset-coordinator-screen.mp4")),
-            camera: nil,
+            output: .screenOnly(.completed(url: URL(fileURLWithPath: "/tmp/onset-coordinator-screen.mp4"))),
             drops: DropCounters(
                 encoderBackpressureDrops: backpressureDrops,
                 captureDrops: 0,
@@ -150,11 +149,10 @@ private enum CoordinatorFixtures {
             }
         }
         return RecordingResult(
-            screen: .failed(
+            output: .screenOnly(.failed(
                 url: URL(fileURLWithPath: "/tmp/onset-coordinator-screen.mp4"),
                 error: FakeWriteError()
-            ),
-            camera: nil,
+            )),
             drops: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
             degradedWarning: false
         )
