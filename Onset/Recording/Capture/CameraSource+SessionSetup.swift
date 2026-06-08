@@ -45,7 +45,7 @@ extension CameraSource {
         }
 
         // Observer registered after startRunning so a failed-start path never needs to remove it.
-        self.registerDisconnectObserver(shims: shims)
+        self.registerDisconnectObserver(shims: shims, session: session)
         self.captureState = .running(session: session, shims: shims)
         cameraSourceLogger.info(
             "Capture started — dims: \(self.format.pixelWidth)×\(self.format.pixelHeight)"
@@ -222,7 +222,7 @@ extension CameraSource {
         }
     }
 
-    func registerDisconnectObserver(shims: CameraCaptureShims) {
+    func registerDisconnectObserver(shims: CameraCaptureShims, session: AVCaptureSession) {
         // AVCaptureDeviceWasDisconnected is posted on the main thread; the shim captures
         // only the notification and dispatches to its async closure.
         NotificationCenter.default.addObserver(
@@ -230,6 +230,22 @@ extension CameraSource {
             selector: #selector(VideoOutputShim.deviceDidDisconnect(_:)),
             name: AVCaptureDevice.wasDisconnectedNotification,
             object: nil
+        )
+        // Session-level notifications are scoped to `object: session` so only events from this
+        // specific session are received. Registered against shims.video so the existing
+        // removeObserver(shims.video) calls in stop() and handleCameraDisconnect() tear them
+        // down for free — no separate removal bookkeeping required.
+        NotificationCenter.default.addObserver(
+            shims.video,
+            selector: #selector(VideoOutputShim.sessionWasInterrupted(_:)),
+            name: AVCaptureSession.wasInterruptedNotification,
+            object: session
+        )
+        NotificationCenter.default.addObserver(
+            shims.video,
+            selector: #selector(VideoOutputShim.sessionRuntimeError(_:)),
+            name: AVCaptureSession.runtimeErrorNotification,
+            object: session
         )
     }
 }

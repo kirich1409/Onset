@@ -270,6 +270,34 @@ struct HostTimeConversionTests {
     }
 }
 
+// MARK: - Session runtime error event tests (AC-12 / issue #69)
+
+/// Guards the TCC-revoke signal mapping: `sessionRuntimeErrorEvent` must emit
+/// `.cameraDisconnected` only for `.applicationIsNotAuthorizedToUseDevice`; all
+/// other codes and a nil input must produce `nil` (no spurious finalize).
+///
+/// `AVCaptureSessionInterruptionReasonKey` is `API_UNAVAILABLE(macos)` so the
+/// `wasInterruptedNotification` path cannot classify the reason at runtime —
+/// `runtimeErrorNotification` with this specific error code is the load-bearing signal.
+@Suite("CameraSource — terminal session runtime error predicate")
+struct SessionRuntimeErrorEventTests {
+    @Test("applicationIsNotAuthorizedToUseDevice is terminal")
+    func unauthorizedToUseDevice_isTerminal() {
+        #expect(isTerminalSessionRuntimeError(errorCode: .applicationIsNotAuthorizedToUseDevice) == true)
+    }
+
+    @Test("non-access-loss error code is not terminal")
+    func nonAccessLossCode_isNotTerminal() {
+        // .sessionNotRunning is a representative non-access-loss runtime error.
+        #expect(isTerminalSessionRuntimeError(errorCode: .sessionNotRunning) == false)
+    }
+
+    @Test("nil error code is not terminal")
+    func nilErrorCode_isNotTerminal() {
+        #expect(isTerminalSessionRuntimeError(errorCode: nil) == false)
+    }
+}
+
 // MARK: - Disconnect filter tests (AC-12 regression)
 
 /// Locks the B1 fix: unplugging a non-camera device (e.g. microphone) must NOT trigger

@@ -137,6 +137,40 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
         }
         Task { await self.onDisconnect() }
     }
+
+    /// Handles `AVCaptureSession.wasInterruptedNotification`.
+    ///
+    /// `AVCaptureSessionInterruptionReasonKey` is `API_UNAVAILABLE(macos)` — the interruption
+    /// reason cannot be read on macOS via public API. The notification is observed for L5
+    /// diagnostics (to record what actually fires on a TCC revoke) but is NOT treated as
+    /// terminal: a blanket finalize would incorrectly stop background recording on any
+    /// transient interruption.
+    @objc
+    nonisolated func sessionWasInterrupted(_ notification: Notification) {
+        cameraSourceLogger.warning(
+            "Session interrupted — userInfo: \(String(describing: notification.userInfo), privacy: .public)"
+        )
+    }
+
+    /// Handles `AVCaptureSession.runtimeErrorNotification`.
+    ///
+    /// Extracts the `AVError.Code` from `userInfo[AVCaptureSessionErrorKey]` and maps it to a
+    /// terminal event via `sessionRuntimeErrorEvent(errorCode:)`. Only
+    /// `.applicationIsNotAuthorizedToUseDevice` triggers a finalize — all other runtime errors
+    /// are logged but not treated as access-loss. See AC-12 / issue #69.
+    @objc
+    nonisolated func sessionRuntimeError(_ notification: Notification) {
+        let avErrorCode: AVError.Code? = if let nsError = notification.userInfo?[AVCaptureSessionErrorKey] as? NSError {
+            AVError.Code(rawValue: nsError.code)
+        } else {
+            nil
+        }
+        cameraSourceLogger.error(
+            "Session runtime error — code: \(String(describing: avErrorCode), privacy: .public)"
+        )
+        guard isTerminalSessionRuntimeError(errorCode: avErrorCode) else { return }
+        Task { await self.onDisconnect() }
+    }
 }
 
 // MARK: - AudioOutputShim

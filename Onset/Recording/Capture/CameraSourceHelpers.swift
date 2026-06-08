@@ -122,6 +122,26 @@ nonisolated func shouldHandleDisconnect(notificationDeviceID: String?, cameraID:
     notificationDeviceID == cameraID
 }
 
+/// Returns `true` when a session runtime-error code represents a terminal camera-access loss
+/// that should finalize the camera stream.
+///
+/// Only `.applicationIsNotAuthorizedToUseDevice` qualifies: it is the exact macOS error code
+/// emitted when TCC permission is revoked while the session is running. All other codes are
+/// non-access-loss conditions and must not trigger a false finalize.
+///
+/// `AVCaptureSessionInterruptionReasonKey` is `API_UNAVAILABLE(macos)`, so reason-based
+/// mapping from `wasInterruptedNotification` is not viable on macOS — this runtime-error
+/// path is the macOS-accessible signal for TCC revoke. See AC-12 / issue #69.
+///
+/// - Parameter errorCode: The `AVError.Code` extracted from the session runtime-error
+///   notification's `userInfo[AVCaptureSessionErrorKey]`, or `nil` when the key is absent
+///   or the value is not an `NSError`.
+/// - Returns: `true` only for the `.applicationIsNotAuthorizedToUseDevice` TCC-revoke code;
+///   `false` for all other codes and for `nil`.
+nonisolated func isTerminalSessionRuntimeError(errorCode: AVError.Code?) -> Bool {
+    errorCode == .applicationIsNotAuthorizedToUseDevice
+}
+
 /// Computes the inter-frame delivery gap in milliseconds between two consecutive camera PTS values.
 ///
 /// Returns `nil` on the first delivery (no previous timestamp available), so the gap metric
