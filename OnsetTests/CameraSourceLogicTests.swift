@@ -295,6 +295,36 @@ struct DisconnectFilterTests {
     }
 }
 
+// MARK: - Session-fault filter tests (#119 regression)
+
+/// Locks the #119 fix: session-level notifications (runtime error, interruption) from
+/// the separate preview `CameraSource` session must NOT trigger the fault handler.
+/// Tests the `shouldHandleSessionFault` pure helper extracted from
+/// `VideoOutputShim.sessionRuntimeError(_:)` and `VideoOutputShim.sessionWasInterrupted(_:)`.
+@Suite("CameraSource — session-fault filter")
+struct SessionFaultFilterTests {
+    private let session = NSObject()
+
+    @Test("same session object triggers fault handler")
+    func sameSessionObject_triggersFaultHandler() {
+        let sessionID = ObjectIdentifier(self.session)
+        #expect(shouldHandleSessionFault(notificationObject: self.session, sessionID: sessionID) == true)
+    }
+
+    @Test("different session object does not trigger fault handler")
+    func differentSessionObject_doesNotTriggerFaultHandler() {
+        let sessionID = ObjectIdentifier(self.session)
+        let otherSession = NSObject()
+        #expect(shouldHandleSessionFault(notificationObject: otherSession, sessionID: sessionID) == false)
+    }
+
+    @Test("nil notification object does not trigger fault handler")
+    func nilNotificationObject_doesNotTriggerFaultHandler() {
+        let sessionID = ObjectIdentifier(self.session)
+        #expect(shouldHandleSessionFault(notificationObject: nil, sessionID: sessionID) == false)
+    }
+}
+
 // MARK: - L5 live hardware harness
 
 // MARK: - Stop teardown contract tests

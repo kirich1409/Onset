@@ -158,7 +158,10 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
     /// captured across isolation boundaries (Swift 6 complete concurrency).
     @objc
     nonisolated func sessionRuntimeError(_ notification: Notification) {
-        guard ObjectIdentifier(notification.object as AnyObject) == self.captureSessionID else {
+        guard shouldHandleSessionFault(
+            notificationObject: notification.object as AnyObject?,
+            sessionID: self.captureSessionID
+        ) else {
             return
         }
         // AVCaptureSessionErrorKey carries an NSError; log its numeric code to avoid
@@ -182,7 +185,10 @@ final class VideoOutputShim: NSObject, AVCaptureVideoDataOutputSampleBufferDeleg
     /// captured across isolation boundaries (Swift 6 complete concurrency).
     @objc
     nonisolated func sessionWasInterrupted(_ notification: Notification) {
-        guard ObjectIdentifier(notification.object as AnyObject) == self.captureSessionID else {
+        guard shouldHandleSessionFault(
+            notificationObject: notification.object as AnyObject?,
+            sessionID: self.captureSessionID
+        ) else {
             return
         }
         // AVCaptureSessionInterruptionReasonKey is iOS-only; read the raw Int value
