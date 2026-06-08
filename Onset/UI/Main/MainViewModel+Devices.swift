@@ -48,10 +48,7 @@ extension MainViewModel {
 
         let foundCameras = self.discoverCameras(cameraAuthorized)
         self.cameras = foundCameras
-        // Auto-select first camera
-        if let first = foundCameras.first {
-            self.selectedCameraID = first.uniqueID
-        }
+        self.selectFirstCameraIfNeeded()
 
         let foundMics = self.discoverMicrophones(micAuthorized)
         self.microphones = foundMics
@@ -66,14 +63,16 @@ extension MainViewModel {
 // MARK: - MainViewModel — Checklist
 
 extension MainViewModel {
-    /// Builds the recording checklist from currently selected devices.
+    /// Builds the recording checklist from currently active devices.
     ///
-    /// Delegates name resolution to `cameraLabel(for:)` / `microphoneLabel(for:)`.
+    /// Uses `activeCamera` (not `selectedCamera`) so a disabled camera toggle omits the
+    /// camera entry from the checklist. Delegates name resolution to `cameraLabel(for:)` /
+    /// `microphoneLabel(for:)`.
     func buildChecklist(display: Display) -> RecordingChecklist {
         let screenDesc = self.displayLabel(for: display)
 
         var cameraDesc: String?
-        if let camera = self.selectedCamera {
+        if let camera = self.activeCamera {
             let name = self.cameraLabel(for: camera)
             if let fmt = try? CameraFormatSelector.pickBestFormat(
                 from: camera.formats,

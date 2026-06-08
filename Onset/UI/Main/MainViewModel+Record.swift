@@ -55,10 +55,10 @@ extension MainViewModel {
         return display
     }
 
-    /// Resolves the camera format for the selected camera. Returns `nil` for no camera.
-    /// Throws and sets `recordError` when the camera has no suitable format.
+    /// Resolves the camera format for the active camera. Returns `nil` when camera is disabled
+    /// or no camera is selected. Throws and sets `recordError` when the camera has no suitable format.
     func resolveCameraFormat() throws -> CameraFormat? {
-        guard let camera = self.selectedCamera else { return nil }
+        guard let camera = self.activeCamera else { return nil }
         do {
             return try CameraFormatSelector.pickBestFormat(
                 from: camera.formats,
@@ -91,7 +91,7 @@ extension MainViewModel {
         let request = RecordingRequest(
             plan: plan,
             display: display,
-            cameraDevice: self.selectedCamera,
+            cameraDevice: self.activeCamera,
             cameraFormat: cameraFormat,
             micDevice: self.selectedMic,
             permissions: self.permissions.effectivePermissions,

@@ -21,8 +21,17 @@ extension MainView {
     var cameraSection: some View {
         SectionCard(title: "КАМЕРА") {
             VStack(alignment: .leading, spacing: Metrics.rowSpacing) {
-                self.cameraPickerOrDenied
-                self.cameraPreview
+                Toggle("Камера", isOn: self.$model.cameraEnabled)
+                    .toggleStyle(.switch)
+                    .accessibilityLabel("Камера")
+                // Gate on cameraEnabled (not isCameraActive) so the picker/denied rows
+                // remain visible when the toggle is on but no camera is available yet —
+                // that is when "Камеры не найдены" must render. isCameraActive is nil in
+                // that state, so using it here would hide the not-found row.
+                if self.model.cameraEnabled {
+                    self.cameraPickerOrDenied
+                    self.cameraPreview
+                }
             }
         }
     }
@@ -37,7 +46,6 @@ extension MainView {
                 .foregroundStyle(.secondary)
         } else {
             Picker("Камера", selection: self.$model.selectedCameraID) {
-                Text("Без камеры").tag(String?.none)
                 ForEach(self.model.cameras, id: \.uniqueID) { camera in
                     Text(self.model.cameraLabel(for: camera))
                         .tag(Optional(camera.uniqueID))
@@ -45,22 +53,22 @@ extension MainView {
             }
             .pickerStyle(.menu)
             .labelsHidden()
+            .accessibilityLabel("Выберите камеру")
         }
     }
 
+    @ViewBuilder
     private var cameraPreview: some View {
-        CameraPreviewRepresentable(sessionHandle: self.model.previewHandle)
-            .id(self.model.previewGeneration)
-            .frame(height: Metrics.previewHeight)
-            .clipShape(RoundedRectangle(cornerRadius: Metrics.previewCornerRadius))
-            .task(id: self.model.selectedCameraID) {
-                await self.model.managePreview(for: self.model.selectedCameraID)
-            }
-            .accessibilityLabel(
-                self.model.selectedCameraID == nil
-                    ? "Предварительный просмотр: камера не выбрана"
-                    : "Предварительный просмотр камеры"
-            )
+        if self.model.isCameraActive {
+            CameraPreviewRepresentable(sessionHandle: self.model.previewHandle)
+                .id(self.model.previewGeneration)
+                .frame(height: Metrics.previewHeight)
+                .clipShape(RoundedRectangle(cornerRadius: Metrics.previewCornerRadius))
+                .task(id: self.model.activeCamera?.uniqueID) {
+                    await self.model.managePreview(for: self.model.activeCamera?.uniqueID)
+                }
+                .accessibilityLabel("Предварительный просмотр камеры")
+        }
     }
 
     // MARK: - Microphone section
