@@ -34,7 +34,9 @@ nonisolated enum CameraOutcome: Equatable {
     case disabled
 
     /// The saved device is present — restore its `uniqueID` and enable the camera.
-    case restore(uniqueID: String)
+    ///
+    /// `mode` carries the persisted `CameraMode` selection, or `nil` for Auto mode.
+    case restore(uniqueID: String, mode: CameraMode?)
 
     /// The saved device is absent — surface the saved name for the disconnected-device
     /// notice and do NOT auto-pick a replacement.
@@ -104,9 +106,9 @@ nonisolated enum DeviceSelectionResolver {
         case .disabled:
             .disabled
 
-        case let .enabled(record):
+        case let .enabled(record, mode: mode):
             if availableIDs.contains(record.uniqueID) {
-                .restore(uniqueID: record.uniqueID)
+                .restore(uniqueID: record.uniqueID, mode: mode)
             } else {
                 .disconnected(savedName: record.localizedName)
             }

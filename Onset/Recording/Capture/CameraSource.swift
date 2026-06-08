@@ -70,6 +70,13 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
     let config: RecordingConfiguration
     /// Which lifecycle this source serves; controls data-output attachment and telemetry.
     let role: CaptureRole
+    /// The explicit target frame rate for this session's camera capture.
+    ///
+    /// Derived from the user's `CameraMode` selection (or `config.minCameraFps` when no
+    /// mode override applies). Threaded into `findMatchingFormat` and `activateFormat`
+    /// so the AVFoundation format-lock step honours the selected mode rather than always
+    /// falling back to the config's minimum.
+    let targetFps: Int
     let framesContinuation: AsyncStream<VideoFrame>.Continuation
     let audioSamplesContinuation: AsyncStream<AudioSample>.Continuation
     let eventsContinuation: AsyncStream<SourceEvent>.Continuation
@@ -109,7 +116,11 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
     ///   - cameraDevice: The camera device snapshot (from `CaptureDeviceModels`).
     ///   - format: The pre-selected best format (from `CameraFormatSelector`).
     ///   - micDevice: Optional microphone device. When `nil`, `audioSamples` never delivers.
-    ///   - config: Recording policy (fps target from `config.minCameraFps`).
+    ///   - config: Recording policy (minimum fps, audio settings, etc.).
+    ///   - targetFps: The explicit frame rate to lock when activating the AVFoundation format.
+    ///     Pass the fps from `CameraFormatSelector.resolveFormat(from:override:config:)`.
+    ///     Defaults to `config.minCameraFps` to preserve backward-compatible behavior for
+    ///     callers that do not carry a mode override (e.g. preview sources).
     ///   - role: Which lifecycle this source serves (default `.record`; pass `.preview` for
     ///     preview-only instances that must not attach a data output or run telemetry).
     init(
@@ -117,12 +128,14 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
         format: CameraFormat,
         micDevice: MicrophoneDevice?,
         config: RecordingConfiguration,
+        targetFps: Int? = nil,
         role: CaptureRole = .record
     ) {
         self.cameraDevice = cameraDevice
         self.format = format
         self.micDevice = micDevice
         self.config = config
+        self.targetFps = targetFps ?? config.minCameraFps
         self.role = role
 
         var capturedFrames: AsyncStream<VideoFrame>.Continuation!
@@ -155,11 +168,13 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
         self.eventsContinuation = capturedEvents
         self.dropsContinuation = capturedDrops
 
+        // Use self.targetFps (not config.minCameraFps) so telemetry rate matches
+        // the actual format-locked fps from the user's CameraMode selection.
         self.captureRateLock = OSAllocatedUnfairLock(
             initialState: StageRateAggregator(
                 lane: "camera",
                 stage: .capture,
-                nominalFps: config.minCameraFps,
+                nominalFps: self.targetFps,
                 role: role
             )
         )

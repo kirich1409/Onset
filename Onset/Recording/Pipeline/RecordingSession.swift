@@ -89,6 +89,9 @@ actor RecordingSession {
     private let display: Display
     private let cameraDevice: CameraDevice?
     private let cameraFormat: CameraFormat?
+    /// The explicit frame rate to lock when activating the camera format in `CameraSource`.
+    /// Sourced from `RecordingRequest.cameraModeTargetFps` (set by the user's CameraMode selection).
+    private let cameraModeTargetFps: Int
     private let micDevice: MicrophoneDevice?
     private let config: RecordingConfiguration
 
@@ -150,6 +153,9 @@ actor RecordingSession {
     ///   - plan: The resolved capture plan (screen dimensions + optional camera plan).
     ///   - display: The selected display.
     ///   - cameraDevice / cameraFormat: The selected camera + its format, or `nil` (no camera).
+    ///   - cameraModeTargetFps: The explicit frame rate to lock when activating the camera format.
+    ///     Sourced from the user's CameraMode selection. Defaults to `config.minCameraFps` when
+    ///     called from tests or the backward-compatible path.
     ///   - micDevice: The selected microphone, or `nil` (no audio).
     ///   - config: Recording policy.
     ///   - probe: Capability pre-flight (AC-6). Defaults to the live `CapabilityProbe`.
@@ -159,6 +165,7 @@ actor RecordingSession {
         display: Display,
         cameraDevice: CameraDevice?,
         cameraFormat: CameraFormat?,
+        cameraModeTargetFps: Int? = nil,
         micDevice: MicrophoneDevice?,
         config: RecordingConfiguration,
         probe: (@Sendable () -> ProbeResult)? = nil,
@@ -170,6 +177,7 @@ actor RecordingSession {
         self.display = display
         self.cameraDevice = cameraDevice
         self.cameraFormat = cameraFormat
+        self.cameraModeTargetFps = cameraModeTargetFps ?? config.minCameraFps
         self.micDevice = micDevice
         self.config = config
         self.encoderFactory = encoderFactory
@@ -435,7 +443,8 @@ actor RecordingSession {
             cameraDevice: cameraDevice,
             format: cameraFormat,
             micDevice: includeAudio ? self.micDevice : nil,
-            config: self.config
+            config: self.config,
+            targetFps: self.cameraModeTargetFps
         )
         let encoder = self.encoderFactory.makeEncoder(
             kind: .camera,

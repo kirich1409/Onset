@@ -74,11 +74,14 @@ extension CameraSource {
             throw RecordingError.captureSetupFailed(CameraSourceError.cannotAddInput)
         }
         session.addInput(input)
-    }
-
-    func makeCameraInput(_ device: AVCaptureDevice) throws -> AVCaptureDeviceInput {
-        let input = try AVCaptureDeviceInput(device: device)
-        let targetFps = Double(self.config.minCameraFps)
+        // macOS AVFoundation contract: activeFormat must be set AFTER the input is added to the
+        // session (inside a beginConfiguration/commitConfiguration block). Setting it before
+        // addInput has no lasting effect — the session reconciles its preset (.high by default,
+        // which maps to 1080p on the Brio) at commitConfiguration time and silently overwrites
+        // any format set earlier. See AVCaptureDevice.h §activeFormat discussion and the
+        // beginConfiguration/commitConfiguration example.
+        // Use self.targetFps (not config.minCameraFps) to honour the user's CameraMode selection.
+        let targetFps = Double(self.targetFps)
         guard let liveFormat = self.findMatchingFormat(device: device) else {
             cameraSourceLogger.error(
                 "No live format matches selected snapshot — dims: \(self.format.pixelWidth)×\(self.format.pixelHeight)"
@@ -86,7 +89,10 @@ extension CameraSource {
             throw RecordingError.noSuitableCameraFormat
         }
         try self.activateFormat(liveFormat, fps: targetFps, on: device)
-        return input
+    }
+
+    func makeCameraInput(_ device: AVCaptureDevice) throws -> AVCaptureDeviceInput {
+        try AVCaptureDeviceInput(device: device)
     }
 
     /// Finds the live `AVCaptureDevice.Format` that matches the pre-selected `CameraFormat` snapshot.
@@ -96,7 +102,8 @@ extension CameraSource {
     func findMatchingFormat(device: AVCaptureDevice) -> AVCaptureDevice.Format? {
         let targetW = self.format.pixelWidth
         let targetH = self.format.pixelHeight
-        let targetFps = Double(self.config.minCameraFps)
+        // Use self.targetFps (not config.minCameraFps) to honour the user's CameraMode selection.
+        let targetFps = Double(self.targetFps)
         return device.formats.first { fmt in
             let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
             let fpsOk = fmt.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= targetFps }

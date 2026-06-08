@@ -205,7 +205,8 @@ private final class FakeSourceFactory: SourceFactory, @unchecked Sendable {
         cameraDevice: CameraDevice,
         format: CameraFormat,
         micDevice: MicrophoneDevice?,
-        config: RecordingConfiguration
+        config: RecordingConfiguration,
+        targetFps: Int
     )
     -> any VideoFrameSource & AudioSampleSource {
         self.cameraSource

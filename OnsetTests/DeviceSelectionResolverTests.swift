@@ -112,25 +112,25 @@ struct CameraResolverTests {
 
     // MARK: - .restore
 
-    /// `.enabled(record)` with a matching ID resolves to `.restore`.
+    /// `.enabled(record, mode: nil)` with a matching ID resolves to `.restore(uniqueID:mode:)`.
     @Test("enabled record present in list → restore outcome")
     func enabledRecordPresent_returnsRestore() {
         let record = self.makeRecord(id: "cam-abc")
         let outcome = DeviceSelectionResolver.resolveCamera(
-            saved: .enabled(record),
+            saved: .enabled(record, mode: nil),
             availableIDs: ["cam-abc", "cam-xyz"]
         )
-        #expect(outcome == .restore(uniqueID: "cam-abc"))
+        #expect(outcome == .restore(uniqueID: "cam-abc", mode: nil))
     }
 
     // MARK: - .disconnected
 
-    /// `.enabled(record)` with an absent ID resolves to `.disconnected`.
+    /// `.enabled(record, mode: nil)` with an absent ID resolves to `.disconnected`.
     @Test("enabled record absent from list → disconnected outcome with saved name")
     func enabledRecordAbsent_returnsDisconnected() {
         let record = self.makeRecord(id: "cam-gone", name: "My Webcam")
         let outcome = DeviceSelectionResolver.resolveCamera(
-            saved: .enabled(record),
+            saved: .enabled(record, mode: nil),
             availableIDs: ["cam-other"]
         )
         #expect(outcome == .disconnected(savedName: "My Webcam"))
@@ -165,9 +165,9 @@ struct UserDefaultsDeviceSelectionStoreTests {
         withScopedDefaults { defaults in
             let store = UserDefaultsDeviceSelectionStore(defaults: defaults)
             let record = DeviceSelectionRecord(uniqueID: "cam-1", localizedName: "Built-in Camera")
-            store.saveCamera(.enabled(record))
+            store.saveCamera(.enabled(record, mode: nil))
             let loaded = store.loadCamera()
-            if case let .enabled(restored) = loaded {
+            if case let .enabled(restored, mode: _) = loaded {
                 #expect(restored.uniqueID == "cam-1")
             } else {
                 Issue.record("Expected .enabled, got \(String(describing: loaded))")
@@ -240,7 +240,7 @@ struct UserDefaultsDeviceSelectionStoreTests {
     func clearCamera_removesRecord() {
         withScopedDefaults { defaults in
             let store = UserDefaultsDeviceSelectionStore(defaults: defaults)
-            store.saveCamera(.enabled(DeviceSelectionRecord(uniqueID: "cam-1", localizedName: "Camera")))
+            store.saveCamera(.enabled(DeviceSelectionRecord(uniqueID: "cam-1", localizedName: "Camera"), mode: nil))
             store.clearCamera()
             #expect(store.loadCamera() == nil)
         }

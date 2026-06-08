@@ -118,6 +118,7 @@ private enum CoordinatorFixtures {
             display: self.display(),
             cameraDevice: nil,
             cameraFormat: nil,
+            cameraModeTargetFps: 0,
             micDevice: nil,
             permissions: self.permissions(),
             checklist: RecordingChecklist(
@@ -163,6 +164,7 @@ private enum CoordinatorFixtures {
             display: self.display(),
             cameraDevice: nil,
             cameraFormat: nil,
+            cameraModeTargetFps: 0,
             micDevice: nil,
             permissions: self.permissions(),
             checklist: RecordingChecklist(

@@ -17,13 +17,18 @@ extension MainViewModel {
         guard let display = self.validateDisplaySelection() else { return }
 
         let resolvedCameraFormat: CameraFormat?
+        let resolvedCameraTargetFps: Int
         do {
-            resolvedCameraFormat = try self.resolveCameraFormat()
+            (resolvedCameraFormat, resolvedCameraTargetFps) = try self.resolveCameraFormat()
         } catch {
             return
         }
 
-        await self.startRecording(display: display, cameraFormat: resolvedCameraFormat)
+        await self.startRecording(
+            display: display,
+            cameraFormat: resolvedCameraFormat,
+            cameraModeTargetFps: resolvedCameraTargetFps
+        )
     }
 
     /// Validates AC-2 guards. Returns `true` when recording may proceed, `false` if an error was set.
@@ -55,15 +60,19 @@ extension MainViewModel {
         return display
     }
 
-    /// Resolves the camera format for the active camera. Returns `nil` when camera is disabled
-    /// or no camera is selected. Throws and sets `recordError` when the camera has no suitable format.
-    func resolveCameraFormat() throws -> CameraFormat? {
-        guard let camera = self.activeCamera else { return nil }
+    /// Resolves the camera format and target fps for the active camera.
+    ///
+    /// Returns `(nil, 0)` when camera is disabled or no camera is selected.
+    /// Throws and sets `recordError` when the camera has no suitable format.
+    func resolveCameraFormat() throws -> (format: CameraFormat?, targetFps: Int) {
+        guard let camera = self.activeCamera else { return (nil, 0) }
         do {
-            return try CameraFormatSelector.pickBestFormat(
+            let (format, fps) = try CameraFormatSelector.resolveFormat(
                 from: camera.formats,
-                minFps: Double(RecordingConfiguration.mvpDefault.minCameraFps)
+                override: self.selectedCameraMode,
+                config: RecordingConfiguration.mvpDefault
             )
+            return (format, fps)
         } catch {
             self.recordError = "Не удалось выбрать формат камеры"
             mainViewModelLogger.error(
@@ -74,10 +83,11 @@ extension MainViewModel {
     }
 
     /// Stops preview, builds the request, and calls `coordinator.start`.
-    func startRecording(display: Display, cameraFormat: CameraFormat?) async {
+    func startRecording(display: Display, cameraFormat: CameraFormat?, cameraModeTargetFps: Int) async {
         let plan = CapabilityResolver.resolveStartProfile(
             display: display,
             cameraFormat: cameraFormat,
+            cameraTargetFps: cameraFormat != nil ? cameraModeTargetFps : nil,
             config: .mvpDefault
         )
 
@@ -93,6 +103,7 @@ extension MainViewModel {
             display: display,
             cameraDevice: self.activeCamera,
             cameraFormat: cameraFormat,
+            cameraModeTargetFps: cameraModeTargetFps,
             micDevice: self.selectedMic,
             permissions: self.permissions.effectivePermissions,
             checklist: self.buildChecklist(display: display),

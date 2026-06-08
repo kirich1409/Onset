@@ -78,7 +78,7 @@ struct MainViewModelCameraToggleTests {
 
         sut.cameraEnabled = false
 
-        let format = try sut.resolveCameraFormat()
+        let (format, _) = try sut.resolveCameraFormat()
         #expect(format == nil)
     }
 
@@ -100,7 +100,7 @@ struct MainViewModelCameraToggleTests {
         let sut = self.makeSUT(cameras: [cam])
         await sut.loadDevices()
 
-        let format = try sut.resolveCameraFormat()
+        let (format, _) = try sut.resolveCameraFormat()
         #expect(format != nil)
     }
 

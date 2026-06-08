@@ -2,6 +2,7 @@ import AVFoundation
 import CoreMedia
 import CoreVideo
 @testable import Onset
+import os
 import Testing
 
 // file_length is disabled: this single-concern test file covers all pure helpers from
@@ -411,6 +412,24 @@ private func l5CaptureEnabled() -> Bool {
     return isCaptureAuthorized(video: videoStatus, audio: audioStatus)
 }
 
+/// Returns `true` when the L5 Brio fps-lock tests should run.
+///
+/// Three conditions must all hold:
+/// 1. `ONSET_RUN_L5_CAPTURE=1` is set in the environment (explicit opt-in).
+/// 2. TCC authorization is granted for both camera and microphone.
+/// 3. A camera whose `localizedName` contains "Brio" (case-insensitive) is connected.
+///
+/// Condition 3 yields a genuine SKIP on machines without the Brio — not a failure.
+private func l5BrioEnabled() -> Bool {
+    guard l5CaptureEnabled() else { return false }
+    let discoverySession = AVCaptureDevice.DiscoverySession(
+        deviceTypes: DeviceDiscovery.cameraDeviceTypes,
+        mediaType: .video,
+        position: .unspecified
+    )
+    return discoverySession.devices.contains { $0.localizedName.localizedCaseInsensitiveContains("Brio") }
+}
+
 // MARK: - L5 live hardware harness
 
 /// Live-hardware capture harness for CameraSource.
@@ -480,6 +499,229 @@ struct CameraSourceLiveTests {
         await setup.source.stop()
         #expect(gotFrame == false, "Preview CameraSource must not yield frames (issue #119)")
     }
+
+    // MARK: - L5 Brio fps-lock tests (issue #113)
+
+    /// Proves that selecting a 4K 30 fps `CameraMode` override activates a 3840×2160
+    /// format on the live Brio device and pins the frame duration to 30 fps.
+    ///
+    /// The test does NOT record a full file — reading `AVCaptureDevice.activeFormat` and
+    /// `activeVideoMinFrameDuration` after `start()` is the deterministic ground truth
+    /// for the format+fps lock claimed by issue #113.
+    @Test(
+        "Brio 4K30 mode override activates 3840×2160 format pinned to 30 fps",
+        .enabled(if: l5BrioEnabled())
+    )
+    func brioCameraMode_4K30_activatesFormatAndFpsLock() async throws {
+        let setup = try makeBrioCameraSource(mode: CameraMode(pixelWidth: 3840, pixelHeight: 2160, fps: 30))
+        defer { Task { await setup.source.stop() } }
+
+        // Pre-flight: resolveFormat must have matched the override, not fallen back to auto.
+        #expect(
+            setup.format.pixelWidth == 3840 && setup.format.pixelHeight == 2160,
+            "resolveFormat fell back to auto — Brio does not advertise a 3840×2160 format"
+        )
+        #expect(
+            setup.targetFps == 30,
+            "resolveFormat returned fps \(setup.targetFps), expected 30"
+        )
+
+        try await setup.source.start(anchoredTo: setup.anchor)
+
+        // Re-acquire the device by uniqueID — same per-process AVFoundation instance
+        // that CameraSource configured inside addCameraInput.
+        guard let avDevice = AVCaptureDevice(uniqueID: setup.cameraUniqueID) else {
+            Issue.record("AVCaptureDevice lost after start() — cannot inspect activeFormat")
+            return
+        }
+
+        let dims = CMVideoFormatDescriptionGetDimensions(avDevice.activeFormat.formatDescription)
+        #expect(dims.width == 3840, "activeFormat width should be 3840, got \(dims.width)")
+        #expect(dims.height == 2160, "activeFormat height should be 2160, got \(dims.height)")
+
+        assertFpsLock(on: avDevice, targetFps: 30)
+    }
+
+    /// Proves that selecting a 1080p 60 fps `CameraMode` override activates a 1920×1080
+    /// format on the live Brio device and pins the frame duration to 60 fps.
+    @Test(
+        "Brio 1080p60 mode override activates 1920×1080 format pinned to 60 fps",
+        .enabled(if: l5BrioEnabled())
+    )
+    func brioCameraMode_1080p60_activatesFormatAndFpsLock() async throws {
+        let setup = try makeBrioCameraSource(mode: CameraMode(pixelWidth: 1920, pixelHeight: 1080, fps: 60))
+        defer { Task { await setup.source.stop() } }
+
+        // Pre-flight: resolveFormat must have matched the override, not fallen back to auto.
+        #expect(
+            setup.format.pixelWidth == 1920 && setup.format.pixelHeight == 1080,
+            "resolveFormat fell back to auto — Brio does not advertise a 1920×1080 format"
+        )
+        #expect(
+            setup.targetFps == 60,
+            "resolveFormat returned fps \(setup.targetFps), expected 60"
+        )
+
+        try await setup.source.start(anchoredTo: setup.anchor)
+
+        guard let avDevice = AVCaptureDevice(uniqueID: setup.cameraUniqueID) else {
+            Issue.record("AVCaptureDevice lost after start() — cannot inspect activeFormat")
+            return
+        }
+
+        let dims = CMVideoFormatDescriptionGetDimensions(avDevice.activeFormat.formatDescription)
+        #expect(dims.width == 1920, "activeFormat width should be 1920, got \(dims.width)")
+        #expect(dims.height == 1080, "activeFormat height should be 1080, got \(dims.height)")
+
+        assertFpsLock(on: avDevice, targetFps: 60)
+    }
+
+    // MARK: - DIAGNOSTIC #113 — dump real Brio format list (TEMPORARY)
+
+    // swiftlint:disable function_body_length
+
+    /// TEMPORARY diagnostic — dumps the real MX Brio format list via os.Logger so
+    /// `resolveFormat` bugs in issue #113 can be fixed against ground truth.
+    ///
+    /// Three sub-dumps (each line prefixed "DIAG #113"):
+    ///   1. Raw AVFoundation formats: dims, FourCC, fps ranges, isVideoBinned.
+    ///   2. CameraFormat snapshots as the production mapper sees them.
+    ///   3. availableModes + resolveFormat results for 4K30 and 1080p60 overrides.
+    ///
+    /// The test asserts nothing critical — `#expect(device != nil)` is the only gate
+    /// so it counts as run. Remove this test after issue #113 is fixed.
+    /// DIAGNOSTIC #113
+    @Test(
+        "DIAG — dump Brio AVFoundation format list (issue #113, TEMPORARY)",
+        .enabled(if: l5BrioEnabled())
+    )
+    func DIAG_dumpBrioFormats() throws {
+        // TEMP-LOG: subsystem matches production; category makes log filtering easy.
+        let log = Logger(subsystem: "dev.androidbroadcast.Onset", category: "DIAG.113")
+
+        let discoverySession = AVCaptureDevice.DiscoverySession(
+            deviceTypes: DeviceDiscovery.cameraDeviceTypes,
+            mediaType: .video,
+            position: .unspecified
+        )
+        let device = discoverySession.devices
+            .first { $0.localizedName.localizedCaseInsensitiveContains("Brio") }
+
+        // The only critical assertion — gate passes when the device is present.
+        #expect(device != nil, "Brio not found — l5BrioEnabled() should have skipped this test")
+        guard let brioAV = device else { return }
+
+        // ── Sub-dump 1: raw AVFoundation formats ──────────────────────────────
+        log.notice("DIAG #113 — raw AVFoundation formats count=\(brioAV.formats.count, privacy: .public)")
+        for (index, fmt) in brioAV.formats.enumerated() {
+            let desc = fmt.formatDescription
+            let dims = CMVideoFormatDescriptionGetDimensions(desc)
+
+            // FourCC as a 4-char string (big-endian bytes).
+            // TEMP-LOG: bit-shift instead of withUnsafeBytes — no unsafe/force-unwrap.
+            let tag = CMFormatDescriptionGetMediaSubType(desc)
+            let fourCC = String(
+                [
+                    Character(UnicodeScalar(UInt8((tag >> 24) & 0xFF))),
+                    Character(UnicodeScalar(UInt8((tag >> 16) & 0xFF))),
+                    Character(UnicodeScalar(UInt8((tag >> 8) & 0xFF))),
+                    Character(UnicodeScalar(UInt8(tag & 0xFF))),
+                ]
+            )
+
+            for range in fmt.videoSupportedFrameRateRanges {
+                let minFps = range.minFrameRate
+                let maxFps = range.maxFrameRate
+                let minDur = range.minFrameDuration
+                let maxDur = range.maxFrameDuration
+                // TEMP-LOG
+                log.notice(
+                    """
+                    DIAG #113 [raw \(index, privacy: .public)] \
+                    \(dims.width, privacy: .public)x\(dims.height, privacy: .public) \
+                    \(fourCC, privacy: .public) \
+                    fps=\(minFps, privacy: .public)-\(maxFps, privacy: .public) \
+                    minDur=\(minDur.value, privacy: .public)/\(minDur.timescale, privacy: .public) \
+                    maxDur=\(maxDur.value, privacy: .public)/\(maxDur.timescale, privacy: .public)
+                    """
+                )
+            }
+        }
+
+        // ── Sub-dump 2: CameraFormat snapshots via production mapper ──────────
+        // TEMP-LOG: calls the exact same DeviceDiscovery.makeCameraFormat used in production;
+        // divergence between this output and sub-dump 1 isolates the mapping bug.
+        let cameraFormats: [CameraFormat] = brioAV.formats.map { DeviceDiscovery.makeCameraFormat(from: $0) }
+        log.notice("DIAG #113 — CameraFormat snapshots count=\(cameraFormats.count, privacy: .public)")
+        for (index, cameraFmt) in cameraFormats.enumerated() {
+            // TEMP-LOG
+            log.notice(
+                """
+                DIAG #113 [mapped \(index, privacy: .public)] \
+                \(cameraFmt.pixelWidth, privacy: .public)x\(cameraFmt.pixelHeight, privacy: .public) \
+                fps=\(cameraFmt.minFps, privacy: .public)-\(cameraFmt.maxFps, privacy: .public)
+                """
+            )
+        }
+
+        // ── Sub-dump 3: availableModes + resolveFormat for 4K30 and 1080p60 ──
+        let config = RecordingConfiguration.mvpDefault
+        let modes = CameraFormatSelector.availableModes(from: cameraFormats, config: config)
+        log.notice("DIAG #113 — availableModes count=\(modes.count, privacy: .public)")
+        for mode in modes {
+            // TEMP-LOG
+            log.notice(
+                """
+                DIAG #113 [mode] \
+                \(mode.pixelWidth, privacy: .public)x\(mode.pixelHeight, privacy: .public) \
+                fps=\(mode.fps, privacy: .public)
+                """
+            )
+        }
+
+        // resolveFormat for 4K30
+        do {
+            let result = try CameraFormatSelector.resolveFormat(
+                from: cameraFormats,
+                override: CameraMode(pixelWidth: 3840, pixelHeight: 2160, fps: 30),
+                config: config
+            )
+            // TEMP-LOG
+            log.notice(
+                """
+                DIAG #113 [resolve 4K30] \
+                format=\(result.format.pixelWidth, privacy: .public)x\(result.format.pixelHeight, privacy: .public) \
+                fps=\(result.fps, privacy: .public)
+                """
+            )
+        } catch {
+            // TEMP-LOG
+            log.notice("DIAG #113 [resolve 4K30] threw: \(String(describing: error), privacy: .public)")
+        }
+
+        // resolveFormat for 1080p60
+        do {
+            let result = try CameraFormatSelector.resolveFormat(
+                from: cameraFormats,
+                override: CameraMode(pixelWidth: 1920, pixelHeight: 1080, fps: 60),
+                config: config
+            )
+            // TEMP-LOG
+            log.notice(
+                """
+                DIAG #113 [resolve 1080p60] \
+                format=\(result.format.pixelWidth, privacy: .public)x\(result.format.pixelHeight, privacy: .public) \
+                fps=\(result.fps, privacy: .public)
+                """
+            )
+        } catch {
+            // TEMP-LOG
+            log.notice("DIAG #113 [resolve 1080p60] threw: \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    // swiftlint:enable function_body_length
+    // END DIAGNOSTIC #113
 }
 
 // MARK: - L5 setup helper
@@ -551,6 +793,126 @@ private func makeLiveCaptureSource(role: CaptureRole = .record) throws -> LiveCa
 }
 
 // swiftlint:enable function_body_length
+
+// MARK: - L5 Brio setup helper (issue #113)
+
+/// The result of configuring a `CameraSource` with a `CameraMode` override on the Brio.
+///
+/// Carries the source and the exact `(format, targetFps)` that `resolveFormat` returned
+/// so test bodies can assert the override was honoured before `start()` is called.
+private struct BrioCaptureSetup {
+    /// The configured source, ready for `start(anchoredTo:)`.
+    let source: CameraSource
+    /// The `CameraFormat` snapshot chosen by `resolveFormat`.
+    let format: CameraFormat
+    /// The fps returned by `resolveFormat` — threaded into `CameraSource.init(targetFps:)`.
+    let targetFps: Int
+    /// The `uniqueID` of the Brio `AVCaptureDevice`, for post-`start()` inspection.
+    let cameraUniqueID: String
+    /// The session anchor used when starting the source.
+    let anchor: HostTimeAnchor
+}
+
+// swiftlint:disable function_body_length
+/// Builds a `CameraSource` for the Brio camera configured with the given `CameraMode` override.
+///
+/// - Parameter mode: The mode to pass as `override` to `CameraFormatSelector.resolveFormat`.
+/// - Throws: `L5SetupError.noCamera` when no Brio is found (should not happen when
+///   `l5BrioEnabled()` is true), `L5SetupError.noMicrophone` when no mic is available,
+///   or `RecordingError.noSuitableCameraFormat` when the Brio cannot satisfy the mode.
+private func makeBrioCameraSource(mode: CameraMode) throws -> BrioCaptureSetup {
+    // Locate the Brio by name. l5BrioEnabled() already confirmed one exists,
+    // but we re-query here because test setup runs after the trait evaluation.
+    let discoverySession = AVCaptureDevice.DiscoverySession(
+        deviceTypes: DeviceDiscovery.cameraDeviceTypes,
+        mediaType: .video,
+        position: .unspecified
+    )
+    guard let brioAVDevice = discoverySession.devices
+        .first(where: { $0.localizedName.localizedCaseInsensitiveContains("Brio") })
+    else {
+        throw L5SetupError.noCamera
+    }
+
+    // Build the format snapshot list the same way DeviceDiscovery does in production.
+    let formats: [CameraFormat] = brioAVDevice.formats.compactMap { fmt in
+        let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
+        let maxFps = fmt.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0
+        let minFps = fmt.videoSupportedFrameRateRanges.map(\.minFrameRate).min() ?? 0
+        return CameraFormat(
+            pixelWidth: dims.width,
+            pixelHeight: dims.height,
+            minFps: minFps,
+            maxFps: maxFps
+        )
+    }
+
+    let config = RecordingConfiguration.mvpDefault
+    // resolveFormat honours the mode override and returns the matched (format, fps).
+    // The fps value is what CameraSource must receive as targetFps — this is the
+    // production wiring path (mirrors MainViewModel.resolveCameraFormat → startRecording).
+    let (selectedFormat, resolvedFps) = try CameraFormatSelector.resolveFormat(
+        from: formats,
+        override: mode,
+        config: config
+    )
+
+    guard let avMic = AVCaptureDevice.default(for: .audio) else {
+        throw L5SetupError.noMicrophone
+    }
+
+    let cameraDevice = CameraDevice(uniqueID: brioAVDevice.uniqueID, formats: formats)
+    let source = CameraSource(
+        cameraDevice: cameraDevice,
+        format: selectedFormat,
+        micDevice: MicrophoneDevice(uniqueID: avMic.uniqueID),
+        config: config,
+        targetFps: resolvedFps,
+        role: .record
+    )
+    return BrioCaptureSetup(
+        source: source,
+        format: selectedFormat,
+        targetFps: resolvedFps,
+        cameraUniqueID: brioAVDevice.uniqueID,
+        anchor: HostTimeAnchor.now()
+    )
+}
+
+// swiftlint:enable function_body_length
+
+/// Asserts that the device's frame duration is pinned to `targetFps`.
+///
+/// Production sets `activeVideoMinFrameDuration == activeVideoMaxFrameDuration`
+/// (both equal `bestRange.minFrameDuration`). Min == max is the CFR lock proof for issue #113.
+/// Tolerates up to 1 fps of rounding error between the target and the rational stored
+/// in the AVFrameRateRange (e.g. 29.97 nominal rounds to 30 in the `CameraMode` integer).
+nonisolated private func assertFpsLock(on device: AVCaptureDevice, targetFps: Int) {
+    let minDuration = device.activeVideoMinFrameDuration
+    let maxDuration = device.activeVideoMaxFrameDuration
+
+    // Min == max is the definition of a CFR lock (no range = single rate).
+    let minV = minDuration.value
+    let minTs = minDuration.timescale
+    let maxV = maxDuration.value
+    let maxTs = maxDuration.timescale
+    if CMTimeCompare(minDuration, maxDuration) != 0 {
+        Issue.record(
+            "activeVideoMin/MaxFrameDuration must be equal for CFR fps lock — min=\(minV)/\(minTs) max=\(maxV)/\(maxTs)"
+        )
+    }
+
+    // The actual fps derived from the pinned duration must be within 1 fps of the target.
+    let durationSec = CMTimeGetSeconds(minDuration)
+    guard durationSec > 0 else {
+        Issue.record("activeVideoMinFrameDuration is zero — format not activated")
+        return
+    }
+    let actualFps = 1.0 / durationSec
+    if abs(actualFps - Double(targetFps)) > 1.0 {
+        Issue.record("fps lock: expected ~\(targetFps) fps, got \(actualFps) fps (duration \(minV)/\(minTs))")
+    }
+}
 
 // MARK: - L5 error types
 

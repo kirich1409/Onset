@@ -80,22 +80,36 @@ nonisolated enum CapabilityResolver {
     ///   - display: The already-selected display snapshot (from DeviceDiscovery).
     ///   - cameraFormat: The already-selected camera format, or `nil` when no camera is
     ///     used.
+    ///   - cameraTargetFps: The explicit frame rate for the selected camera mode, or `nil`
+    ///     for the auto-pick path (which derives fps as `min(format.maxFps, maxScreenFps)`).
+    ///     When non-nil, this value is used for both the budget calculation and the camera
+    ///     plan so the budget math is consistent with the format-activation step in
+    ///     `CameraSource`. Ignored when `cameraFormat` is `nil`.
     ///   - config: The recording policy (budget cap, fps limits).
     /// - Returns: A `ScreenProfileResolution` with the resolved plan and the
     ///   `budgetExceeded` flag.
     nonisolated static func resolve(
         display: Display,
         cameraFormat: CameraFormat?,
+        cameraTargetFps: Int? = nil,
         config: RecordingConfiguration
     )
     -> ScreenProfileResolution {
         // --- Step 1: cap ---
         var capped = Self.clampScreen(display: display, config: config)
 
-        // Camera pixel-rate (0 when no camera).
-        let (cameraFps, cameraRate) = Self.cameraRateInfo(cameraFormat: cameraFormat, config: config)
+        // Camera pixel-rate (0 when no camera). The effective fps is derived ONCE and used
+        // in both cameraRateInfo and cameraDimensions to guarantee consistency.
+        let (cameraFps, cameraRate) = Self.cameraRateInfo(
+            cameraFormat: cameraFormat,
+            targetFps: cameraTargetFps,
+            config: config
+        )
         let cap = config.budgetCap
-        let cameraDims = Self.cameraDimensions(cameraFormat: cameraFormat, config: config)
+        let cameraDims = Self.cameraDimensions(
+            cameraFormat: cameraFormat,
+            effectiveFps: cameraFps
+        )
 
         // `exceedsBudgetAtCap` is computed here — before any lever —
         // because this is the flag the probe needs to classify `.budgetExceeded`.
@@ -131,19 +145,7 @@ nonisolated enum CapabilityResolver {
         let evenWidth = max(capped.width & ~1, Self.minEvenDimension)
         let evenHeight = max(capped.height & ~1, Self.minEvenDimension)
 
-        // FIX 3: apply even-floor to camera dimensions for symmetric HEVC contract enforcement.
-        // AVCaptureDevice formats are even in practice, but the contract must hold on both sides.
-        // Hoisted into explicit lets: chained Int(...) & ~1 inside an init-call argument triggers
-        // the Swift type-checker timeout under load (warnings-as-errors → red CI).
-        let cameraPlan: ResolvedCameraPlan? = cameraFormat.map { format in
-            let evenCamW: Int = max(Int(format.pixelWidth) & ~1, Self.minEvenDimension)
-            let evenCamH: Int = max(Int(format.pixelHeight) & ~1, Self.minEvenDimension)
-            return ResolvedCameraPlan(
-                width: evenCamW,
-                height: evenCamH,
-                fps: cameraFps
-            )
-        }
+        let cameraPlan = Self.buildCameraPlan(cameraFormat: cameraFormat, fps: cameraFps)
 
         let plan = ResolvedRecordingPlan(
             displayID: display.displayID,
@@ -162,6 +164,8 @@ nonisolated enum CapabilityResolver {
     ///   - cameraFormat: The already-selected camera format, or `nil` when no camera is
     ///     used. Format picking (choosing among available formats) is U3.1 / #29 — this
     ///     function receives the result, not the raw list.
+    ///   - cameraTargetFps: The explicit frame rate for the selected camera mode, or `nil`
+    ///     for the auto-pick path. See `resolve(display:cameraFormat:cameraTargetFps:config:)`.
     ///   - config: The recording policy (budget cap, fps limits).
     /// - Returns: A `ResolvedRecordingPlan` with even dimensions and a budget-respecting
     ///   pixel-rate. Use `ResolvedRecordingPlan.combinedPixelsPerSecond` and
@@ -170,10 +174,16 @@ nonisolated enum CapabilityResolver {
     nonisolated static func resolveStartProfile(
         display: Display,
         cameraFormat: CameraFormat?,
+        cameraTargetFps: Int? = nil,
         config: RecordingConfiguration
     )
     -> ResolvedRecordingPlan {
-        self.resolve(display: display, cameraFormat: cameraFormat, config: config).plan
+        self.resolve(
+            display: display,
+            cameraFormat: cameraFormat,
+            cameraTargetFps: cameraTargetFps,
+            config: config
+        ).plan
     }
 
     // MARK: - Helpers
@@ -198,19 +208,29 @@ nonisolated enum CapabilityResolver {
         )
     }
 
-    /// Returns the camera's pixel-rate and target fps for the selected format.
+    /// Returns the camera's pixel-rate and effective fps.
     ///
-    /// Camera target fps: maxFps of the selected format, clamped to `config.maxScreenFps`.
+    /// When `targetFps` is non-nil (user's CameraMode override), it is used directly
+    /// (clamped to `config.maxScreenFps` for safety). When nil (Auto path), fps is
+    /// `min(Int(format.maxFps), config.maxScreenFps)` — byte-identical to the pre-mode behavior.
+    ///
     /// `Int(Double)` truncates fractional Hz (e.g. 29.97 → 29); callers should supply
     /// formats whose maxFps is a clean integer value when possible.
     /// Explicit-typed intermediates avoid `Optional.map { <arithmetic> }` type-checker timeouts.
     nonisolated private static func cameraRateInfo(
         cameraFormat: CameraFormat?,
+        targetFps: Int?,
         config: RecordingConfiguration
     )
     -> (fps: Int, rate: Int) {
         guard let format = cameraFormat else { return (fps: 0, rate: 0) }
-        let fps = min(Int(format.maxFps), config.maxScreenFps)
+        // Honor the user's mode selection when provided; clamp to the policy ceiling.
+        // Auto path: derive from format's max fps (pre-mode behavior, min(maxFps, maxScreenFps)).
+        let fps: Int = if let explicit = targetFps {
+            min(explicit, config.maxScreenFps)
+        } else {
+            min(Int(format.maxFps), config.maxScreenFps)
+        }
         let rate = Int(format.pixelWidth) * Int(format.pixelHeight) * fps
         return (fps: fps, rate: rate)
     }
@@ -218,19 +238,44 @@ nonisolated enum CapabilityResolver {
     /// Returns camera capture dimensions as `SourceDimensions` for use with
     /// `EngineBudgetCap.fits(screen:camera:)`.
     ///
+    /// Takes `effectiveFps` (pre-computed by `cameraRateInfo`) to guarantee the fps used in
+    /// the rate check (`cap.fits`) is identical to the fps used in the pixel-rate arithmetic —
+    /// never derive fps independently in two places.
+    ///
     /// When `cameraFormat` is `nil`, returns a zero-rate sentinel so the boolean predicate
     /// produces the same result as the scalar arithmetic (`cameraRate == 0`).
     nonisolated private static func cameraDimensions(
         cameraFormat: CameraFormat?,
-        config: RecordingConfiguration
+        effectiveFps: Int
     )
     -> SourceDimensions {
         guard let format = cameraFormat else { return SourceDimensions(width: 0, height: 0, fps: 0) }
         return SourceDimensions(
             width: Int(format.pixelWidth),
             height: Int(format.pixelHeight),
-            fps: min(Int(format.maxFps), config.maxScreenFps)
+            fps: effectiveFps
         )
+    }
+
+    /// Builds a `ResolvedCameraPlan` with even-floored dimensions for the given format and fps.
+    ///
+    /// Even-floor is required: HEVC mandates even frame dimensions. AVCaptureDevice formats are
+    /// even in practice, but the contract must hold on both sides.
+    ///
+    /// Hoisted out of `resolve()` into its own helper to satisfy the function-body-length lint
+    /// gate: chaining `Int(...) & ~1` inside an initialiser argument also triggers the Swift
+    /// type-checker timeout under load (warnings-as-errors → red CI), so explicit `let` bindings
+    /// are retained here.
+    nonisolated private static func buildCameraPlan(
+        cameraFormat: CameraFormat?,
+        fps: Int
+    )
+    -> ResolvedCameraPlan? {
+        cameraFormat.map { format in
+            let evenCamW: Int = max(Int(format.pixelWidth) & ~1, Self.minEvenDimension)
+            let evenCamH: Int = max(Int(format.pixelHeight) & ~1, Self.minEvenDimension)
+            return ResolvedCameraPlan(width: evenCamW, height: evenCamH, fps: fps)
+        }
     }
 
     /// Downscales `width`/`height` (preserving aspect ratio) until the combined pixel-rate

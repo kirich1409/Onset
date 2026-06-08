@@ -89,6 +89,13 @@ struct RecordingRequest {
     let display: Display
     let cameraDevice: CameraDevice?
     let cameraFormat: CameraFormat?
+    /// The explicit frame rate to lock when activating the camera's AVFoundation format.
+    ///
+    /// Derived from the user's `CameraMode` selection by `MainViewModel+Record` via
+    /// `CameraFormatSelector.resolveFormat(from:override:config:)`. When no camera is used
+    /// (`cameraFormat == nil`), this value is ignored. Threaded through `RecordingSession`
+    /// into `SourceFactory.makeCameraSource` so the selected fps reaches `CameraSource`.
+    let cameraModeTargetFps: Int
     let micDevice: MicrophoneDevice?
     let permissions: EffectivePermissions
     /// Source descriptions for the recording-window checklist (resolved by the caller, which knows
@@ -262,6 +269,7 @@ final class RecordingCoordinator {
                 display: request.display,
                 cameraDevice: request.cameraDevice,
                 cameraFormat: request.cameraFormat,
+                cameraModeTargetFps: request.cameraModeTargetFps,
                 micDevice: request.micDevice,
                 config: .mvpDefault
             )

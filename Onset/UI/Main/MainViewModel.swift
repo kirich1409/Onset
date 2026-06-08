@@ -1,3 +1,8 @@
+// swiftlint:disable file_length
+// Rationale: MainViewModel is the central observable state owner for the main recording
+// screen. It holds permissions, device lists, persistence state, camera toggle, mode
+// selection, and AC-2 computed properties — all as Observable stored properties. Splitting
+// into multiple files would scatter related observable state and break Observation tracking.
 import AVFoundation
 import os
 import SwiftUI
@@ -122,6 +127,12 @@ final class MainViewModel {
             guard !self.isApplyingPersistedSelection else { return }
             // Clear the disconnected notice when the user makes a new selection.
             self.disconnectedCameraName = nil
+            // Reset the mode: a mode persisted for the previous camera is meaningless on the
+            // newly selected device. Guard flag prevents selectedCameraMode.didSet from also
+            // calling persistCameraSelection — selectedCameraID.didSet persists once at the end.
+            self.isApplyingPersistedSelection = true
+            self.selectedCameraMode = nil
+            self.isApplyingPersistedSelection = false
             self.persistCameraSelection()
         }
     }
@@ -144,6 +155,29 @@ final class MainViewModel {
                 store.clearMicrophone()
             }
         }
+    }
+
+    /// The user's selected camera resolution/fps mode, or `nil` for Auto.
+    ///
+    /// `nil` (Auto) means `CameraFormatSelector.pickBestFormat` picks the format; non-nil
+    /// means the format matching the mode's resolution and fps is used.
+    ///
+    /// Reset to `nil` whenever `selectedCameraID` changes (a mode persisted for camera A
+    /// is meaningless after the user switches to camera B). The reset is gated behind
+    /// `!isApplyingPersistedSelection` so restored modes survive the initial load.
+    var selectedCameraMode: CameraMode? {
+        didSet {
+            guard !self.isApplyingPersistedSelection else { return }
+            self.persistCameraSelection()
+        }
+    }
+
+    /// The modes available for the currently selected camera, derived from its formats.
+    ///
+    /// Empty when no camera is selected or camera is not authorized.
+    var availableCameraModes: [CameraMode] {
+        guard let camera = self.selectedCamera else { return [] }
+        return CameraFormatSelector.availableModes(from: camera.formats, config: RecordingConfiguration.mvpDefault)
     }
 
     /// Whether the camera is enabled for recording (#77, #76).
@@ -322,6 +356,18 @@ final class MainViewModel {
     }
 
     // MARK: - Private helpers
+
+    /// Sets the camera recording mode for the active camera.
+    ///
+    /// Pass `nil` to revert to Auto mode (best-format auto-pick).
+    /// No-ops during device restore (`isApplyingPersistedSelection == true`) — callers
+    /// that restore a mode should set `selectedCameraMode` directly under the guard.
+    ///
+    /// The selected mode is persisted via `persistCameraSelection()` so it survives restart.
+    func selectCameraMode(_ mode: CameraMode?) {
+        guard !self.isApplyingPersistedSelection else { return }
+        self.selectedCameraMode = mode
+    }
 
     /// Selects the first available camera when none is currently selected.
     ///

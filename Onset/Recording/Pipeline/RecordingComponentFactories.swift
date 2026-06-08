@@ -255,11 +255,20 @@ nonisolated protocol SourceFactory: Sendable {
         -> any VideoFrameSource
 
     /// Builds the camera source (video + mic, one object). `micDevice == nil` → no audio samples.
+    ///
+    /// - Parameters:
+    ///   - cameraDevice: The camera device snapshot to capture from.
+    ///   - format: The pre-selected best format snapshot (dims + fps range).
+    ///   - micDevice: Optional microphone; when `nil`, no audio samples are produced.
+    ///   - config: Recording policy (minimum fps, audio settings, etc.).
+    ///   - targetFps: The explicit frame rate to lock when activating the AVFoundation format.
+    ///     Pass the fps returned by `CameraFormatSelector.resolveFormat(from:override:config:)`.
     func makeCameraSource(
         cameraDevice: CameraDevice,
         format: CameraFormat,
         micDevice: MicrophoneDevice?,
-        config: RecordingConfiguration
+        config: RecordingConfiguration,
+        targetFps: Int
     )
         -> any VideoFrameSource & AudioSampleSource
 }
@@ -278,7 +287,8 @@ nonisolated struct LiveSourceFactory: SourceFactory {
         cameraDevice: CameraDevice,
         format: CameraFormat,
         micDevice: MicrophoneDevice?,
-        config: RecordingConfiguration
+        config: RecordingConfiguration,
+        targetFps: Int
     )
     -> any VideoFrameSource & AudioSampleSource {
         CameraSource(
@@ -286,6 +296,7 @@ nonisolated struct LiveSourceFactory: SourceFactory {
             format: format,
             micDevice: micDevice,
             config: config,
+            targetFps: targetFps,
             role: .record
         )
     }

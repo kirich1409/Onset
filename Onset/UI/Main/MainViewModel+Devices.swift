@@ -76,9 +76,13 @@ extension MainViewModel {
             self.disconnectedCameraName = nil
             mainViewModelLogger.debug("Restored camera state — disabled by user")
 
-        case let .restore(id):
+        case let .restore(id, mode: mode):
             self.cameraEnabled = true
+            // Set selectedCameraID first, then selectedCameraMode.
+            // selectedCameraID.didSet resets the mode when not under the guard — both
+            // assignments are guarded, so selectedCameraMode survives the restore.
             self.selectedCameraID = id
+            self.selectedCameraMode = mode
             self.disconnectedCameraName = nil
             mainViewModelLogger.debug("Restored camera selection — device present")
 
@@ -143,7 +147,8 @@ extension MainViewModel {
             } else {
                 "Камера"
             }
-            store.saveCamera(.enabled(DeviceSelectionRecord(uniqueID: id, localizedName: name)))
+            let record = DeviceSelectionRecord(uniqueID: id, localizedName: name)
+            store.saveCamera(.enabled(record, mode: self.selectedCameraMode))
         } else {
             store.clearCamera()
         }
@@ -168,11 +173,13 @@ extension MainViewModel {
         var cameraDesc: String?
         if let camera = self.activeCamera {
             let name = self.cameraLabel(for: camera)
-            if let fmt = try? CameraFormatSelector.pickBestFormat(
+            // Use resolveFormat to respect selectedCameraMode in the checklist description.
+            if let (fmt, fps) = try? CameraFormatSelector.resolveFormat(
                 from: camera.formats,
-                minFps: Double(RecordingConfiguration.mvpDefault.minCameraFps)
+                override: self.selectedCameraMode,
+                config: RecordingConfiguration.mvpDefault
             ) {
-                cameraDesc = "\(name) · \(fmt.pixelWidth)×\(fmt.pixelHeight)"
+                cameraDesc = "\(name) · \(fmt.pixelWidth)×\(fmt.pixelHeight) @ \(fps)"
             } else {
                 cameraDesc = name
             }

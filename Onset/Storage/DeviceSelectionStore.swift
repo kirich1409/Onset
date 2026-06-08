@@ -34,21 +34,26 @@ struct DeviceSelectionRecord: Codable, Equatable {
 ///
 /// Three distinct states map to three restore behaviors on launch:
 /// - `.disabled` — user explicitly turned the camera OFF; do NOT auto-select on restore.
-/// - `.enabled(_)` — user had a camera selected and enabled; re-match by `uniqueID`.
+/// - `.enabled(_:mode:)` — user had a camera selected and enabled; re-match by `uniqueID`
+///   and restore the selected mode (`nil` = Auto).
 ///
 /// The absence of any value (`nil` from `loadCamera()`) is intentionally left as the
 /// "first launch / never saved" sentinel, handled by the `.noSavedSelection` resolver branch.
 ///
-/// Older blobs written as a bare `DeviceSelectionRecord` (pre-fix) fail to decode
-/// into this type. `UserDefaultsDeviceSelectionStore.loadCamera()` self-heals the corrupt
-/// blob (purge + return `nil`) so the next launch falls through to `.noSavedSelection`
-/// and applies the default first-camera auto-select — a safe recovery path.
+/// ### Forward-compatibility with old blobs
+/// Blobs written by old app versions (which used `case enabled(DeviceSelectionRecord)` without
+/// a `mode` associated value) decode cleanly into this type. Swift's synthesized Codable stores
+/// the first associated value under `_0` and the optional `mode` under `"mode"`. When the
+/// `"mode"` key is absent, the Optional is decoded as `nil` — so old blobs restore with
+/// `mode == nil` (Auto), requiring no migration code.
 enum PersistedCameraSelection: Codable, Equatable {
     /// The user explicitly disabled the camera — camera must stay OFF on restore.
     case disabled
 
     /// The user had a specific camera enabled — restore to this device if present.
-    case enabled(DeviceSelectionRecord)
+    ///
+    /// `mode` carries the user's `CameraMode` selection, or `nil` for Auto mode.
+    case enabled(DeviceSelectionRecord, mode: CameraMode?)
 }
 
 // MARK: - DeviceSelectionPersisting
