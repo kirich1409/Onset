@@ -33,19 +33,24 @@ enum WindowID {
     static let recording = "recording"
 }
 
+// MARK: - Window defaults
+
+/// Fixed window dimensions shared by `OnsetApp` scenes and the views they host.
+///
+/// Views use these constants to set an exact `frame(width:height:)` that matches
+/// `.windowResizability(.contentSize)` — ensuring the window size is locked to the
+/// content size with no flexible range for the user to drag.
+enum WindowDefaults {
+    static let width: CGFloat = 460
+    static let height: CGFloat = 560
+    static let recordingWidth: CGFloat = 370
+    static let recordingHeight: CGFloat = 420
+}
+
 // MARK: - OnsetApp
 
 @main
 struct OnsetApp: App {
-    // MARK: - Window defaults
-
-    private enum WindowDefaults {
-        static let width: CGFloat = 460
-        static let height: CGFloat = 560
-        static let recordingWidth: CGFloat = 370
-        static let recordingHeight: CGFloat = 420
-    }
-
     // MARK: - Composition root
 
     /// The single `PermissionsService` instance shared across all scenes.

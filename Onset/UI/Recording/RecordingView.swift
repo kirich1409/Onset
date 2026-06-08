@@ -121,7 +121,9 @@ struct RecordingContentView: View {
             self.footerSection
         }
         .padding(Metrics.outerPadding)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // Fixed size matching the window scene's .windowResizability(.contentSize).
+        // alignment: .top pins the content to the top edge when content is shorter than the window.
+        .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight, alignment: .top)
     }
 
     // MARK: Status section
