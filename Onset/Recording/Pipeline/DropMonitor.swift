@@ -380,10 +380,12 @@ actor DropMonitor {
         self.observeTasks.append(task)
     }
 
-    // swiftlint:disable cyclomatic_complexity
+    // swiftlint:disable cyclomatic_complexity function_body_length
     /// Routes a single drop event: bumps the cumulative counter for its reason, and — for
-    /// backpressure only — feeds the window and recomputes `RecordingState`. Also accumulates
-    /// the per-source diagnostic breakdown (independent path, no effect on reason counters).
+    /// encoder backpressure only — feeds the window and recomputes `RecordingState`. Also
+    /// accumulates the per-source diagnostic breakdown (independent path, no effect on reason
+    /// counters). Capture-overflow drops (`.captureBackpressureDrops`) fold into `captureDrops`
+    /// and never drive the degraded-state window — capture overflow is not encoder/disk pressure.
     private func ingest(_ event: DropEvent) {
         // Reason accounting: drives UI counters and degraded-state window.
         switch event.reason {
@@ -392,9 +394,12 @@ actor DropMonitor {
             let detectedAtSeconds = CMTimeGetSeconds(event.detectedAt)
             let degraded = self.window.record(atSeconds: detectedAtSeconds, count: event.count)
             self.applyDegraded(degraded)
+            let sourceDesc = String(describing: event.source)
+            self.logger.debug("Drop [encoder-backpressure] source=\(sourceDesc) count=\(event.count)")
 
             // Backpressure-only per-source tally: incremented exclusively inside this branch so
-            // captureDrop and cfrNormalizationDrops events never misattribute dominant cause.
+            // captureDrop, captureBackpressureDrops, and cfrNormalizationDrops events never
+            // misattribute dominant cause.
             switch event.source {
             case .captureScreen:
                 self.bpCaptureScreen += event.count
@@ -412,13 +417,25 @@ actor DropMonitor {
                 self.bpWriter += event.count
             }
 
-        case .captureDrop:
-            // Counted for the AC-9 end-of-session warning; never a degraded-state trigger.
+        case .captureBackpressureDrops:
+            // Capture-layer overflow: the capture→encoder AsyncStream buffer was full.
+            // Folds into captureDrops — never drives the degraded-state window so that
+            // encoder-backpressure alert is not falsely triggered by capture overflow.
             self.captureDrops += event.count
+            let capBpDesc = String(describing: event.source)
+            self.logger.debug("Drop [capture-backpressure] source=\(capBpDesc) count=\(event.count)")
+
+        case .captureDrop:
+            // Hardware or SCStream delivery drop; never a degraded-state trigger.
+            self.captureDrops += event.count
+            let capDesc = String(describing: event.source)
+            self.logger.debug("Drop [capture] source=\(capDesc) count=\(event.count)")
 
         case .cfrNormalizationDrops:
-            // Counted for the AC-9 end-of-session warning; never a degraded-state trigger.
+            // CFR normalizer hold-repeat eviction; never a degraded-state trigger.
             self.cfrNormalizationDrops += event.count
+            let cfrDesc = String(describing: event.source)
+            self.logger.debug("Drop [cfr-normalization] source=\(cfrDesc) count=\(event.count)")
         }
 
         // Source accounting: diagnostic only — independent of reason accounting above.
@@ -440,7 +457,7 @@ actor DropMonitor {
         }
     }
 
-    // swiftlint:enable cyclomatic_complexity
+    // swiftlint:enable cyclomatic_complexity function_body_length
 
     // MARK: - Recovery tick
 

@@ -63,7 +63,7 @@ nonisolated func cameraBackpressureDropEvent(
 )
 -> DropEvent? {
     guard case .dropped = yieldResult else { return nil }
-    return DropEvent(reason: .encoderBackpressureDrops, source: .captureCameraVideo, count: 1, detectedAt: pts)
+    return DropEvent(reason: .captureBackpressureDrops, source: .captureCameraVideo, count: 1, detectedAt: pts)
 }
 
 /// Returns a backpressure `DropEvent` for an audio `AsyncStream.Continuation.YieldResult`.
@@ -73,7 +73,7 @@ nonisolated func audioBackpressureDropEvent(
 )
 -> DropEvent? {
     guard case .dropped = yieldResult else { return nil }
-    return DropEvent(reason: .encoderBackpressureDrops, source: .captureCameraAudio, count: 1, detectedAt: pts)
+    return DropEvent(reason: .captureBackpressureDrops, source: .captureCameraAudio, count: 1, detectedAt: pts)
 }
 
 /// Returns `true` when `frameHostTime >= sessionStart`.

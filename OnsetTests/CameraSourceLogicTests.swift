@@ -130,12 +130,12 @@ struct VideoBPDropEventTests {
         return cont.yield(dummy)
     }
 
-    @Test(".dropped yield result produces DropEvent with .encoderBackpressureDrops")
+    @Test(".dropped yield result produces DropEvent with .captureBackpressureDrops")
     func droppedYield_producesDropEvent() throws {
         let result = cameraBackpressureDropEvent(for: makeDroppedResult(), pts: self.pts)
         let drop = try #require(result)
-        guard case .encoderBackpressureDrops = drop.reason else {
-            Issue.record("Expected .encoderBackpressureDrops, got \(drop.reason)")
+        guard case .captureBackpressureDrops = drop.reason else {
+            Issue.record("Expected .captureBackpressureDrops, got \(drop.reason)")
             return
         }
         #expect(drop.count == 1)
@@ -213,12 +213,12 @@ struct AudioBPDropEventTests {
         return result
     }
 
-    @Test(".dropped audio yield result produces DropEvent with .encoderBackpressureDrops")
+    @Test(".dropped audio yield result produces DropEvent with .captureBackpressureDrops")
     func droppedAudioYield_producesDropEvent() throws {
         let result = audioBackpressureDropEvent(for: makeDroppedAudioResult(), pts: self.pts)
         let drop = try #require(result)
-        guard case .encoderBackpressureDrops = drop.reason else {
-            Issue.record("Expected .encoderBackpressureDrops, got \(drop.reason)")
+        guard case .captureBackpressureDrops = drop.reason else {
+            Issue.record("Expected .captureBackpressureDrops, got \(drop.reason)")
             return
         }
         #expect(drop.count == 1)
