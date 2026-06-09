@@ -82,6 +82,9 @@ struct MainView: View {
         .task {
             await self.model.loadDevices()
         }
+        .task {
+            await self.model.subscribeToDisplayChanges()
+        }
         // Post-stop alerts: surface on re-appear or on async flag changes.
         // `.onAppear` covers the case where the flag is already set when the main window
         // re-mounts (stop() sets the flag before opening the main window). `.onChange`
