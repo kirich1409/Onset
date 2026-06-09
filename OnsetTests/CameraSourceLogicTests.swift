@@ -2,6 +2,7 @@ import AVFoundation
 import CoreMedia
 import CoreVideo
 @testable import Onset
+import os
 import Testing
 
 // file_length is disabled: this single-concern test file covers all pure helpers from
@@ -520,23 +521,34 @@ private struct LiveCaptureSetup {
     let anchor: HostTimeAnchor
 }
 
-// swiftlint:disable function_body_length
-/// Builds and configures a `CameraSource` from the first available built-in camera.
+/// Builds and configures a `CameraSource` driven by the same device the product uses.
 /// For `.record` role also acquires the default microphone; for `.preview` passes `nil`
 /// (preview never attaches a data output, so mic hardware is irrelevant).
 /// Returns the configured source, the selected format, and a fresh anchor.
 ///
+/// Camera selection mirrors `RecordingSessionTests.pickCamera`: enumerate via
+/// `DeviceDiscovery.cameras(cameraAuthorized:)` (which uses `cameraDeviceTypes` and
+/// therefore covers external USB devices like the MX Brio) and honour the
+/// `ONSET_L5_CAMERA_NAME` env var so the test always drives the reference camera.
+/// The previous `AVCaptureDevice.default(.builtInWideAngleCamera…)` call was limited
+/// to built-in devices and could never return an external camera (#129).
+///
 /// - Parameter role: Which lifecycle the source serves (default `.record`).
 ///   Pass `.preview` to build a source that suppresses data outputs and telemetry.
-///
-/// Extracted to keep `liveCapture_producesFramesAndSamples` within `function_body_length`.
 private func makeLiveCaptureSource(role: CaptureRole = .record) throws -> LiveCaptureSetup {
-    guard let avDevice = AVCaptureDevice.default(
-        .builtInWideAngleCamera,
-        for: .video,
-        position: .unspecified
-    ) else {
-        throw L5SetupError.noCamera
+    let cameras = DeviceDiscovery.cameras(cameraAuthorized: true)
+
+    let camera: CameraDevice
+    if let nameFilter = l5CameraName() {
+        guard let picked = pickCamera(from: cameras, nameFilter: nameFilter) else {
+            throw L5SetupError.noCamera
+        }
+        camera = picked
+    } else {
+        guard let first = cameras.first else {
+            throw L5SetupError.noCamera
+        }
+        camera = first
     }
 
     let micDevice: MicrophoneDevice?
@@ -551,27 +563,14 @@ private func makeLiveCaptureSource(role: CaptureRole = .record) throws -> LiveCa
         micDevice = nil
     }
 
-    let formats: [CameraFormat] = avDevice.formats.compactMap { fmt in
-        let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
-        let maxFps = fmt.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 0
-        let minFps = fmt.videoSupportedFrameRateRanges.map(\.minFrameRate).min() ?? 0
-        return CameraFormat(
-            pixelWidth: dims.width,
-            pixelHeight: dims.height,
-            minFps: minFps,
-            maxFps: maxFps
-        )
-    }
-
     let config = RecordingConfiguration.mvpDefault
     let selectedFormat = try CameraFormatSelector.pickBestFormat(
-        from: formats,
+        from: camera.formats,
         minFps: Double(config.minCameraFps)
     )
 
-    let cameraDevice = CameraDevice(uniqueID: avDevice.uniqueID, formats: formats)
     let source = CameraSource(
-        cameraDevice: cameraDevice,
+        cameraDevice: camera,
         format: selectedFormat,
         micDevice: micDevice,
         config: config,
@@ -580,7 +579,57 @@ private func makeLiveCaptureSource(role: CaptureRole = .record) throws -> LiveCa
     return LiveCaptureSetup(source: source, format: selectedFormat, anchor: HostTimeAnchor.now())
 }
 
-// swiftlint:enable function_body_length
+// MARK: - L5 camera helpers
+
+nonisolated private let l5Logger = Logger(
+    subsystem: "dev.androidbroadcast.Onset",
+    category: "CameraSourceL5Tests"
+)
+
+/// Case-insensitive substring filter applied to discovered camera display names.
+///
+/// Reads `ONSET_L5_CAMERA_NAME` from the environment. When unset or empty the
+/// first discovered camera is used (same behaviour as `RecordingSessionTests`).
+/// When set but no camera name contains the substring, the caller throws `.noCamera`.
+/// Example: `ONSET_L5_CAMERA_NAME=MX Brio` pins the Logitech MX Brio.
+private func l5CameraName() -> String? {
+    guard let raw = ProcessInfo.processInfo.environment["ONSET_L5_CAMERA_NAME"],
+          !raw.isEmpty
+    else { return nil }
+    return raw
+}
+
+/// Picks a camera from `cameras` whose `AVCaptureDevice.localizedName` contains
+/// `nameFilter` (case-insensitive). Returns `nil` when no match is found — the caller
+/// must handle this so a mismatched filter fails loudly instead of silently verifying
+/// the wrong device.
+///
+/// The filter uses `AVCaptureDevice` directly for the name comparison because
+/// `CameraDevice` stores only `uniqueID`/`formats` (no display name — PII policy).
+/// The device name is used transiently for matching only and is never logged.
+///
+/// - Parameters:
+///   - cameras: Pre-enumerated `CameraDevice` snapshots (same list as the product uses).
+///   - nameFilter: Case-insensitive substring to match against `localizedName`.
+/// - Returns: The first matching camera, or `nil` when no match is found.
+///   Logs whether the filter matched (boolean flag only — no name in the log).
+private func pickCamera(from cameras: [CameraDevice], nameFilter: String) -> CameraDevice? {
+    let discoverySession = AVCaptureDevice.DiscoverySession(
+        deviceTypes: DeviceDiscovery.cameraDeviceTypes,
+        mediaType: .video,
+        position: .unspecified
+    )
+    let matchedID = discoverySession.devices
+        .first { $0.localizedName.localizedCaseInsensitiveContains(nameFilter) }
+        .map(\.uniqueID)
+
+    if let matchedID, let camera = cameras.first(where: { $0.uniqueID == matchedID }) {
+        l5Logger.notice("L5_CAMERA_PICK name_matched=true")
+        return camera
+    }
+    l5Logger.notice("L5_CAMERA_PICK name_matched=false")
+    return nil
+}
 
 // MARK: - L5 error types
 
