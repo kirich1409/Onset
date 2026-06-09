@@ -36,9 +36,9 @@ nonisolated protocol RecordingControlling: Sendable {
     /// concurrent-safe in the live implementation (memoized teardown).
     func stop() async -> RecordingResult
 
-    /// The session's cumulative drop counters, polled by the coordinator for the recording-window
-    /// drop pill. Returns a zero snapshot before start / after stop.
-    func currentDrops() async -> DropCounters
+    /// The session's current drop health snapshot, polled by the coordinator for the
+    /// recording-window drop pill. Returns a zero / never-degraded snapshot before start / after stop.
+    func currentDrops() async -> DropHealthSnapshot
 }
 
 // MARK: - RecordingSession conformance
