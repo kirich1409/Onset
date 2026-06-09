@@ -223,13 +223,23 @@ struct PermissionCardView: View {
     // MARK: - Accessibility
 
     private var accessibilityCardLabel: String {
-        let statusText = switch self.status {
+        Self.cardLabel(title: self.title, subtitle: self.subtitle, status: self.status)
+    }
+
+    /// Composes the VoiceOver label for a permission card.
+    ///
+    /// Extracted as a `static` pure function so tests can verify the composed string
+    /// without instantiating a view.
+    ///
+    /// Format: «\(title). \(subtitle). \(statusText)»
+    static func cardLabel(title: String, subtitle: String, status: PermissionCardStatus) -> String {
+        let statusText = switch status {
         case .required: "Требуется"
         case .awaiting: "Ожидание"
         case .denied: "Запрещён"
         case .authorized: "Выдано"
         }
-        return "\(self.title): \(statusText)"
+        return "\(title). \(subtitle). \(statusText)"
     }
 }
 
