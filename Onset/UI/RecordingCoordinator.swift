@@ -154,15 +154,28 @@ final class RecordingCoordinator {
     /// stop completes.
     private(set) var lastResult: RecordingResult?
 
-    /// `true` when the most recent finished session had encoder-backpressure drops (AC-9 warning).
-    /// Derived from `lastDroppedFrames` — single source of truth, no lockstep pair needed.
+    /// `true` when the most recent finished session had the live HUD pill flash `.degraded` at
+    /// least once (AC-9 warning). Derived from `lastSessionEverDegraded` — the one-way latch from
+    /// `DropMonitor`, which is stricter than `lastDroppedFrames > 0`: scattered backpressure drops
+    /// that never crossed the sliding-window threshold do not trigger the post-stop warning.
     var lastDegradedWarning: Bool {
-        self.lastDroppedFrames > 0
+        self.lastSessionEverDegraded
     }
 
+    /// One-way degradation latch from the most recent finished session. `true` when the live HUD
+    /// pill flashed `.degraded` at least once. Frozen at stop time; reset in
+    /// `acknowledgeDegradedWarning()` and `start()`.
+    private(set) var lastSessionEverDegraded = false
+
     /// Encoder-backpressure drop count from the most recent finished session, frozen at stop time.
-    /// Reset to 0 in `acknowledgeDegradedWarning()` and cleared on every `start()`.
+    /// Used solely for message pluralization ("пропущено N кадров"). Not the alert gate (see
+    /// `lastDegradedWarning`). Reset to 0 in `acknowledgeDegradedWarning()` and cleared on `start()`.
     private(set) var lastDroppedFrames = 0
+
+    /// Dominant backpressure cause from the most recent finished session. Forwarded from
+    /// `DropHealthSnapshot.dominantCause`. Reset to `.notDegraded` in `acknowledgeDegradedWarning()` and
+    /// `start()`.
+    private(set) var dominantCause: DropCause = .notDegraded
 
     /// Non-nil when the most recent session had a hard write failure (e.g. disk full). Contains
     /// the human-readable reason for the error alert. Distinct from `lastDegradedWarning` — a
@@ -304,10 +317,12 @@ final class RecordingCoordinator {
         self.phase = .main
     }
 
-    /// Clears `lastDroppedFrames` (and thereby `lastDegradedWarning`) after the user has acknowledged
-    /// the alert (AC-9). Called by `MainView` on dismiss so the state does not persist across sessions.
+    /// Clears the degradation latch and drop count after the user has acknowledged the alert (AC-9).
+    /// Called by `MainView` on dismiss so the state does not persist across sessions.
     func acknowledgeDegradedWarning() {
+        self.lastSessionEverDegraded = false
         self.lastDroppedFrames = 0
+        self.dominantCause = .notDegraded
     }
 
     /// Clears `lastWriteError` after the user has acknowledged the alert.
@@ -350,8 +365,10 @@ final class RecordingCoordinator {
         // Every source starts live; a graceful revoke (AC-12) flips the affected one(s) during the session.
         self.sourceLiveness = .allLive
         self.isStopping = false
-        // Reset per-session drop counter (drives lastDegradedWarning) — structural invariant: clean start.
+        // Reset per-session degradation state — structural invariant: clean start.
+        self.lastSessionEverDegraded = false
         self.lastDroppedFrames = 0
+        self.dominantCause = .notDegraded
         self.lastWriteError = nil
         self.phase = .recording
 
@@ -405,7 +422,7 @@ final class RecordingCoordinator {
         }
     }
 
-    /// One ~1 Hz loop: bumps `elapsed` from `startedAt` and polls the session's drop counters. Both
+    /// One ~1 Hz loop: bumps `elapsed` from `startedAt` and polls the session's drop health. Both
     /// readouts tick at the same cadence, so they share one task (one cancel point).
     private func startTickLoop(_ session: any RecordingControlling) {
         self.tickTask = Task { [weak self] in
@@ -414,7 +431,7 @@ final class RecordingCoordinator {
                 if let startedAt = self.startedAt {
                     self.elapsed = Int(Date().timeIntervalSince(startedAt))
                 }
-                self.drops = await session.currentDrops()
+                self.drops = await session.currentDrops().counters
                 try? await Task.sleep(for: .seconds(1))
             }
         }
@@ -422,6 +439,7 @@ final class RecordingCoordinator {
 
     // MARK: - Stop (AC-9) — funnel for all three stop paths
 
+    // swiftlint:disable function_body_length
     /// Stops the active recording. Funnel for the three stop paths (button / hotkey / menu —
     /// AC-9). Re-entrancy-guarded so the teardown (reveal, warning, phase transition) runs exactly
     /// once even under concurrent calls: `isStopping` is flipped synchronously before the first
@@ -451,7 +469,9 @@ final class RecordingCoordinator {
 
         self.lastResult = result
         self.drops = result.drops
+        self.lastSessionEverDegraded = result.sessionEverDegraded
         self.lastDroppedFrames = result.drops.encoderBackpressureDrops
+        self.dominantCause = result.dominantCause
         self.lastWriteError = result.writeFailureReason
         self.session = nil
         self.startedAt = nil
@@ -463,9 +483,10 @@ final class RecordingCoordinator {
             coordinatorLogger.error(
                 "Recording finished with write failure — \(writeError)"
             )
-        } else if result.degradedWarning {
+        } else if result.sessionEverDegraded {
             coordinatorLogger.notice(
-                "Recording finished with degraded warning — backpressureDrops=\(result.drops.encoderBackpressureDrops)"
+                // swiftlint:disable:next line_length
+                "Recording finished with degraded warning — backpressureDrops=\(result.drops.encoderBackpressureDrops) dominantCause=\(String(describing: result.dominantCause))"
             )
         }
 
@@ -485,6 +506,8 @@ final class RecordingCoordinator {
             "Recording stopped — files=\(result.outputURLs.count) origin=\(String(describing: self.origin))"
         )
     }
+
+    // swiftlint:enable function_body_length
 
     // MARK: - Global hotkey (#67 / AC-9 third stop path)
 

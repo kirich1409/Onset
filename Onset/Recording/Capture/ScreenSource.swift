@@ -193,9 +193,10 @@ actor ScreenSource: VideoFrameSource {
         self.captureState = .starting
 
         let sessionStart = anchor.anchorTime
-        let onTerminalStop: @Sendable (any Error) async -> Void = { [weak self] error in
-            await self?.handleTerminalStop(error: error)
-        }
+        let onTerminalStop: @Sendable (any Error)
+            async -> Void = { [weak self] error in
+                await self?.handleTerminalStop(error: error)
+            }
 
         let scDisplay: SCDisplay
         do {

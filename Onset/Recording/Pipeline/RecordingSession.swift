@@ -381,12 +381,16 @@ actor RecordingSession {
 
     // MARK: - UI state surface (#36/#37)
 
-    /// The session's cumulative drop counters, polled by the UI (`RecordingCoordinator`) for the
-    /// recording-window drop pill. Returns a zero-counter snapshot before `start()` builds the
-    /// monitor or after `performStop()` tears it down.
-    func currentDrops() async -> DropCounters {
+    /// The session's current drop health snapshot, polled by the UI (`RecordingCoordinator`) for
+    /// the recording-window drop pill. Returns a zero / never-degraded snapshot before `start()`
+    /// builds the monitor or after `performStop()` tears it down.
+    func currentDrops() async -> DropHealthSnapshot {
         await self.dropMonitor?.snapshot()
-            ?? DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0)
+            ?? DropHealthSnapshot(
+                counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
+                sessionEverDegraded: false,
+                dominantCause: .notDegraded
+            )
     }
 
     // MARK: - Pipeline construction
@@ -616,7 +620,11 @@ actor RecordingSession {
         // is not poisoned by this no-op.
         guard case .running = self.sessionState else {
             self.logger.notice("RecordingSession.stop() before start() — no-op")
-            return .empty(DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0))
+            return .empty(DropHealthSnapshot(
+                counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
+                sessionEverDegraded: false,
+                dominantCause: .notDegraded
+            ))
         }
         self.sessionState = .stopped
         let task = Task { await self.performStop() }
@@ -624,6 +632,7 @@ actor RecordingSession {
         return await task.value
     }
 
+    // swiftlint:disable function_body_length
     /// Full teardown body — called exactly once via the memoized `stopTask`.
     ///
     /// Stop order is load-bearing (per pipeline, mirrored in `stopAndFinalizePipeline`):
@@ -668,8 +677,12 @@ actor RecordingSession {
         // encoder.stop() finished the drop streams; dropMonitor.stop() awaits those tasks, ensuring
         // every in-flight DropEvent is ingested before the counters are read.
         await self.dropMonitor?.stop()
-        let counters = await self.dropMonitor?.snapshot()
-            ?? DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0)
+        let healthSnapshot = await self.dropMonitor?.snapshot()
+            ?? DropHealthSnapshot(
+                counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
+                sessionEverDegraded: false,
+                dominantCause: .notDegraded
+            )
         self.dropMonitor = nil
 
         // End the UI state forwarding: dropMonitor.stop() already finished the monitor's state
@@ -686,13 +699,18 @@ actor RecordingSession {
 
         let sessionOutput = SessionOutput(screen: finishResults[.screen], camera: finishResults[.camera])
         let result: RecordingResult = if let output = sessionOutput {
-            .completed(output, counters)
+            .completed(output, healthSnapshot)
         } else {
-            .empty(counters)
+            .empty(healthSnapshot)
         }
-        self.logger.info("RecordingSession stopped — files=\(result.outputURLs.count) warn=\(result.degradedWarning)")
+        self.logger.info(
+            // swiftlint:disable:next line_length
+            "RecordingSession stopped — files=\(result.outputURLs.count) warn=\(result.sessionEverDegraded) cause=\(String(describing: result.dominantCause))"
+        )
         return result
     }
+
+    // swiftlint:enable function_body_length
 
     // MARK: - Failure teardown
 

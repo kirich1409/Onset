@@ -632,8 +632,8 @@ struct RecordingSessionStopTests {
         #expect(result.degradedWarning == false, "no backpressure drops → no warning (AC-8 policy)")
     }
 
-    @Test("degradedWarning true when backpressure drops > 0")
-    func degradedWarning_true_whenBackpressureDropped() async throws {
+    @Test("degradedWarning true when session crossed the degraded-state threshold (sessionEverDegraded latch)")
+    func degradedWarning_true_whenThresholdCrossed() async throws {
         let probe = SampleProbeOK()
         let encoders = FakeEncoderFactory()
         let writers = SessionFakeWriterFactory()
@@ -646,15 +646,54 @@ struct RecordingSessionStopTests {
         try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
         _ = await eventually { writers.bothWritersCreated }
 
-        // Emit a backpressure drop on the screen encoder → DropMonitor must count it.
+        // Emit threshold+1 (31) backpressure drops as one batched event in a tight window.
+        // Default threshold is 30; count:31 crosses it in a single CMTime instant → latch set.
+        let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
+        encoders.screenEncoder.emitDrop(DropEvent(
+            reason: .encoderBackpressureDrops, source: .encode, count: 31, detectedAt: dropPts
+        ))
+        // Poll until sessionEverDegraded is latched — avoids racing the observe child task.
+        _ = await eventually { await session.currentDrops().sessionEverDegraded }
+
+        let result = await session.stop()
+        #expect(
+            result.degradedWarning == true,
+            "threshold crossed → sessionEverDegraded latch → degradedWarning true (AC-8)"
+        )
+        #expect(result.drops.encoderBackpressureDrops > 0, "drop counter must reflect the emitted drops")
+        // `!=` requires the Equatable conformance (InferIsolatedConformances → @MainActor in
+        // nonisolated #expect expansion). `!(lhs == rhs)` binds the concrete nonisolated witness.
+        #expect(!(result.dominantCause == .notDegraded), "degraded session must report a non-.notDegraded cause")
+    }
+
+    @Test("degradedWarning false when backpressure drops never crossed the threshold (scattered drops)")
+    func degradedWarning_false_whenDropsBelowThreshold() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        // Default threshold (30): one drop is never enough to flip the latch — no warning.
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.bothWritersCreated }
+
+        // One drop — far below default threshold(30). Window never crosses → latch stays false.
         let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
         encoders.screenEncoder.emitDrop(DropEvent(
             reason: .encoderBackpressureDrops, source: .encode, count: 1, detectedAt: dropPts
         ))
+        // Poll until the drop is ingested so the test doesn't stop before the monitor sees it.
+        _ = await eventually { await session.currentDrops().counters.encoderBackpressureDrops >= 1 }
 
         let result = await session.stop()
-        #expect(result.degradedWarning == true, "backpressure drop → degradedWarning must be true (AC-8)")
-        #expect(result.drops.encoderBackpressureDrops > 0, "drop counter must reflect the emitted drop")
+        #expect(
+            result.degradedWarning == false,
+            "below-threshold drops → latch never set → degradedWarning false (regression guard)"
+        )
+        #expect(result.drops.encoderBackpressureDrops == 1, "drop counter still reflects the emitted drop")
     }
 
     @Test("stop() is idempotent — second call returns the same result (Gap B)")
@@ -1117,7 +1156,7 @@ struct RecordingSessionStateSurfaceTests {
 
         // Before start, no monitor exists → zero counters.
         let beforeStart = await session.currentDrops()
-        #expect(beforeStart.encoderBackpressureDrops == 0, "zero before start (no monitor yet)")
+        #expect(beforeStart.counters.encoderBackpressureDrops == 0, "zero before start (no monitor yet)")
 
         try await session.start(permissions: SessionFixtures.fullPermissions())
         try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
@@ -1130,7 +1169,7 @@ struct RecordingSessionStateSurfaceTests {
 
         // Poll currentDrops() until the asynchronously-ingested drop is reflected.
         let reflected = await eventually {
-            await session.currentDrops().encoderBackpressureDrops == 3
+            await session.currentDrops().counters.encoderBackpressureDrops == 3
         }
         #expect(reflected, "currentDrops() must reflect the monitor snapshot (3 backpressure drops)")
 

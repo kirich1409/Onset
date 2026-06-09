@@ -284,6 +284,95 @@ extension DropReason: Hashable {
     }
 }
 
+// MARK: - DropCause
+
+/// The dominant pipeline stage that drove backpressure-degradation during a session.
+///
+/// Reported in the post-stop `DropHealthSnapshot` so the UI can surface the most actionable
+/// signal to the user. Covers only the **backpressure** path — `captureDrop` and
+/// `cfrNormalizationDrops` never trigger degraded state and therefore never produce a
+/// non-`.notDegraded` cause.
+///
+/// Tie-break order when multiple stages accumulated backpressure drops:
+///   writer > encode > captureScreen > captureCameraVideo > captureCameraAudio
+/// The first matching non-zero bucket wins. The order is deterministic and documented so
+/// tests can rely on it.
+nonisolated enum DropCause {
+    /// The session was never degraded (latch `sessionEverDegraded == false`).
+    ///
+    /// By invariant, `snapshot().dominantCause == .notDegraded` iff `sessionEverDegraded == false`.
+    /// Named `notDegraded` rather than `none` to avoid ambiguity with `Optional<T>.none`,
+    /// which the Swift compiler can conflate in type-inference contexts.
+    case notDegraded
+    /// `ScreenSource`→encoder `AsyncStream` buffer was the dominant backpressure site.
+    case captureScreen
+    /// `CameraSource` video→encoder `AsyncStream` buffer was the dominant backpressure site.
+    case captureCameraVideo
+    /// `CameraSource` audio→encoder `AsyncStream` buffer was the dominant backpressure site.
+    case captureCameraAudio
+    /// `VideoEncoder` pending-frame gate was the dominant backpressure site.
+    case encode
+    /// `FileWriter` input backpressure was the dominant site.
+    case writer
+}
+
+// Under SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor + InferIsolatedConformances, synthesised
+// Equatable and Hashable witnesses are inferred @MainActor. Manual nonisolated witnesses match
+// the pattern used by DropReason and DropSource so DropCause is usable from nonisolated code.
+// swiftformat:disable:next redundantEquatable
+extension DropCause: Equatable {
+    /// Manual `nonisolated` implementation (mirrors `DropReason`).
+    nonisolated static func == (lhs: DropCause, rhs: DropCause) -> Bool {
+        switch (lhs, rhs) {
+        case (.notDegraded, .notDegraded),
+             (.captureScreen, .captureScreen),
+             (.captureCameraVideo, .captureCameraVideo),
+             (.captureCameraAudio, .captureCameraAudio),
+             (.encode, .encode),
+             (.writer, .writer):
+            true
+
+        default:
+            false
+        }
+    }
+}
+
+extension DropCause: Hashable {
+    /// Manual `nonisolated` implementation.
+    ///
+    /// Swift auto-synthesises `Hashable` for enums with no associated values. Under
+    /// `InferIsolatedConformances`, the synthesised `hash(into:)` witness is inferred
+    /// `@MainActor`, making `DropCause` unusable from `nonisolated` contexts. Providing
+    /// an explicit manual witness with `nonisolated` overrides the synthesised form
+    /// (mirrors the identical pattern on `DropReason`).
+    nonisolated func hash(into hasher: inout Hasher) {
+        switch self {
+        case .notDegraded:
+            hasher.combine(0)
+
+        case .captureScreen:
+            hasher.combine(1)
+
+        case .captureCameraVideo:
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(2)
+
+        case .captureCameraAudio:
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(3)
+
+        case .encode:
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(4)
+
+        case .writer:
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(5)
+        }
+    }
+}
+
 // MARK: - DropSource
 
 /// The pipeline stage that detected a frame or sample drop.
