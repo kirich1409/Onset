@@ -155,6 +155,12 @@ Full type-level map (Russian): `docs/architecture.md`.
   change touches recording/devices and it makes sense — build + unit tests do not
   close L5.
 - Docs describe `main`: update affected `docs/` in the same PR that changes behavior.
+- **Verify the Apple API against Apple docs before coding it.** Framework behavior drifts
+  across macOS versions and differs from iOS — training data misleads. Confirm the symbol's
+  actual macOS semantics, not just that it exists: a search may surface a similarly- or
+  identically-named symbol that behaves differently on macOS than on iOS. Check via the
+  `apple-docs` MCP (primary), the macOS SDK headers, or developer.apple.com before writing
+  the call; trust the doc/MCP platform line over a hand-read header annotation.
 - After completing a task, fold non-obvious learnings into CLAUDE.md
   (`/claude-md-management:revise-claude-md`). Maintenance = add AND delete: a rule
   Claude already follows without being told gets removed; keep this file ≤200 lines.
