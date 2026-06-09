@@ -20,6 +20,55 @@ env:
 
 jobs:
   # ─────────────────────────────────────────────
+  # changes
+  # Cheaply detect which file categories changed so downstream jobs can skip
+  # when irrelevant (e.g. doc-only PRs skip all Swift jobs entirely).
+  # Runs on ubuntu-latest — no macOS runner cost.
+  # Outputs:
+  #   swift   — Swift source, project, or lint-config changed
+  #   privacy — PrivacyInfo.xcprivacy changed
+  # ─────────────────────────────────────────────
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      swift: ${{ steps.detect.outputs.swift }}
+      privacy: ${{ steps.detect.outputs.privacy }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed file categories
+        id: detect
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.sha }}
+        run: |
+          CHANGED=$(git diff --name-only "$BASE" "$HEAD")
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          SWIFT=false
+          PRIVACY=false
+
+          # Swift category: source files, project, build config, lint config, CI itself.
+          if echo "$CHANGED" | grep -qE \
+            '\.(swift|xcconfig)$|Onset\.xcodeproj/|\.swiftlint\.yml$|\.swiftformat$|^Mintfile$|^\.github/workflows/pr-gate\.yml$'; then
+            SWIFT=true
+          fi
+
+          # Privacy category: the PrivacyInfo manifest (source check).
+          if echo "$CHANGED" | grep -qE 'Onset/PrivacyInfo\.xcprivacy$'; then
+            PRIVACY=true
+          fi
+
+          echo "swift=$SWIFT"   >> "$GITHUB_OUTPUT"
+          echo "privacy=$PRIVACY" >> "$GITHUB_OUTPUT"
+
+  # ─────────────────────────────────────────────
   # build
   # Debug configuration: -Onone, ONLY_ACTIVE_ARCH=YES, no WMO — fastest compile.
   # Full strictness comes from Config/Strict.xcconfig (SWIFT_VERSION=6.0,
@@ -29,6 +78,8 @@ jobs:
   # ─────────────────────────────────────────────
   build:
     name: Build (Debug)
+    needs: changes
+    if: needs.changes.outputs.swift == 'true'
     runs-on: macos-26
     timeout-minutes: 20
     steps:
@@ -99,6 +150,8 @@ jobs:
   # ─────────────────────────────────────────────
   lint:
     name: Lint
+    needs: changes
+    if: needs.changes.outputs.swift == 'true'
     runs-on: macos-26
     timeout-minutes: 10
     steps:
@@ -149,6 +202,8 @@ jobs:
   # ─────────────────────────────────────────────
   unit:
     name: Unit Tests
+    needs: changes
+    if: needs.changes.outputs.swift == 'true'
     runs-on: macos-26
     timeout-minutes: 20
     steps:
@@ -213,6 +268,8 @@ jobs:
   # ─────────────────────────────────────────────
   privacy-manifest:
     name: Privacy Manifest Lint
+    needs: changes
+    if: needs.changes.outputs.privacy == 'true'
     runs-on: macos-26
     timeout-minutes: 5
     steps:
@@ -232,8 +289,9 @@ jobs:
   # ─────────────────────────────────────────────
   artifact-checks:
     name: Artifact Checks
+    needs: [changes, build]
+    if: needs.changes.outputs.swift == 'true'
     runs-on: macos-26
-    needs: build
     timeout-minutes: 10
     steps:
       - name: Checkout
