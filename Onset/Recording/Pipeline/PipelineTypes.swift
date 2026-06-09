@@ -587,13 +587,13 @@ extension SourceEvent: Equatable {
 
 // MARK: - RecordingRevocation
 
-/// A graceful-revocation notification carried on `RecordingSession.sourceRevocationStream` (AC-12 UI).
+/// A revocation notification carried on `RecordingSession.sourceRevocationStream`.
 ///
 /// `RecordingSession` already FINALISES the affected pipeline on a `.displayDisconnected` /
-/// `.cameraDisconnected` `SourceEvent` (Epic 3). This stream is the *UI seam* layered on top of that
-/// behaviour: after a pipeline is finalised, the session yields a `RecordingRevocation` so the
-/// `RecordingCoordinator` can update the per-source liveness the recording window reads — and, when
-/// the last video pipeline is gone, learn it must end the whole session.
+/// `.cameraDisconnected` `SourceEvent` (Epic 3) or on a hard writer fault (#197). This stream is the
+/// *UI seam* layered on top of that behaviour: after a pipeline is finalised, the session yields a
+/// `RecordingRevocation` so the `RecordingCoordinator` can update the per-source liveness the
+/// recording window reads — and, when the last video pipeline is gone, learn it must end the session.
 ///
 /// **Single-consumer.** Exactly ONE subscriber (the `RecordingCoordinator`) may iterate the stream —
 /// same contract as `recordingStateStream`. `AsyncStream` splits elements across iterators rather
@@ -604,9 +604,17 @@ nonisolated enum RecordingRevocation: Equatable {
     /// mic rides the camera AVCaptureSession), so the coordinator marks the mic revoked too.
     case sourceRevoked(RecordingPipelineKind)
 
+    /// One pipeline's `FileWriter` hard-faulted mid-recording (#197). The pipeline is stopped and
+    /// finalised as `.failed`; the other pipeline continues. The coordinator flips the faulted
+    /// source's liveness to `false` so the recording window shows it stopped immediately.
+    /// `.camera` additionally implies the microphone ended (same AVCaptureSession dependency as
+    /// `.sourceRevoked(.camera)`). Visually reuses the same "stopped" indicator as AC-12.
+    case writerFailed(RecordingPipelineKind)
+
     /// The LAST remaining video pipeline was just finalised — no video source is left. The
     /// coordinator must stop + finalise the session and surface the result (there is nothing left to
-    /// record). Yielded immediately after the `.sourceRevoked` for the final pipeline.
+    /// record). Yielded immediately after the `.sourceRevoked` / `.writerFailed` for the final
+    /// pipeline.
     case allVideoSourcesLost
 }
 
@@ -621,6 +629,9 @@ extension RecordingRevocation {
     nonisolated static func == (lhs: RecordingRevocation, rhs: RecordingRevocation) -> Bool {
         switch (lhs, rhs) {
         case let (.sourceRevoked(lhsKind), .sourceRevoked(rhsKind)):
+            lhsKind == rhsKind
+
+        case let (.writerFailed(lhsKind), .writerFailed(rhsKind)):
             lhsKind == rhsKind
 
         case (.allVideoSourcesLost, .allVideoSourcesLost):

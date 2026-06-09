@@ -1497,6 +1497,177 @@ struct RecordingSessionLiveTests {
     }
 }
 
+// MARK: - Single writer fault → live UI seam (#197)
+
+@Suite("RecordingSession — single writer fault live-UI seam (#197)")
+struct RecordingSessionSingleWriterFaultTests {
+    // MARK: .writerFailed emitted on revocation stream
+
+    @Test("screen writer fault → yields .writerFailed(.screen) on sourceRevocationStream")
+    func screenWriterFault_yieldsWriterFailedScreen() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        // Subscribe before start so no event is missed.
+        let received: Task<RecordingRevocation?, Never> = Task {
+            for await revocation in session.sourceRevocationStream {
+                return revocation
+            }
+            return nil
+        }
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.bothWritersCreated }
+
+        // Fault only the screen writer — the camera writer is still live.
+        writers.screenWriter.simulateFault()
+
+        let revocation = await received.value
+        #expect(revocation == .writerFailed(.screen), "screen writer fault must yield .writerFailed(.screen)")
+
+        _ = await session.stop()
+    }
+
+    @Test("camera writer fault → yields .writerFailed(.camera) on sourceRevocationStream")
+    func cameraWriterFault_yieldsWriterFailedCamera() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        let received: Task<RecordingRevocation?, Never> = Task {
+            for await revocation in session.sourceRevocationStream {
+                return revocation
+            }
+            return nil
+        }
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.bothWritersCreated }
+
+        writers.cameraWriter.simulateFault()
+
+        let revocation = await received.value
+        #expect(revocation == .writerFailed(.camera), "camera writer fault must yield .writerFailed(.camera)")
+
+        _ = await session.stop()
+    }
+
+    // MARK: Last pipeline gone → .allVideoSourcesLost follows .writerFailed
+
+    // When screen writer faults (partial — camera still live), `handleWriterFault` sets
+    // screenPipeline = nil. If the camera source then disconnects, the subsequent
+    // notifyRevocation(.sourceRevoked(.camera)) sees both pipelines nil and emits
+    // .allVideoSourcesLost. This test exercises that combined path.
+
+    @Test("screen writer fault then camera disconnect → .writerFailed(.screen) then .allVideoSourcesLost")
+    func screenWriterFaultThenCameraDisconnect_yieldsAllVideoSourcesLost() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        let allRevocations: Task<[RecordingRevocation], Never> = Task {
+            var collected: [RecordingRevocation] = []
+            for await revocation in session.sourceRevocationStream {
+                collected.append(revocation)
+            }
+            return collected
+        }
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.bothWritersCreated }
+
+        // Step 1: fault the screen writer — partial fault, camera still live.
+        writers.screenWriter.simulateFault()
+        _ = await eventually { writers.screenWriter.finishCalled }
+
+        // Step 2: camera source disconnects — this is now the last pipeline.
+        sources.cameraSource.emitEvent(.cameraDisconnected)
+        _ = await eventually { writers.cameraWriter.finishCalled }
+
+        _ = await session.stop()
+
+        let revocations = await allRevocations.value
+        #expect(revocations.contains(.writerFailed(.screen)), "must contain .writerFailed(.screen)")
+        #expect(
+            revocations.contains(.allVideoSourcesLost),
+            ".allVideoSourcesLost must follow when the last remaining pipeline also ends"
+        )
+        #expect(revocations.last == .allVideoSourcesLost, ".allVideoSourcesLost must be the last event")
+    }
+
+    // MARK: Faulted pipeline's file result is .failed
+
+    @Test("screen writer fault → screen FinishResult is .failed in RecordingResult")
+    func screenWriterFault_screenFinishResultIsFailed() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.bothWritersCreated }
+
+        // Flip the screen writer's result to .failed before simulating the fault so that
+        // finalizePipeline returns .failed (the fault observer calls finish() after markFinished).
+        writers.screenWriter.finishResult = .failed(
+            url: URL(fileURLWithPath: "/tmp/onset-session-fake-screen.mp4"),
+            error: SessionTestError.failed(-1)
+        )
+        writers.screenWriter.simulateFault()
+
+        // Wait for the fault to be processed (screen pipeline stopped + finalised).
+        _ = await eventually { writers.screenWriter.finishCalled }
+
+        // Stop the session and inspect the result.
+        let result = await session.stop()
+        // The faulted screen file is surfaced as a write failure.
+        #expect(result.hasWriteFailure, "RecordingResult.hasWriteFailure must be true after a writer fault")
+        #expect(result.screen?.failureError != nil, "screen FinishResult must carry the write error")
+        // Camera writer completed successfully — no failure on the camera side.
+        #expect(result.camera?.failureError == nil, "camera FinishResult must not carry an error")
+    }
+
+    // MARK: No deadlock — test completes
+
+    @Test("single writer fault does not deadlock — test completes within timeout")
+    func singleWriterFault_noDeadlock() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.bothWritersCreated }
+
+        writers.screenWriter.simulateFault()
+
+        // If there were a deadlock, eventually would time out and this test would fail.
+        let faultProcessed = await eventually { writers.screenWriter.finishCalled }
+        #expect(faultProcessed, "screen pipeline must be finalised after its writer faults (no deadlock)")
+
+        _ = await session.stop()
+    }
+}
+
 // MARK: - Fail-fast on writer fault (AC-13 / #105)
 
 @Suite("RecordingSession — fail-fast on writer fault")

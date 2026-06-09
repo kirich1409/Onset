@@ -65,6 +65,13 @@ actor DualFileOutputStage {
     /// to call `RecordingSession.stop()`, which is idempotent (memoised via `stopTask`).
     private let onAllWritersFaulted: @Sendable () async -> Void
 
+    /// Called when ONE writer faults while the other pipeline is still live (#197 live UI seam).
+    ///
+    /// The callback is expected to stop and finalise the faulted pipeline's source + encoder, then
+    /// signal the `RecordingCoordinator` so the recording window immediately shows the source as
+    /// stopped. The surviving pipeline is NOT touched — it continues recording.
+    private let onWriterFaulted: @Sendable (RecordingPipelineKind) async -> Void
+
     /// Observer tasks started per writer to watch for faults. Cancelled in `finishAll()` and
     /// `finalizePipeline(_:)` once the writer is no longer live — prevents a late delivery on a
     /// gracefully stopped writer from firing the callback erroneously.
@@ -137,13 +144,16 @@ actor DualFileOutputStage {
     ///   - onWriterCreated: Registers a new writer's `drops` channel with `DropMonitor`.
     ///   - onAllWritersFaulted: Called when every live writer has faulted — expected to stop the
     ///     session immediately.
+    ///   - onWriterFaulted: Called when ONE writer faults while the other pipeline is still live —
+    ///     expected to stop + finalise the faulted pipeline and signal the coordinator (#197).
     init(
         sessionT0: CMTime,
         expectedPipelines: Set<RecordingPipelineKind>,
         includeAudio: Bool,
         writerFactory: any WriterFactory,
         onWriterCreated: @escaping @Sendable (any WriterControlling) async -> Void,
-        onAllWritersFaulted: @escaping @Sendable () async -> Void
+        onAllWritersFaulted: @escaping @Sendable () async -> Void,
+        onWriterFaulted: @escaping @Sendable (RecordingPipelineKind) async -> Void = { _ in }
     ) {
         self.sessionT0 = sessionT0
         self.expectedKinds = expectedPipelines
@@ -151,6 +161,7 @@ actor DualFileOutputStage {
         self.writerFactory = writerFactory
         self.onWriterCreated = onWriterCreated
         self.onAllWritersFaulted = onAllWritersFaulted
+        self.onWriterFaulted = onWriterFaulted
     }
 
     // MARK: - Video routing
@@ -233,12 +244,21 @@ actor DualFileOutputStage {
         return pipelineWriter
     }
 
-    /// Records that `kind`'s writer has faulted and calls `onAllWritersFaulted` when every
-    /// live (non-early-finalised) writer is now in the faulted set.
+    /// Records that `kind`'s writer has faulted and fires the appropriate callback.
+    ///
+    /// - When ALL live writers have faulted: calls `onAllWritersFaulted` (existing #105 path).
+    /// - When ONE writer faults and the other is still live: calls `onWriterFaulted(kind)` so the
+    ///   faulted pipeline is stopped and the coordinator gets a live UI update (#197).
     ///
     /// Called exclusively from the per-writer fault-observer `Task` — runs on this actor.
     /// Writers not yet created (lazy — no video frame yet) are not considered live and don't
     /// block the callback.
+    ///
+    /// **Re-entrancy:** `onWriterFaulted` awaits back into `RecordingSession`, which calls
+    /// `stage.finalizePipeline(kind)`. That re-enters this actor only after the current `await`
+    /// suspends, so there is no deadlock. `finalizePipeline` cancels
+    /// `faultObserverTasks[kind]` — harmless because the observer task has already passed its
+    /// `break` and is about to return.
     private func recordFault(for kind: RecordingPipelineKind) async {
         self.faultedWriterKinds.insert(kind)
 
@@ -252,8 +272,9 @@ actor DualFileOutputStage {
             await self.onAllWritersFaulted()
         } else {
             self.logger.error(
-                "\(String(describing: kind), privacy: .public) writer faulted; other pipeline still live"
+                "\(String(describing: kind), privacy: .public) writer faulted; other pipeline still live (#197)"
             )
+            await self.onWriterFaulted(kind)
         }
     }
 
