@@ -257,7 +257,7 @@ struct MainView: View {
         } label: {
             self.recordButtonLabel
                 .frame(maxWidth: .infinity)
-                .frame(height: Metrics.recordButtonHeight)
+                .frame(minHeight: Metrics.recordButtonHeight)
         }
         .buttonStyle(.borderedProminent)
         .tint(.red)

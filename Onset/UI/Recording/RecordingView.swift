@@ -276,7 +276,7 @@ struct RecordingContentView: View {
                         .font(.system(size: self.stopButtonLabelFontSize, weight: .semibold))
                 }
                 .frame(maxWidth: .infinity)
-                .frame(height: Metrics.stopButtonHeight)
+                .frame(minHeight: Metrics.stopButtonHeight)
                 .foregroundStyle(Color.white)
                 .background(Color("StopButtonBackground"))
                 .clipShape(RoundedRectangle(cornerRadius: Metrics.stopButtonCornerRadius))
