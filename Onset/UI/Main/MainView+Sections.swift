@@ -60,23 +60,35 @@ extension MainView {
     @ViewBuilder
     private var cameraPreview: some View {
         if self.model.isCameraActive {
-            CameraPreviewRepresentable(sessionHandle: self.model.previewHandle)
-                .id(self.model.previewGeneration)
-                .aspectRatio(Metrics.previewAspectRatio, contentMode: .fit)
-                // Cap on maxWidth (concrete in ScrollView) so the card is ≤140pt tall.
-                // maxHeight is also set for documentation intent; maxWidth is the reliable
-                // binding dimension since ScrollView propagates width, not height.
-                .frame(
-                    maxWidth: Metrics.previewMaxHeight * Metrics.previewAspectRatio,
-                    maxHeight: Metrics.previewMaxHeight
-                )
-                .clipShape(RoundedRectangle(cornerRadius: Metrics.previewCornerRadius))
-                // Center the narrower card within the section's full width.
-                .frame(maxWidth: .infinity)
-                .task(id: self.model.activeCamera?.uniqueID) {
-                    await self.model.managePreview(for: self.model.activeCamera?.uniqueID)
+            // The preview container — always present while the camera is active,
+            // so the layout slot is stable. The inner content switches between a dark
+            // placeholder (session not yet running) and the live preview layer (session
+            // ready). Gating CameraPreviewRepresentable on previewHandle != nil ensures
+            // makeNSView is always called with a real, running AVCaptureSession —
+            // AVCaptureVideoPreviewLayer only starts delivering frames when its session
+            // is running at the moment the layer is first connected.
+            Group {
+                if let handle = self.model.previewHandle {
+                    CameraPreviewRepresentable(sessionHandle: handle)
+                } else {
+                    Color.black
                 }
-                .accessibilityLabel("Предварительный просмотр камеры")
+            }
+            .aspectRatio(Metrics.previewAspectRatio, contentMode: .fit)
+            // Cap on maxWidth (concrete in ScrollView) so the card is ≤140pt tall.
+            // maxHeight is also set for documentation intent; maxWidth is the reliable
+            // binding dimension since ScrollView propagates width, not height.
+            .frame(
+                maxWidth: Metrics.previewMaxHeight * Metrics.previewAspectRatio,
+                maxHeight: Metrics.previewMaxHeight
+            )
+            .clipShape(RoundedRectangle(cornerRadius: Metrics.previewCornerRadius))
+            // Center the narrower card within the section's full width.
+            .frame(maxWidth: .infinity)
+            .task(id: self.model.activeCamera?.uniqueID) {
+                await self.model.managePreview(for: self.model.activeCamera?.uniqueID)
+            }
+            .accessibilityLabel("Предварительный просмотр камеры")
         }
     }
 

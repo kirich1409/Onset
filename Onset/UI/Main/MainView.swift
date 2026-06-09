@@ -315,8 +315,11 @@ struct SectionCard<Content: View>: View {
 
 /// `NSViewRepresentable` wrapper for `CameraPreviewView`.
 ///
-/// `CameraPreviewView.init` wires the `AVCaptureVideoPreviewLayer`; `updateNSView` is a no-op
-/// by design. Force recreation by toggling `.id(model.previewGeneration)` on the call site.
+/// `makeNSView` constructs the view with the initial session handle. `updateNSView` calls
+/// `CameraPreviewView.update(sessionHandle:)` to swap the live session on the existing
+/// `AVCaptureVideoPreviewLayer` — no `.id()`-driven recreation is needed or desired.
+/// Using `.id()` on the call site would restart the sibling `.task` on every generation
+/// increment, causing an infinite start/stop loop that always delivers `nil` to the layer.
 struct CameraPreviewRepresentable: NSViewRepresentable {
     let sessionHandle: SessionHandle?
 
@@ -325,8 +328,7 @@ struct CameraPreviewRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: CameraPreviewView, context: Context) {
-        // No-op: CameraPreviewView wires the layer in init.
-        // Caller must use .id() to force recreation when sessionHandle changes.
+        nsView.update(sessionHandle: self.sessionHandle)
     }
 }
 
