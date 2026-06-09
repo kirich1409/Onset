@@ -329,24 +329,8 @@ struct RecordingCoordinatorTests {
 
     @Test("stop computes the degraded warning from the result")
     func stop_computesDegradedWarning() async throws {
-        // sessionEverDegraded: true makes the warning fire — not the raw backpressureDrops count.
-        let fake = FakeRecordingControlling(
-            result: CoordinatorFixtures.result(backpressureDrops: 128, sessionEverDegraded: true)
-        )
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
-
-        try await coordinator.start(CoordinatorFixtures.request())
-        await coordinator.stop()
-
-        #expect(coordinator.lastDegradedWarning == true, "degradedWarning must come from sessionEverDegraded latch")
-        #expect(coordinator.lastDroppedFrames == 128, "lastDroppedFrames must be the frozen snapshot from stop()")
-        #expect(coordinator.drops.encoderBackpressureDrops == 128, "final drops come from the result")
-    }
-
-    @Test("stop produces no degraded warning when sessionEverDegraded is false (even with backpressure drops)")
-    func stop_noDegradedWarning_whenNotEverDegraded() async throws {
-        // Key regression guard: high backpressureDrops but sessionEverDegraded == false means
-        // the drops were too scattered to trip the window. The post-stop alert must NOT fire.
+        // 128 backpressure drops is well above the default postStopDropWarningThreshold (5) —
+        // lastDegradedWarning must be true because lastDroppedFrames >= threshold.
         let fake = FakeRecordingControlling(
             result: CoordinatorFixtures.result(backpressureDrops: 128, sessionEverDegraded: false)
         )
@@ -355,8 +339,25 @@ struct RecordingCoordinatorTests {
         try await coordinator.start(CoordinatorFixtures.request())
         await coordinator.stop()
 
-        #expect(coordinator.lastDegradedWarning == false, "no warning when session was never degraded")
-        #expect(coordinator.lastDroppedFrames == 128, "lastDroppedFrames still tracked for reference")
+        #expect(coordinator.lastDegradedWarning == true, "128 drops >= threshold → warning fires")
+        #expect(coordinator.lastDroppedFrames == 128, "lastDroppedFrames must be the frozen snapshot from stop()")
+        #expect(coordinator.drops.encoderBackpressureDrops == 128, "final drops come from the result")
+    }
+
+    @Test("stop produces no degraded warning when backpressure drops are below postStopDropWarningThreshold")
+    func stop_noDegradedWarning_whenDropsBelowThreshold() async throws {
+        // AC-9 regression guard (#132): a single isolated backpressure drop (count=1) must NOT fire
+        // the post-stop alert — the threshold (default 5) must be reached cumulatively.
+        let fake = FakeRecordingControlling(
+            result: CoordinatorFixtures.result(backpressureDrops: 1, sessionEverDegraded: false)
+        )
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        await coordinator.stop()
+
+        #expect(coordinator.lastDegradedWarning == false, "single drop is below threshold — no warning")
+        #expect(coordinator.lastDroppedFrames == 1, "lastDroppedFrames still tracked for reference")
     }
 
     @Test("stop is idempotent across concurrent paths — teardown runs once")
@@ -427,7 +428,7 @@ struct RecordingCoordinatorTests {
 
     @Test("AC-9 degraded-warning lifecycle: set on degraded stop, cleared by acknowledge, absent after clean session")
     func degradedWarning_lifecycle() async throws {
-        // Session 1: result carries sessionEverDegraded=true.
+        // Session 1: result carries 64 backpressure drops — well above the default threshold (5).
         let fake1 = FakeRecordingControlling(
             result: CoordinatorFixtures.result(backpressureDrops: 64, sessionEverDegraded: true)
         )
