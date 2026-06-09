@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Distribution method: Developer ID = direct (non-App Store) distribution -->
+  <key>method</key>
+  <string>developer-id</string>
+
+  <!--
+    TODO(release): Replace XXXXXXXXXX with your 10-character Apple Developer Team ID.
+    Find it at: https://developer.apple.com/account → Membership → Team ID.
+    Also set the APPLE_TEAM_ID GitHub secret to the same value.
+  -->
+  <key>teamID</key>
+  <string>XXXXXXXXXX</string>
+
+  <!--
+    signingStyle: manual — CI uses an explicitly imported certificate; "automatic"
+    requires an interactive Xcode/Apple account session which is unavailable on runners.
+  -->
+  <key>signingStyle</key>
+  <string>manual</string>
+
+  <!-- Must match the exact certificate Common Name stored in the runner keychain. -->
+  <key>signingCertificate</key>
+  <string>Developer ID Application</string>
+
+  <!-- Strip Swift intermediate symbols — reduces binary size, safe for distribution. -->
+  <key>stripSwiftSymbols</key>
+  <true/>
+
+  <!--
+    Hardened Runtime is enforced automatically by xcodebuild for developer-id
+    exports when the archive was built with ENABLE_HARDENED_RUNTIME = YES (the
+    project default). No separate plist key is needed or supported here.
+    See: Technical Note TN3147 — "Resolving notarization issues".
+  -->
+</dict>
+</plist>
