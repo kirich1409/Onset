@@ -26,9 +26,12 @@ nonisolated let mainViewModelLogger = Logger(
 /// real camera is selected. Camera is NOT a factor in `canRecord` — screen is always required.
 ///
 /// ### Preview lifecycle
-/// A generation counter (`previewGeneration`) drives `.id()` on `CameraPreviewRepresentable`
-/// so SwiftUI recreates the NSView — and thus the `AVCaptureVideoPreviewLayer` — whenever the
-/// camera changes. The `CameraSource` actor for preview is started/stopped inside
+/// `CameraPreviewRepresentable` is kept in the view tree whenever the camera is active;
+/// `updateNSView` calls `CameraPreviewView.update(sessionHandle:)` to attach the running session
+/// as soon as `previewHandle` becomes non-nil. `previewGeneration` is a counter incremented on
+/// each session start/stop cycle; it is not used as a SwiftUI `.id()` modifier (doing so would
+/// destroy/recreate the NSView and restart the sibling `.task`, causing an infinite loop).
+/// The `CameraSource` actor for preview is started/stopped inside
 /// `.task(id: activeCamera?.uniqueID)`. Old source MUST be stopped before a new one starts to
 /// avoid device contention.
 ///
