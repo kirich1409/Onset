@@ -104,9 +104,9 @@ jobs:
           DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
         run: |
           KEYCHAIN_PASSWORD=$(uuidgen)
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
           echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> "$GITHUB_ENV"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME.keychain-db"
-          trap "security delete-keychain '$KEYCHAIN_NAME.keychain-db' 2>/dev/null || true" EXIT
           security set-keychain-settings -lut 21600 "$KEYCHAIN_NAME.keychain-db"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME.keychain-db"
           # Prepend to keychain search list so code signing finds the identity.
