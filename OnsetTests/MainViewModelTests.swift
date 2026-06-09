@@ -400,3 +400,96 @@ struct MainViewModelBuildChecklistTests {
         #expect(checklist.screenDescription == "2560×1600")
     }
 }
+
+// MARK: - MainViewModel — stale camera id healing (#139)
+
+/// Tests for hot-unplug stale-id healing in `selectFirstCameraIfNeeded` (#139).
+///
+/// Auto-selected cameras are not persisted, so on reload the resolver returns
+/// `.noSavedSelection` → `selectFirstCameraIfNeeded()`. Before the fix it only
+/// acted on `nil`; after the fix it also heals a non-nil id that no longer
+/// matches any device in `cameras`.
+@Suite("MainViewModel — stale camera id healing")
+@MainActor
+struct MainViewModelStaleCameraIDTests {
+    private static func makeCamera(id: String) -> CameraDevice {
+        CameraDevice(uniqueID: id, formats: [
+            CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30, maxFps: 60),
+        ])
+    }
+
+    /// Simulates hot-unplug by setting a stale id directly and calling
+    /// `selectFirstCameraIfNeeded` — the cheapest path that tests the healed invariant
+    /// without needing a two-phase `loadDevices` with a swapped closure.
+    @Test("Stale selectedCameraID not in cameras list → healed to first available camera")
+    func staleID_healedToFirstCamera() throws {
+        let store = try #require(InMemoryUserDefaults(suiteName: nil))
+        let perms = FakePermissionsService()
+        let coordinator = RecordingCoordinator()
+        let cam = Self.makeCamera(id: "cam-new")
+        let sut = MainViewModel(
+            permissions: perms,
+            coordinator: coordinator,
+            discoverDisplays: { _ in [] },
+            discoverCameras: { _ in [cam] },
+            discoverMicrophones: { _ in [] },
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: store) }
+        )
+
+        // Directly simulate the post-unplug state: cameras refreshed, id still stale.
+        sut.cameras = [cam]
+        sut.selectedCameraID = "cam-removed" // stale — not in cameras list
+
+        sut.selectFirstCameraIfNeeded()
+
+        #expect(sut.selectedCameraID == "cam-new")
+    }
+
+    @Test("Valid selectedCameraID in cameras list → selectFirstCameraIfNeeded leaves it unchanged")
+    func validID_notReplaced() throws {
+        let store = try #require(InMemoryUserDefaults(suiteName: nil))
+        let perms = FakePermissionsService()
+        let coordinator = RecordingCoordinator()
+        let cam1 = Self.makeCamera(id: "cam-1")
+        let cam2 = Self.makeCamera(id: "cam-2")
+        let sut = MainViewModel(
+            permissions: perms,
+            coordinator: coordinator,
+            discoverDisplays: { _ in [] },
+            discoverCameras: { _ in [cam1, cam2] },
+            discoverMicrophones: { _ in [] },
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: store) }
+        )
+
+        sut.cameras = [cam1, cam2]
+        sut.selectedCameraID = "cam-2" // valid — present in cameras
+
+        sut.selectFirstCameraIfNeeded()
+
+        // Must NOT overwrite to cam-1 (first in list).
+        #expect(sut.selectedCameraID == "cam-2")
+    }
+
+    @Test("Nil selectedCameraID → selectFirstCameraIfNeeded selects first camera")
+    func nilID_selectsFirst() throws {
+        let store = try #require(InMemoryUserDefaults(suiteName: nil))
+        let perms = FakePermissionsService()
+        let coordinator = RecordingCoordinator()
+        let cam = Self.makeCamera(id: "cam-only")
+        let sut = MainViewModel(
+            permissions: perms,
+            coordinator: coordinator,
+            discoverDisplays: { _ in [] },
+            discoverCameras: { _ in [cam] },
+            discoverMicrophones: { _ in [] },
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: store) }
+        )
+
+        sut.cameras = [cam]
+        sut.selectedCameraID = nil
+
+        sut.selectFirstCameraIfNeeded()
+
+        #expect(sut.selectedCameraID == "cam-only")
+    }
+}

@@ -323,7 +323,8 @@ final class MainViewModel {
 
     // MARK: - Private helpers
 
-    /// Selects the first available camera when none is currently selected.
+    /// Selects the first available camera when none is currently selected, or when the
+    /// current selection no longer matches any device in `cameras` (stale id after hot-unplug).
     ///
     /// Shared by the cold-start device load (`loadCamerasAndMicrophones`) and the camera
     /// toggle re-enable path (`cameraEnabled.didSet`) so the default-selection rule lives in
@@ -336,7 +337,11 @@ final class MainViewModel {
     /// `selectedCameraID.didSet` skips the save. This avoids a false "disconnected" notice
     /// if the default camera disappears before the user ever explicitly chose one.
     func selectFirstCameraIfNeeded() {
-        if self.selectedCameraID == nil, let first = self.cameras.first {
+        // Heal a stale id (non-nil but device no longer present) as well as the nil case.
+        if let id = self.selectedCameraID, self.cameras.contains(where: { $0.uniqueID == id }) {
+            return
+        }
+        if let first = self.cameras.first {
             self.selectedCameraID = first.uniqueID
         }
     }
