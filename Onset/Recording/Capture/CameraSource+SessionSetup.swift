@@ -34,6 +34,17 @@ extension CameraSource {
             throw RecordingError.captureSetupFailed(err)
         }
 
+        // DIAGNOSTIC #113 (post-startRunning): log the live fps state so L5 can confirm
+        // auto-exposure has not re-extended the frame duration after the session starts.
+        // Re-acquire the device by uniqueID — AVCaptureDevice references are not Sendable.
+        if let liveDevice = AVCaptureDevice(uniqueID: self.cameraDevice.uniqueID) {
+            let dims = CMVideoFormatDescriptionGetDimensions(liveDevice.activeFormat.formatDescription)
+            cameraSourceLogger.notice(
+                // swiftlint:disable:next line_length
+                "Post-startRunning #113: \(dims.width)×\(dims.height) autoFREnabled=\(liveDevice.isAutoVideoFrameRateEnabled) dur=\(liveDevice.activeVideoMaxFrameDuration.value)/\(liveDevice.activeVideoMaxFrameDuration.timescale)"
+            )
+        }
+
         // Close the stop()-during-.starting race: if stop() ran while buildAndStartSession
         // was suspended (before .running was set), captureState is now .stopped. Continuing
         // would overwrite it with .running and create a zombie session whose streams are
@@ -52,8 +63,8 @@ extension CameraSource {
         )
     }
 
-    /// Performs `beginConfiguration` / addInputs / `lockForConfiguration` / setActiveFormat
-    /// / `commitConfiguration`. Throws on any failure.
+    /// Performs `beginConfiguration` / addInputs / setActiveFormat + fps lock / `commitConfiguration`.
+    /// Throws on any failure.
     func configureSession(_ session: AVCaptureSession) throws {
         session.beginConfiguration()
         try self.addCameraInput(to: session)
@@ -74,13 +85,10 @@ extension CameraSource {
             throw RecordingError.captureSetupFailed(CameraSourceError.cannotAddInput)
         }
         session.addInput(input)
-        // macOS AVFoundation contract: activeFormat must be set AFTER the input is added to the
-        // session (inside a beginConfiguration/commitConfiguration block). Setting it before
-        // addInput has no lasting effect — the session reconciles its preset (.high by default,
-        // which maps to 1080p on the Brio) at commitConfiguration time and silently overwrites
-        // any format set earlier. See AVCaptureDevice.h §activeFormat discussion and the
-        // beginConfiguration/commitConfiguration example.
-        // Use self.targetFps (not config.minCameraFps) to honour the user's CameraMode selection.
+    }
+
+    func makeCameraInput(_ device: AVCaptureDevice) throws -> AVCaptureDeviceInput {
+        let input = try AVCaptureDeviceInput(device: device)
         let targetFps = Double(self.targetFps)
         guard let liveFormat = self.findMatchingFormat(device: device) else {
             cameraSourceLogger.error(
@@ -89,20 +97,18 @@ extension CameraSource {
             throw RecordingError.noSuitableCameraFormat
         }
         try self.activateFormat(liveFormat, fps: targetFps, on: device)
-    }
-
-    func makeCameraInput(_ device: AVCaptureDevice) throws -> AVCaptureDeviceInput {
-        try AVCaptureDeviceInput(device: device)
+        return input
     }
 
     /// Finds the live `AVCaptureDevice.Format` that matches the pre-selected `CameraFormat` snapshot.
     ///
     /// The snapshot holds dims + fps only; re-querying by `uniqueID` is required because
     /// the `AVCaptureDevice.Format` reference is not `Sendable` and must not be stored.
+    /// The fps filter uses `self.targetFps` (the resolved 60 or 30) so that a 1080p60 target
+    /// selects the 60fps-capable format rather than a 30fps-capable one with the same resolution.
     func findMatchingFormat(device: AVCaptureDevice) -> AVCaptureDevice.Format? {
         let targetW = self.format.pixelWidth
         let targetH = self.format.pixelHeight
-        // Use self.targetFps (not config.minCameraFps) to honour the user's CameraMode selection.
         let targetFps = Double(self.targetFps)
         return device.formats.first { fmt in
             let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
@@ -111,6 +117,18 @@ extension CameraSource {
         }
     }
 
+    /// Sets `device.activeFormat` to `liveFormat` and locks the fps, with DIAGNOSTIC #113 logging.
+    ///
+    /// fps lock sequence:
+    /// 1. BEFORE: log `isAutoVideoFrameRateSupported` and `isAutoVideoFrameRateEnabled`.
+    /// 2. If `isAutoVideoFrameRateSupported`, disable `isAutoVideoFrameRateEnabled`.
+    ///    When enabled, setting `activeVideoMinFrameDuration` / `activeVideoMaxFrameDuration`
+    ///    throws `NSInvalidArgumentException` (ObjC exception, not catchable by Swift).
+    /// 3. AFTER disable: log that enabled is now false.
+    /// 4. Reset frame durations to `.invalid` to clear any AE-extended value.
+    /// 5. Set `activeVideoMin/MaxFrameDuration` to the exact CMTime from
+    ///    `videoSupportedFrameRateRanges` (synthetic rationals like 1/60 are rejected).
+    /// 6. AFTER lock: log `activeVideoMaxFrameDuration`.
     func activateFormat(
         _ liveFormat: AVCaptureDevice.Format,
         fps: Double,
@@ -124,28 +142,68 @@ extension CameraSource {
         }
         device.activeFormat = liveFormat
 
-        // Use the frame duration from the matching AVFrameRateRange rather than
-        // constructing a CMTime from the target fps. AVFoundation rejects a duration
-        // (e.g. 1/30) that does not exactly equal the rational stored in the range
-        // (e.g. 1000000/30000030 on Tundra / Continuity cameras), throwing
-        // NSInvalidArgumentException from setActiveVideoMinFrameDuration.
-        // Picking the range whose maxFrameRate best satisfies minFps gives us the
-        // exact CMTime representation the device expects.
-        let qualifiedRanges = liveFormat.videoSupportedFrameRateRanges.filter { $0.maxFrameRate >= fps }
-        let bestRange = qualifiedRanges.min { abs($0.maxFrameRate - fps) < abs($1.maxFrameRate - fps) }
-        if let bestRange {
-            device.activeVideoMinFrameDuration = bestRange.minFrameDuration
-            device.activeVideoMaxFrameDuration = bestRange.minFrameDuration
-        } else {
-            // No range satisfies the fps target — this should never happen because
-            // findMatchingFormat already filtered by maxFrameRate ≥ targetFps. Fall
-            // back to the constructed duration to preserve the pre-existing behaviour
-            // rather than silently skipping the configuration step.
-            let frameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
-            device.activeVideoMinFrameDuration = frameDuration
-            device.activeVideoMaxFrameDuration = frameDuration
+        // DIAGNOSTIC #113 (before autoFR disable).
+        let autoFRSupported = liveFormat.isAutoVideoFrameRateSupported
+        let autoFREnabled = device.isAutoVideoFrameRateEnabled
+        cameraSourceLogger.notice(
+            // swiftlint:disable:next line_length
+            "DIAGNOSTIC #113 pre-lock: autoFRSupported=\(autoFRSupported) autoFREnabled=\(autoFREnabled)"
+        )
+
+        if autoFRSupported {
+            // Disable auto-frame-rate BEFORE touching min/maxFrameDuration.
+            // When isAutoVideoFrameRateEnabled is true, those setters throw
+            // NSInvalidArgumentException from ObjC — Swift cannot catch ObjC exceptions.
+            device.isAutoVideoFrameRateEnabled = false
+            cameraSourceLogger.notice(
+                "DIAGNOSTIC #113 post-autoFR-disable: autoFREnabled=\(device.isAutoVideoFrameRateEnabled)"
+            )
         }
+
+        // Reset to .invalid first to clear any AE-extended value.
+        device.activeVideoMinFrameDuration = .invalid
+        device.activeVideoMaxFrameDuration = .invalid
+
+        // Derive the exact CMTime from the matching AVFrameRateRange — AVFoundation rejects
+        // a duration (e.g. 1/60) that does not exactly equal the rational stored in the range
+        // (e.g. 1000000/60000060 on some cameras), throwing NSInvalidArgumentException.
+        let minFrameDuration = self.deriveFpsLockDuration(activeFormat: liveFormat, targetFps: fps)
+        device.activeVideoMinFrameDuration = minFrameDuration
+        device.activeVideoMaxFrameDuration = minFrameDuration
+
+        // DIAGNOSTIC #113 (after lock).
+        cameraSourceLogger.notice(
+            // swiftlint:disable:next line_length
+            "DIAGNOSTIC #113 post-lock: dur=\(device.activeVideoMaxFrameDuration.value)/\(device.activeVideoMaxFrameDuration.timescale) dims=\(CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription).width)×\(CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription).height)"
+        )
+
         device.unlockForConfiguration()
+    }
+
+    /// Derives the exact `CMTime` for the target fps from the active format's frame-rate ranges.
+    /// Clamps to the achievable max when `targetFps` exceeds the format's `maxFrameRate`.
+    func deriveFpsLockDuration(
+        activeFormat: AVCaptureDevice.Format,
+        targetFps: Double
+    )
+    -> CMTime {
+        let ranges = activeFormat.videoSupportedFrameRateRanges
+        // Among ranges whose maxFrameRate ≥ targetFps, pick the closest match.
+        let qualifiedRanges = ranges.filter { $0.maxFrameRate >= targetFps }
+        if let bestRange = qualifiedRanges.min(by: {
+            abs($0.maxFrameRate - targetFps) < abs($1.maxFrameRate - targetFps)
+        }) {
+            return bestRange.minFrameDuration
+        }
+        // targetFps exceeds the format's maximum — clamp to the highest available rate.
+        if let highestRange = ranges.max(by: { $0.maxFrameRate < $1.maxFrameRate }) {
+            cameraSourceLogger.warning(
+                "targetFps \(targetFps) exceeds format max — clamping to \(highestRange.maxFrameRate)"
+            )
+            return highestRange.minFrameDuration
+        }
+        // No ranges at all — construct a fallback duration (should never happen for a valid format).
+        return CMTime(value: 1, timescale: CMTimeScale(targetFps))
     }
 
     func addMicInput(mic: MicrophoneDevice, to session: AVCaptureSession) throws {

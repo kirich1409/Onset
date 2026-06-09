@@ -73,8 +73,8 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
     /// The explicit target frame rate for this session's camera capture.
     ///
     /// Derived from the user's `CameraMode` selection (or `config.minCameraFps` when no
-    /// mode override applies). Threaded into `findMatchingFormat` and `activateFormat`
-    /// so the AVFoundation format-lock step honours the selected mode rather than always
+    /// mode override applies). Threaded into `activateFormat`
+    /// so the AVFoundation fps-lock step honours the selected mode rather than always
     /// falling back to the config's minimum.
     let targetFps: Int
     let framesContinuation: AsyncStream<VideoFrame>.Continuation

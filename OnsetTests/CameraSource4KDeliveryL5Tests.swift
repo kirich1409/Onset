@@ -25,7 +25,7 @@
 // Delivered dims are LOGGED, never asserted — the answer is unknown; that is the point.
 //
 // swiftlint:disable file_length
-// Rationale: two end-to-end AVCaptureSession setups (activeFormat + preset paths) cannot
+// Rationale: three end-to-end AVCaptureSession setups (activeFormat, preset, 1080p60 paths) cannot
 // be split without scattering the load-bearing session-lifecycle ordering.
 
 import AVFoundation
@@ -76,126 +76,14 @@ nonisolated private let diag4KLogger = Logger(
     category: "DIAG.113.4K"
 )
 
-// MARK: - Collector state
-
-/// Snapshot of frame-delivery statistics collected by `Diag4KFrameCollector`.
-private struct Diag4KFrameSnapshot {
-    /// Number of `CMSampleBuffer` callbacks received during the collection window.
-    let frameCount: Int
-    /// Width of the most recently delivered `CVPixelBuffer`, in pixels.
-    let lastWidth: Int32
-    /// Height of the most recently delivered `CVPixelBuffer`, in pixels.
-    let lastHeight: Int32
-    /// Four-character code of the most recently delivered pixel-buffer format (e.g. "420v").
-    let lastFourCC: String
-    /// Presentation timestamp of the first delivered sample, in seconds since host epoch.
-    let firstTimestamp: Double
-    /// Presentation timestamp of the last delivered sample, in seconds since host epoch.
-    let lastTimestamp: Double
-}
-
-// MARK: - Sample-buffer delegate / frame collector
-
-/// Thread-safe frame collector for the 4K delivery diagnostic.
-///
-/// `AVCaptureVideoDataOutput` delivers callbacks on a background `DispatchQueue` that is
-/// off the main actor. All mutable state is guarded by an `OSAllocatedUnfairLock` so both
-/// the callback and the async test body can access it without a data race under Swift 6
-/// strict concurrency (`complete` mode, default `MainActor` isolation).
-///
-/// Marked `@unchecked Sendable` because `NSObject` does not conform to `Sendable`.
-/// Thread-safety is guaranteed by the lock — all reads and writes go through `withLock`.
-private final class Diag4KFrameCollector: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
-    // MARK: Locked state
-
-    /// All mutable fields stored as a single struct to allow atomic snapshot reads.
-    private struct State {
-        /// Number of sample buffers received so far.
-        var frameCount = 0
-        /// Width of the CVPixelBuffer from the most recent callback.
-        var lastWidth: Int32 = 0
-        /// Height of the CVPixelBuffer from the most recent callback.
-        var lastHeight: Int32 = 0
-        /// FourCC string derived from the pixel-format OSType (e.g. "420v").
-        var lastFourCC = ""
-        /// Presentation timestamp (seconds) of the very first received buffer.
-        var firstTimestamp: Double = 0
-        /// Presentation timestamp (seconds) of the most recently received buffer.
-        var lastTimestamp: Double = 0
-    }
-
-    /// Lock-guarded mutable state — the project-canonical `OSAllocatedUnfairLock` pattern
-    /// (mirrors `FlagBox` in `DualFileOutputStageTests.swift` and inline usages in
-    /// `VTServiceRateBenchTests.swift`).
-    private let lock = OSAllocatedUnfairLock(initialState: State())
-
-    // MARK: Delegate
-
-    /// Receives each delivered sample buffer off the capture queue and records its metadata.
-    ///
-    /// `nonisolated` is required: under default `MainActor` isolation an `NSObject` method
-    /// would be MainActor-isolated by default, which violates the nonisolated protocol
-    /// requirement of `AVCaptureVideoDataOutputSampleBufferDelegate` (warnings-as-errors).
-    nonisolated func captureOutput(
-        _ output: AVCaptureOutput,
-        didOutput sampleBuffer: CMSampleBuffer,
-        from connection: AVCaptureConnection
-    ) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-
-        let width = CVPixelBufferGetWidth(pixelBuffer)
-        let height = CVPixelBufferGetHeight(pixelBuffer)
-        let formatType = CVPixelBufferGetPixelFormatType(pixelBuffer)
-        let fourCC = Self.fourCCString(from: formatType)
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds
-
-        self.lock.withLock { state in
-            if state.frameCount == 0 {
-                state.firstTimestamp = pts
-            }
-            state.frameCount += 1
-            state.lastWidth = Int32(width)
-            state.lastHeight = Int32(height)
-            state.lastFourCC = fourCC
-            state.lastTimestamp = pts
-        }
-    }
-
-    // MARK: Snapshot
-
-    /// Returns a point-in-time snapshot of all collected frame statistics.
-    var snapshot: Diag4KFrameSnapshot {
-        self.lock.withLock { state in
-            Diag4KFrameSnapshot(
-                frameCount: state.frameCount,
-                lastWidth: state.lastWidth,
-                lastHeight: state.lastHeight,
-                lastFourCC: state.lastFourCC,
-                firstTimestamp: state.firstTimestamp,
-                lastTimestamp: state.lastTimestamp
-            )
-        }
-    }
-
-    // MARK: FourCC helper
-
-    /// Converts a pixel-format `OSType` to a four-character string (e.g. `420v`).
-    ///
-    /// Uses bit-shifts on each byte — no unsafe pointer access, no force-unwrap.
-    /// Big-endian byte order matches the canonical FourCC representation.
-    private static func fourCCString(from tag: OSType) -> String {
-        let chars: [Character] = [
-            Character(UnicodeScalar(UInt8((tag >> 24) & 0xFF))), // swiftlint:disable:this no_magic_numbers
-            Character(UnicodeScalar(UInt8((tag >> 16) & 0xFF))), // swiftlint:disable:this no_magic_numbers
-            Character(UnicodeScalar(UInt8((tag >> 8) & 0xFF))), // swiftlint:disable:this no_magic_numbers
-            Character(UnicodeScalar(UInt8(tag & 0xFF))), // swiftlint:disable:this no_magic_numbers
-        ]
-        return String(chars)
-    }
-}
+// Shared collector types (Diag4KFrameSnapshot, DeltaBucket, Diag4KDeltaStats,
+// Diag4KFrameCollector) live in DiagFrameCollector.swift — internal to OnsetTests.
 
 // MARK: - 4K delivery probe suite
 
+// swiftlint:disable type_body_length
+// Rationale: three end-to-end AVCaptureSession setups (activeFormat, preset, 1080p60 paths) cannot
+// be collapsed without scattering the load-bearing session-lifecycle ordering.
 /// Empirically determines whether AVFoundation can deliver real 4K (3840×2160) frames
 /// from a Logitech MX Brio on macOS, settling issue #113.
 ///
@@ -247,6 +135,11 @@ struct CameraSource4KDeliveryL5Tests {
         let formatIndex = brio.formats.firstIndex(of: fourKFormat) ?? -1
         diag4KLogger.notice(
             "DIAGNOSTIC #113 [setActiveFormat] selected format index=\(formatIndex, privacy: .public)"
+        )
+        let selDims = CMVideoFormatDescriptionGetDimensions(fourKFormat.formatDescription)
+        let selW = selDims.width, selH = selDims.height
+        diag4KLogger.notice(
+            "DIAGNOSTIC #113 [setActiveFormat] selectedDims=\(selW, privacy: .public)x\(selH, privacy: .public)"
         )
 
         // Log preset gate signal early (cheap — no session needed).
@@ -307,15 +200,14 @@ struct CameraSource4KDeliveryL5Tests {
         let readBackDims = CMVideoFormatDescriptionGetDimensions(brio.activeFormat.formatDescription)
         let snap = collector.snapshot
 
-        // Compute actual fps (guard against division by zero and degenerate window).
-        let elapsed = snap.lastTimestamp - snap.firstTimestamp
-        let actualFps: Double = if snap.frameCount >= 2, elapsed > 0 {
-            Double(snap.frameCount - 1) / elapsed
-        } else {
-            0
-        }
+        // Delta stats and fps derived from PTS values (pure computation off the lock).
+        let deltaStats = Diag4KDeltaStats(from: snap)
 
-        // Log all four diagnostic signals.
+        // Wall-clock fps: frameCount / nominal collection window (warmup-inclusive).
+        // Contrasts with ptsFps (first→last PTS span, warmup-exclusive) to expose UVC latency.
+        let wallClockFps = Double(snap.frameCount) / 3.0
+
+        // Log all diagnostic signals.
         let delW = snap.lastWidth, delH = snap.lastHeight
         let readW = readBackDims.width, readH = readBackDims.height
         let frameN = snap.frameCount
@@ -323,12 +215,40 @@ struct CameraSource4KDeliveryL5Tests {
             "DIAGNOSTIC #113 [setActiveFormat] delivered=\(delW, privacy: .public)x\(delH, privacy: .public)"
         )
         diag4KLogger.notice(
-            "DIAGNOSTIC #113 [setActiveFormat] fps=\(actualFps, privacy: .public) n=\(frameN, privacy: .public)"
+            """
+            DIAGNOSTIC #113 [setActiveFormat] ptsFps=\(deltaStats.ptsFps, privacy: .public) \
+            wallClockFps=\(wallClockFps, privacy: .public) n=\(frameN, privacy: .public)
+            """
         )
         diag4KLogger.notice(
             "DIAGNOSTIC #113 [setActiveFormat] readBack=\(readW, privacy: .public)x\(readH, privacy: .public)"
         )
         diag4KLogger.notice("DIAGNOSTIC #113 [setActiveFormat] fourCC=\(snap.lastFourCC, privacy: .public)")
+        diag4KLogger.notice(
+            """
+            DIAGNOSTIC #113 [setActiveFormat] firstPTS=\(snap.firstTimestamp, privacy: .public) \
+            lastPTS=\(snap.lastTimestamp, privacy: .public) ptsCount=\(snap.ptsValues.count, privacy: .public)
+            """
+        )
+        diag4KLogger.notice(
+            """
+            DIAGNOSTIC #113 [setActiveFormat] deltaMs \
+            mean=\(deltaStats.meanMs, privacy: .public) \
+            min=\(deltaStats.minMs, privacy: .public) \
+            max=\(deltaStats.maxMs, privacy: .public) \
+            std=\(deltaStats.stdMs, privacy: .public)
+            """
+        )
+        diag4KLogger.notice(
+            """
+            DIAGNOSTIC #113 [setActiveFormat] deltaHist \
+            <14=\(deltaStats.histBelow14, privacy: .public) \
+            14-20=\(deltaStats.hist14to20, privacy: .public) \
+            20-40=\(deltaStats.hist20to40, privacy: .public) \
+            40-60=\(deltaStats.hist40to60, privacy: .public) \
+            >60=\(deltaStats.histAbove60, privacy: .public)
+            """
+        )
 
         // Assert only run validity — NOT that 4K was delivered.
         #expect(snap.frameCount > 0, "No frames were delivered during the 3s collection window")
@@ -444,6 +364,178 @@ struct CameraSource4KDeliveryL5Tests {
 
     // swiftlint:enable function_body_length
 
+    // MARK: - Test 3 — native 1080p60 sustained-fps probe
+
+    // swiftlint:disable function_body_length
+    /// Measures whether AVFoundation can sustain native 1080p (1920×1080) at 60 fps from the Brio.
+    ///
+    /// Steps:
+    /// 1. Discovers the best 1920×1080 format in `device.formats` whose `videoSupportedFrameRateRanges`
+    ///    includes a range with `maxFrameRate >= 60`. If none exists, records a finding and returns
+    ///    (valid diagnostic result — the answer is unknown before we measure it).
+    /// 2. Builds a bare `AVCaptureSession`, adds the Brio `AVCaptureDeviceInput`, and adds a
+    ///    `AVCaptureVideoDataOutput` with 420v pixel format.
+    /// 3. Under `lockForConfiguration()`, sets `activeFormat` to the selected 1080p60 format and pins
+    ///    `activeVideoMinFrameDuration` / `activeVideoMaxFrameDuration` to 60 fps (the only fps-pinning
+    ///    mechanism on macOS — `autoVideoFrameRateEnabled` does not exist on this platform).
+    /// 4. Starts the session and collects a 5-second window (longer than the 4K probe's 3 s — needed
+    ///    to accumulate a stable 60 fps estimate after camera warmup).
+    /// 5. After frames have flowed, reads back `device.activeFormat` dimensions to catch any silent
+    ///    format reversion that happens at session start.
+    /// 6. Logs all diagnostic signals with the `DIAGNOSTIC #113 [1080p60]` prefix:
+    ///    `selectedDims`, `targetFps`, `delivered`, `sustainedFps`, `readBack`, `fourCC`, `frameCount`.
+    ///    Sustained fps is derived from delivered frame PTS timestamps (not from wall-clock / nominal)
+    ///    to exclude camera warmup latency before the first frame arrives.
+    /// 7. Asserts only run validity: `frameCount > 0`. Fps is logged, never asserted.
+    @Test(
+        "1080p60 sustained-fps probe",
+        .enabled(if: diag4K_brioGateEnabled())
+    )
+    func diag_1080p60_sustainedFps() async throws {
+        let brio = try Self.findBrio()
+
+        // Select the native 1080p60 format, bypassing all project cap logic.
+        guard let format1080p60 = Self.pick1080p60Format(from: brio) else {
+            diag4KLogger.notice(
+                "DIAGNOSTIC #113 [1080p60] no 1920×1080 format with maxFrameRate>=60 in device.formats"
+            )
+            Issue.record("Brio advertises no 1920×1080 / ≥60 fps format in device.formats on this system")
+            return
+        }
+
+        let selDims = CMVideoFormatDescriptionGetDimensions(format1080p60.formatDescription)
+        let selW = selDims.width, selH = selDims.height
+        diag4KLogger.notice(
+            "DIAGNOSTIC #113 [1080p60] selectedDims=\(selW, privacy: .public)x\(selH, privacy: .public)"
+        )
+        diag4KLogger.notice("DIAGNOSTIC #113 [1080p60] targetFps=60")
+
+        // Build session.
+        let session = AVCaptureSession()
+        let input = try AVCaptureDeviceInput(device: brio)
+        guard session.canAddInput(input) else {
+            Issue.record("AVCaptureSession cannot add Brio input")
+            return
+        }
+        session.addInput(input)
+
+        let output = AVCaptureVideoDataOutput()
+        output.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+        ]
+        // Keep alwaysDiscardsLateVideoFrames=true so we measure real-time deliverable rate,
+        // not a backlogged catch-up burst.
+        output.alwaysDiscardsLateVideoFrames = true
+
+        let collector = Diag4KFrameCollector()
+        let delegateQueue = DispatchQueue(label: "dev.androidbroadcast.Onset.diag4K.diag1080p60")
+        output.setSampleBufferDelegate(collector, queue: delegateQueue)
+
+        guard session.canAddOutput(output) else {
+            Issue.record("AVCaptureSession cannot add video output")
+            return
+        }
+        session.addOutput(output)
+
+        // Pin activeFormat and fps under lockForConfiguration.
+        // Derive the lock duration from the format's own AVFrameRateRange rather than
+        // constructing CMTimeMake(1, 60) by hand. The Brio's 1080p60 format reports its
+        // top rate as ~59.94 (NTSC), so a hand-built 1/60 falls outside
+        // videoSupportedFrameRateRanges and AVCaptureDevice throws NSInvalidArgumentException.
+        guard let sixtyFpsTime = Self.maxFpsDuration(from: format1080p60) else {
+            diag4KLogger.notice(
+                "DIAGNOSTIC #113 [1080p60] no fps range with maxFrameRate>=60 in selected format — cannot pin"
+            )
+            Issue.record("Selected 1080p60 format has no AVFrameRateRange with maxFrameRate>=60")
+            return
+        }
+        try brio.lockForConfiguration()
+        brio.activeFormat = format1080p60
+        brio.activeVideoMinFrameDuration = sixtyFpsTime
+        brio.activeVideoMaxFrameDuration = sixtyFpsTime
+        brio.unlockForConfiguration()
+
+        session.startRunning()
+        defer {
+            session.stopRunning()
+        }
+
+        guard session.isRunning else {
+            Issue.record("AVCaptureSession failed to start (isRunning == false after startRunning)")
+            return
+        }
+
+        // Collect ~5 seconds of frames — longer than the 4K probe (3 s) to accumulate a stable
+        // sustained-fps estimate at 60 fps after the camera warmup period.
+        try await Task.sleep(for: .seconds(5))
+
+        // Read back activeFormat AFTER frames have flowed — a silent reversion would show here.
+        let readBackDims = CMVideoFormatDescriptionGetDimensions(brio.activeFormat.formatDescription)
+        let snap = collector.snapshot
+
+        // Delta stats and fps derived from PTS values (pure computation off the lock).
+        let deltaStats = Diag4KDeltaStats(from: snap)
+
+        // Wall-clock fps: frameCount / nominal collection window (warmup-inclusive).
+        // sustainedFps (= ptsFps) excludes warmup; wallClockFps includes it.
+        // The gap between the two reveals UVC startup latency contribution.
+        let wallClockFps = Double(snap.frameCount) / 5.0
+
+        // Sustained fps is PTS-span-based (warmup-exclusive) — kept for backward compat.
+        let sustainedFps = deltaStats.ptsFps
+
+        // Log all diagnostic signals.
+        let delW = snap.lastWidth, delH = snap.lastHeight
+        let readW = readBackDims.width, readH = readBackDims.height
+        let frameN = snap.frameCount
+        diag4KLogger.notice(
+            "DIAGNOSTIC #113 [1080p60] delivered=\(delW, privacy: .public)x\(delH, privacy: .public)"
+        )
+        diag4KLogger.notice(
+            """
+            DIAGNOSTIC #113 [1080p60] ptsFps=\(sustainedFps, privacy: .public) \
+            wallClockFps=\(wallClockFps, privacy: .public)
+            """
+        )
+        // Keep the pre-existing sustainedFps= line so external log parsers that grep for it still match.
+        diag4KLogger.notice("DIAGNOSTIC #113 [1080p60] sustainedFps=\(sustainedFps, privacy: .public)")
+        diag4KLogger.notice(
+            "DIAGNOSTIC #113 [1080p60] readBack=\(readW, privacy: .public)x\(readH, privacy: .public)"
+        )
+        diag4KLogger.notice("DIAGNOSTIC #113 [1080p60] fourCC=\(snap.lastFourCC, privacy: .public)")
+        diag4KLogger.notice("DIAGNOSTIC #113 [1080p60] frameCount=\(frameN, privacy: .public)")
+        diag4KLogger.notice(
+            """
+            DIAGNOSTIC #113 [1080p60] firstPTS=\(snap.firstTimestamp, privacy: .public) \
+            lastPTS=\(snap.lastTimestamp, privacy: .public) ptsCount=\(snap.ptsValues.count, privacy: .public)
+            """
+        )
+        diag4KLogger.notice(
+            """
+            DIAGNOSTIC #113 [1080p60] deltaMs \
+            mean=\(deltaStats.meanMs, privacy: .public) \
+            min=\(deltaStats.minMs, privacy: .public) \
+            max=\(deltaStats.maxMs, privacy: .public) \
+            std=\(deltaStats.stdMs, privacy: .public)
+            """
+        )
+        diag4KLogger.notice(
+            """
+            DIAGNOSTIC #113 [1080p60] deltaHist \
+            <14=\(deltaStats.histBelow14, privacy: .public) \
+            14-20=\(deltaStats.hist14to20, privacy: .public) \
+            20-40=\(deltaStats.hist20to40, privacy: .public) \
+            40-60=\(deltaStats.hist40to60, privacy: .public) \
+            >60=\(deltaStats.histAbove60, privacy: .public)
+            """
+        )
+
+        // Assert only run validity — fps is a measurement, not an assertion.
+        #expect(snap.frameCount > 0, "No frames delivered during the 5 s collection window")
+    }
+
+    // swiftlint:enable function_body_length
+
     // MARK: - Shared helpers
 
     /// Locates the connected Brio device.
@@ -498,7 +590,51 @@ struct CameraSource4KDeliveryL5Tests {
             .first { $0.maxFrameRate >= 30 }
         return matchingRange?.minFrameDuration ?? CMTimeMake(value: 1, timescale: 30)
     }
+
+    /// Returns the `CMTime` for the highest achievable frame rate in `format`, derived from the
+    /// format's own `videoSupportedFrameRateRanges`.
+    ///
+    /// Picks the range with the greatest `maxFrameRate` among those whose `maxFrameRate >= 60` and
+    /// returns its `minFrameDuration` — the shortest duration the device will accept for that range.
+    /// Using the range's own `minFrameDuration` rather than a hand-built `CMTimeMake(1, 60)` avoids
+    /// `NSInvalidArgumentException` on cameras that report NTSC top rates (~59.94) instead of exactly 60.
+    ///
+    /// - Parameter format: The `AVCaptureDevice.Format` to inspect.
+    /// - Returns: The `minFrameDuration` of the qualifying range, or `nil` if no range with
+    ///   `maxFrameRate >= 60` exists in `format`.
+    private static func maxFpsDuration(from format: AVCaptureDevice.Format) -> CMTime? {
+        format.videoSupportedFrameRateRanges
+            .filter { $0.maxFrameRate >= 60 }
+            .max { $0.maxFrameRate < $1.maxFrameRate }?
+            .minFrameDuration
+    }
+
+    /// Picks the best native 1080p (1920×1080) format from `device.formats` that supports ≥60 fps.
+    ///
+    /// Selection criteria (in order):
+    /// 1. Width == 1920 and height == 1080.
+    /// 2. At least one `videoSupportedFrameRateRange` with `maxFrameRate >= 60`.
+    /// 3. Prefer formats whose media subtype is `420v` (kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+    ///    to mirror the production output configuration.
+    ///
+    /// - Returns: The selected `AVCaptureDevice.Format`, or `nil` if no qualifying format is found.
+    private static func pick1080p60Format(from device: AVCaptureDevice) -> AVCaptureDevice.Format? {
+        let candidates = device.formats.filter { fmt in
+            let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
+            guard dims.width == 1920, dims.height == 1080 else { return false }
+            return fmt.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= 60 }
+        }
+        guard !candidates.isEmpty else { return nil }
+
+        // Prefer 420v subtype; fall back to whatever is available.
+        let preferred420v = candidates.first { fmt in
+            CMFormatDescriptionGetMediaSubType(fmt.formatDescription) == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        }
+        return preferred420v ?? candidates.first
+    }
 }
+
+// swiftlint:enable type_body_length
 
 // MARK: - Setup errors
 

@@ -75,19 +75,20 @@ struct MainViewModelCameraModesTests {
         #expect(sut.availableCameraModes.isEmpty)
     }
 
-    @Test("availableCameraModes reflects selected camera's format modes")
-    func availableCameraModes_withBrioCamera_returnsThreeModes() async {
+    @Test("availableCameraModes reflects selected camera's format modes (≤1080p cap)")
+    func availableCameraModes_withBrioCamera_returnsTwoModes() async {
         let brio = Self.makeBrioCamera()
         let (sut, _) = self.makeSUT(cameras: [brio])
         await sut.loadDevices()
 
-        // loadDevices auto-selects first camera → brio is selected
+        // loadDevices auto-selects first camera → brio is selected.
+        // 4K is excluded by the ≤1080p cap (issue #113 — AVFoundation cannot deliver 4K
+        // from the Brio on macOS). Only 1080p60 and 720p60 are offered.
         let modes = sut.availableCameraModes
-        #expect(modes.count == 3)
-        // Sorted by descending pixel count: 4K, 1080p, 720p
-        #expect(modes[0].pixelWidth == 3840 && modes[0].pixelHeight == 2160 && modes[0].fps == 30)
-        #expect(modes[1].pixelWidth == 1920 && modes[1].pixelHeight == 1080 && modes[1].fps == 60)
-        #expect(modes[2].pixelWidth == 1280 && modes[2].pixelHeight == 720 && modes[2].fps == 60)
+        #expect(modes.count == 2)
+        // Sorted by descending pixel count: 1080p before 720p.
+        #expect(modes[0].pixelWidth == 1920 && modes[0].pixelHeight == 1080 && modes[0].fps == 60)
+        #expect(modes[1].pixelWidth == 1280 && modes[1].pixelHeight == 720 && modes[1].fps == 60)
     }
 
     @Test("availableCameraModes switches when selectedCameraID changes")

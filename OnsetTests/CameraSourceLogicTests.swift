@@ -499,15 +499,26 @@ struct CameraSourceLiveTests {
         await setup.source.stop()
         #expect(gotFrame == false, "Preview CameraSource must not yield frames (issue #119)")
     }
+}
 
+// MARK: - L5 Brio fps-lock + real-frame dimension tests (issue #113)
+
+/// Live-hardware tests for the Brio camera mode override (issue #113).
+///
+/// Opt-in: skips unless `ONSET_RUN_L5_CAPTURE=1` AND a Brio camera is connected.
+/// Serialized so the two mode tests do not contend over the same hardware device.
+@Suite("CameraSource — L5 Brio (#113)", .serialized, .timeLimit(.minutes(2)))
+struct CameraSourceBrioTests {
     // MARK: - L5 Brio fps-lock tests (issue #113)
 
     /// Proves that selecting a 4K 30 fps `CameraMode` override activates a 3840×2160
     /// format on the live Brio device and pins the frame duration to 30 fps.
     ///
-    /// The test does NOT record a full file — reading `AVCaptureDevice.activeFormat` and
-    /// `activeVideoMinFrameDuration` after `start()` is the deterministic ground truth
-    /// for the format+fps lock claimed by issue #113.
+    /// The test first delivers one real frame from the camera's `AsyncStream` and reads its
+    /// `CVPixelBuffer` dimensions — the authoritative signal for issue #113. `device.activeFormat`
+    /// dims are logged side-by-side with the real-frame dims so a stale-property divergence is
+    /// immediately visible in the run transcript. The existing `activeFormat` and fps-lock
+    /// assertions are kept as a secondary signal.
     @Test(
         "Brio 4K30 mode override activates 3840×2160 format pinned to 30 fps",
         .enabled(if: l5BrioEnabled())
@@ -528,6 +539,14 @@ struct CameraSourceLiveTests {
 
         try await setup.source.start(anchoredTo: setup.anchor)
 
+        // ── Real-frame dimension check (authoritative for issue #113) ─────────────────────
+        // Pull the first delivered CVPixelBuffer from the live stream to read its ACTUAL
+        // dimensions. This bypasses device.activeFormat, which macOS may revert after the
+        // session starts while the delivered frames still carry the originally negotiated size.
+        let firstFrame = try await collectFirstVideoFrame(from: setup.source.frames)
+        let frameWidth = CVPixelBufferGetWidth(firstFrame.pixelBuffer)
+        let frameHeight = CVPixelBufferGetHeight(firstFrame.pixelBuffer)
+
         // Re-acquire the device by uniqueID — same per-process AVFoundation instance
         // that CameraSource configured inside addCameraInput.
         guard let avDevice = AVCaptureDevice(uniqueID: setup.cameraUniqueID) else {
@@ -535,15 +554,36 @@ struct CameraSourceLiveTests {
             return
         }
 
-        let dims = CMVideoFormatDescriptionGetDimensions(avDevice.activeFormat.formatDescription)
-        #expect(dims.width == 3840, "activeFormat width should be 3840, got \(dims.width)")
-        #expect(dims.height == 2160, "activeFormat height should be 2160, got \(dims.height)")
+        let activeDims = CMVideoFormatDescriptionGetDimensions(avDevice.activeFormat.formatDescription)
+
+        // TEMP-LOG DIAGNOSTIC #113: real-frame dims vs device.activeFormat dims side-by-side.
+        let log = Logger(subsystem: "dev.androidbroadcast.Onset", category: "DIAG.113")
+        log.notice(
+            "DIAGNOSTIC #113 [4K30] real=\(frameWidth, privacy: .public)x\(frameHeight, privacy: .public)"
+        )
+        log.notice(
+            "DIAGNOSTIC #113 [4K30] active=\(activeDims.width, privacy: .public)x\(activeDims.height, privacy: .public)"
+        )
+
+        // Authoritative assertion: the delivered pixel buffer must be 3840×2160.
+        #expect(frameWidth == 3840, "real frame width should be 3840, got \(frameWidth)")
+        #expect(frameHeight == 2160, "real frame height should be 2160, got \(frameHeight)")
+
+        // Secondary assertion: device.activeFormat (may be stale on macOS 26.x).
+        #expect(activeDims.width == 3840, "activeFormat width should be 3840, got \(activeDims.width)")
+        #expect(activeDims.height == 2160, "activeFormat height should be 2160, got \(activeDims.height)")
 
         assertFpsLock(on: avDevice, targetFps: 30)
     }
 
     /// Proves that selecting a 1080p 60 fps `CameraMode` override activates a 1920×1080
     /// format on the live Brio device and pins the frame duration to 60 fps.
+    ///
+    /// The test first delivers one real frame from the camera's `AsyncStream` and reads its
+    /// `CVPixelBuffer` dimensions — the authoritative signal for issue #113. `device.activeFormat`
+    /// dims are logged side-by-side with the real-frame dims so a stale-property divergence is
+    /// immediately visible in the run transcript. The existing `activeFormat` and fps-lock
+    /// assertions are kept as a secondary signal.
     @Test(
         "Brio 1080p60 mode override activates 1920×1080 format pinned to 60 fps",
         .enabled(if: l5BrioEnabled())
@@ -564,14 +604,37 @@ struct CameraSourceLiveTests {
 
         try await setup.source.start(anchoredTo: setup.anchor)
 
+        // ── Real-frame dimension check (authoritative for issue #113) ─────────────────────
+        // Pull the first delivered CVPixelBuffer from the live stream to read its ACTUAL
+        // dimensions. This bypasses device.activeFormat, which macOS may revert after the
+        // session starts while the delivered frames still carry the originally negotiated size.
+        let firstFrame = try await collectFirstVideoFrame(from: setup.source.frames)
+        let frameWidth = CVPixelBufferGetWidth(firstFrame.pixelBuffer)
+        let frameHeight = CVPixelBufferGetHeight(firstFrame.pixelBuffer)
+
         guard let avDevice = AVCaptureDevice(uniqueID: setup.cameraUniqueID) else {
             Issue.record("AVCaptureDevice lost after start() — cannot inspect activeFormat")
             return
         }
 
-        let dims = CMVideoFormatDescriptionGetDimensions(avDevice.activeFormat.formatDescription)
-        #expect(dims.width == 1920, "activeFormat width should be 1920, got \(dims.width)")
-        #expect(dims.height == 1080, "activeFormat height should be 1080, got \(dims.height)")
+        let activeDims = CMVideoFormatDescriptionGetDimensions(avDevice.activeFormat.formatDescription)
+
+        // TEMP-LOG DIAGNOSTIC #113: real-frame dims vs device.activeFormat dims side-by-side.
+        let log = Logger(subsystem: "dev.androidbroadcast.Onset", category: "DIAG.113")
+        log.notice(
+            "DIAGNOSTIC #113 [1080p] real=\(frameWidth, privacy: .public)x\(frameHeight, privacy: .public)"
+        )
+        log.notice(
+            "DIAGNOSTIC #113 [1080p] fmt=\(activeDims.width, privacy: .public)x\(activeDims.height, privacy: .public)"
+        )
+
+        // Authoritative assertion: the delivered pixel buffer must be 1920×1080.
+        #expect(frameWidth == 1920, "real frame width should be 1920, got \(frameWidth)")
+        #expect(frameHeight == 1080, "real frame height should be 1080, got \(frameHeight)")
+
+        // Secondary assertion: device.activeFormat (may be stale on macOS 26.x).
+        #expect(activeDims.width == 1920, "activeFormat width should be 1920, got \(activeDims.width)")
+        #expect(activeDims.height == 1080, "activeFormat height should be 1080, got \(activeDims.height)")
 
         assertFpsLock(on: avDevice, targetFps: 60)
     }
@@ -924,6 +987,33 @@ private enum L5SetupError: Error {
 private struct L5TimeoutError: Error {}
 
 // MARK: - L5 helpers
+
+/// Waits for the first video frame from `stream`, bounded by a 5-second deadline.
+///
+/// Races a single-frame collector against a timeout task. Returns the first `VideoFrame`
+/// delivered by the live camera. Throws `L5TimeoutError` when no frame arrives in time.
+/// Used by the Brio fps-lock tests to read the ACTUAL delivered `CVPixelBuffer` dimensions
+/// (issue #113) without pulling audio or touching the recording pipeline.
+nonisolated private func collectFirstVideoFrame(from stream: AsyncStream<VideoFrame>) async throws -> VideoFrame {
+    try await withThrowingTaskGroup(of: VideoFrame?.self) { group in
+        group.addTask {
+            for await frame in stream {
+                return frame
+            }
+            return nil
+        }
+        group.addTask {
+            try await Task.sleep(for: .seconds(5)) // swiftlint:disable:this no_magic_numbers
+            throw L5TimeoutError()
+        }
+        guard let result = try await group.next(), let frame = result else {
+            group.cancelAll()
+            throw L5TimeoutError()
+        }
+        group.cancelAll()
+        return frame
+    }
+}
 
 private struct LiveCaptureResult {
     let frames: [VideoFrame]

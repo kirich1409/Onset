@@ -26,6 +26,18 @@
 ///    non-16:9 formats still return a result.
 /// 6. Throw `RecordingError.noSuitableCameraFormat` only when the qualifying set is empty.
 ///
+/// ## Mode resolution cap (issue #113)
+/// `availableModes` only returns modes at 1920×1080 and below. Resolutions above 1080p
+/// (e.g. 4K, 1440p) are excluded because AVFoundation on macOS does not deliver the
+/// Brio's advertised 3840×2160 format — AVCaptureSession reconciles `activeFormat` down
+/// to 1080p (no `.inputPriority` escape on macOS; verified L5: both `setActiveFormat(4K)`
+/// and the `.hd4K3840x2160` preset yield 1080p, with `activeFormat` reading back 1080p).
+/// MJPEG is also not exposed (CoreMediaIO decompresses below AVFoundation). Native 4K
+/// would require CMIO/IOKit, out of scope.
+/// Additionally, only resolutions with a corresponding `AVCaptureSession.Preset` are
+/// offered (1920×1080, 1280×720). Arbitrary resolutions such as 1600×896 are excluded —
+/// they have no preset and may not activate reliably on all macOS versions.
+///
 /// All members are `nonisolated` (required under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`).
 nonisolated enum CameraFormatSelector {
     // MARK: - Constants
@@ -39,6 +51,36 @@ nonisolated enum CameraFormatSelector {
     /// Maximum height (inclusive) for the preferred Full HD resolution tier.
     private static let fullHDMaxHeight = 1080
 
+    // MARK: - Preset-backed resolution constants
+
+    /// Pixel dimensions for AVCaptureSession.Preset.hd1920x1080.
+    static let preset1080pWidth: Int32 = 1920
+    /// Pixel dimensions for AVCaptureSession.Preset.hd1920x1080.
+    static let preset1080pHeight: Int32 = 1080
+    /// Pixel dimensions for AVCaptureSession.Preset.hd1280x720.
+    static let preset720pWidth: Int32 = 1280
+    /// Pixel dimensions for AVCaptureSession.Preset.hd1280x720.
+    static let preset720pHeight: Int32 = 720
+
+    /// Dimensions that have a backing `AVCaptureSession.Preset` on macOS and are at or below
+    /// the 1080p cap.
+    ///
+    /// 4K (3840×2160) is intentionally absent — AVFoundation on macOS reconciles the Brio's
+    /// advertised 4K format down to 1080p (no `.inputPriority` escape; verified L5). MJPEG
+    /// is also not exposed. See issue #113.
+    ///
+    /// Keys are packed as `(UInt64(width) << 32) | UInt64(height)` — the same encoding
+    /// used by the mode-deduplication loop below.
+    private static let presetBackedDimensions: Set<UInt64> = [
+        Self.packDims(Self.preset1080pWidth, Self.preset1080pHeight),
+        Self.packDims(Self.preset720pWidth, Self.preset720pHeight),
+    ]
+
+    /// Packs two `Int32` dimension values into a single `UInt64` key (upper 32: width, lower 32: height).
+    nonisolated private static func packDims(_ width: Int32, _ height: Int32) -> UInt64 {
+        (UInt64(bitPattern: Int64(width)) << 32) | UInt64(bitPattern: Int64(height))
+    }
+
     // MARK: - Public API
 
     /// Enumerates the distinct user-selectable camera modes from a format list.
@@ -47,6 +89,8 @@ nonisolated enum CameraFormatSelector {
     /// using the highest fps within the policy-valid band `[config.minCameraFps, config.maxScreenFps]`
     /// for that resolution. Resolutions whose best qualifying fps falls outside the band are
     /// excluded — they cannot be recorded at the policy fps floor and must not appear in the UI.
+    /// Resolutions above 1080p or without a backing `AVCaptureSession.Preset` are also excluded
+    /// (see `presetBackedDimensions` and issue #113).
     ///
     /// Results are sorted by descending pixel count (highest resolution first) for a
     /// consistent, stable ordering across calls.
@@ -78,8 +122,10 @@ nonisolated enum CameraFormatSelector {
             // Clamp the offered fps to maxScreenFps — the mode's fps must stay within budget.
             let effectiveFps = min(format.maxFps, maxFps)
             // Pack two Int32 values into one UInt64 key (upper 32: width, lower 32: height).
-            let key = (UInt64(bitPattern: Int64(format.pixelWidth)) << 32)
-                | UInt64(bitPattern: Int64(format.pixelHeight))
+            let key = Self.packDims(format.pixelWidth, format.pixelHeight)
+            // Only include resolutions that have a backing AVCaptureSession.Preset.
+            // Arbitrary sizes (e.g. 1600×896) cannot be reliably activated on macOS.
+            guard self.presetBackedDimensions.contains(key) else { continue }
             if bestFps[key].map({ effectiveFps > $0 }) ?? true {
                 bestFps[key] = effectiveFps
                 dims[key] = (format.pixelWidth, format.pixelHeight)
@@ -119,7 +165,7 @@ nonisolated enum CameraFormatSelector {
     ///   - override: The user's selected `CameraMode`, or `nil` for Auto.
     ///   - config: Recording policy providing `minCameraFps` and `maxScreenFps`.
     /// - Returns: The chosen `CameraFormat` and the explicit target fps to use for
-    ///   `findMatchingFormat` and `activateFormat` in `CameraSource`.
+    ///   `activateFormat` in `CameraSource`.
     /// - Throws: `RecordingError.noSuitableCameraFormat` when no usable format exists.
     nonisolated static func resolveFormat(
         from formats: [CameraFormat],
