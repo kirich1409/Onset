@@ -315,6 +315,50 @@ struct RecordingCoordinatorTests {
         #expect(coordinator.phase == .idle, "menu-bar origin → return to .idle")
     }
 
+    // MARK: - menuBar + pending alert opens main window (#131)
+
+    @Test("stop menuBar + degraded warning → opens main window so alert can be presented (#131)")
+    func stop_menuBarWithDegradedWarning_opensMainWindow() async throws {
+        let fake = FakeRecordingControlling(
+            result: CoordinatorFixtures.result(backpressureDrops: 64)
+        )
+        let openCounter = Counter()
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: { openCounter.increment() }
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request(origin: .menuBar))
+        await coordinator.stop()
+
+        #expect(coordinator.phase == .main, "menuBar + pending alert → must open main window (phase .main)")
+        #expect(openCounter.value == 1, "openMainWindow must be called exactly once")
+        #expect(coordinator.hasPendingAlert, "hasPendingAlert must still be true until user acknowledges")
+    }
+
+    @Test("stop menuBar + write error → opens main window so alert can be presented (#131)")
+    func stop_menuBarWithWriteError_opensMainWindow() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.failedWriteResult())
+        let openCounter = Counter()
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: { openCounter.increment() }
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request(origin: .menuBar))
+        await coordinator.stop()
+
+        #expect(coordinator.phase == .main, "menuBar + write error → must open main window (phase .main)")
+        #expect(openCounter.value == 1, "openMainWindow must be called exactly once")
+        #expect(coordinator.hasPendingAlert, "hasPendingAlert must still be true until user acknowledges")
+    }
+
     @Test("stop computes the degraded warning from the result")
     func stop_computesDegradedWarning() async throws {
         let fake = FakeRecordingControlling(
