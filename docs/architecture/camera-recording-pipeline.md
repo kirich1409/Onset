@@ -74,8 +74,8 @@ C callback → EncodedSampleSink
 5. Если 16:9-форматов нет — fallback на максимальное число пикселей (tie-break: бо́льший fps).
 6. `RecordingError.noSuitableCameraFormat` бросается только при пустом qualifying-множестве.
 
-Следствие: Brio, предлагающий и 4K30, и 1080p60, получит **1080p60** (16:9, ≤1080, выше fps),
-а не 4K30. 4K30 доступен только через ручной выбор режима ([#113](https://github.com/kirich1409/Onset/issues/113)).
+Следствие: Brio, предлагающий и 4K30, и 1080p60, получит **1080p** (16:9, ≤1080, выше fps),
+а не 4K30. 4K недоступен через AVFoundation на macOS (см. [`docs/quality/macos-avfoundation-camera-limits.md`](../quality/macos-avfoundation-camera-limits.md)); вынесено в [#177](https://github.com/kirich1409/Onset/issues/177) (нужен CMIO/IOKit-стек). 1080p60 — аналогично: AVFoundation ограничивает реальную доставку ~20fps, 60fps вынесено в [#178](https://github.com/kirich1409/Onset/issues/178).
 Встроенная камера FaceTime HD (квадратный Center-Stage формат 1552×1552) теперь получит
 16:9-режим (например, 1920×1080) — центральное следствие введения 16:9-предпочтения.
 
@@ -289,9 +289,11 @@ overflow 12–15/с (2026-06-07, issue #112). На тихой машине overf
 
 `CameraFormatSelector` переключён на политику 16:9 + Full HD (issue #145): вместо
 «максимум пикселей» алгоритм предпочитает наибольший 16:9-формат с `height ≤ 1080`.
-Для Brio это означает автовыбор **1080p60** (не 4K30): оба формата 16:9, но 1080p60
-удовлетворяет критерию ≤1080 и имеет бо́льший fps. 4K30 доступен только через
-ручной выбор режима, которого в UI пока нет — issue #113.
+Для Brio это означает автовыбор **1080p** (не 4K30): 4K30 и 1080p60 **недостижимы через
+AVFoundation на macOS** (L5-verified; Brio реально отдаёт ~20fps) — вынесены в
+[#177](https://github.com/kirich1409/Onset/issues/177) (4K) и [#178](https://github.com/kirich1409/Onset/issues/178) (60fps),
+требуют смены стека захвата (CMIO/IOKit). MVP-скоуп камеры: 16:9, макс. доставляемое
+разрешение (1080p), авто-выбором, без ручного пикера (issue #113 закрыт).
 
 Ручное управление источником камеры реализовано через `MainViewModel.cameraEnabled`
 (#77, #76): переключатель в UI позволяет выключить камеру — тогда `activeCamera` равен
