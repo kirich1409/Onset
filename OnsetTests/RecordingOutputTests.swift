@@ -82,6 +82,29 @@ struct RecordingOutputFileNameTests {
         let camera = RecordingOutput.fileName(timestamp: self.testDate, kind: .camera)
         #expect(screen != camera)
     }
+
+    /// Proves that `fileName` is sensitive to the timestamp input — i.e. a different Date
+    /// produces a different date segment. This makes the `screenAndCameraShareTimestamp` test
+    /// meaningful as a regression guard for #198: if the implementation ignores the timestamp
+    /// argument and always uses `Date()`, this test would be flaky (fail when the clock ticks
+    /// across a second boundary) and the share-timestamp test would catch nothing.
+    @Test("different timestamps produce different date segments")
+    func differentTimestamps_produceDifferentDateSegments() {
+        // Two dates exactly one second apart — guaranteed distinct segments.
+        let dateA = Date(timeIntervalSince1970: 1_749_038_205)
+        let dateB = Date(timeIntervalSince1970: 1_749_038_206)
+
+        let nameA = RecordingOutput.fileName(timestamp: dateA, kind: .screen)
+        let nameB = RecordingOutput.fileName(timestamp: dateB, kind: .screen)
+
+        let segmentA = nameA.dropFirst("Onset ".count).dropLast(" — Screen.mp4".count)
+        let segmentB = nameB.dropFirst("Onset ".count).dropLast(" — Screen.mp4".count)
+
+        #expect(
+            String(segmentA) != String(segmentB),
+            "one-second-apart dates must produce different date segments; got \(segmentA) == \(segmentB)"
+        )
+    }
 }
 
 // MARK: - RecordingOutputDirectoryTests
