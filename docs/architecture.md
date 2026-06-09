@@ -52,8 +52,8 @@ drop'ов, резолв возможностей железа.
 | `DualFileOutputStage` | `DualFileOutputStage.swift` | Актор: фан-аут закодированных video/audio в два writer'а; ретайминг, replay отложенного аудио, ленивое создание writer'ов |
 | `CapabilityResolver` | `CapabilityResolver.swift` | Чистая логика: размеры/fps экрана и камеры в рамках бюджета кодирования |
 | `CapabilityProbe` | `CapabilityProbe.swift` | Преflight (AC-6): проверка HW-кодера, финальный план через `CapabilityResolver` |
-| `DropMonitor` | `DropMonitor.swift` | Актор: учёт drop'ов и backpressure; эмитит `.normal` ↔ `.degraded` в UI |
-| `PipelineTypes` | `PipelineTypes.swift` | Общие value-типы: `HostTimeAnchor` (T0), `VideoFrame`, `AudioSample`, `EncodedSample`, `DropEvent`, `RecordingState`, `SourceEvent` |
+| `DropMonitor` | `DropMonitor.swift` | Актор: учёт drop'ов и backpressure; эмитит `.normal` ↔ `.degraded` в UI; атрибутирует backpressure-потери по стадии и отдаёт `DropHealthSnapshot` (счётчики + доминирующая причина + latch `sessionEverDegraded`, на котором гейтится post-stop предупреждение) |
+| `PipelineTypes` | `PipelineTypes.swift` | Общие value-типы: `HostTimeAnchor` (T0), `VideoFrame`, `AudioSample`, `EncodedSample`, `DropEvent`, `DropCause`, `RecordingState`, `SourceEvent` |
 | `RecordingComponentFactories` | `RecordingComponentFactories.swift` | DI-протоколы: `EncoderControlling`, `WriterControlling`, `EncoderFactory`, `WriterFactory`, `SourceFactory` + live-реализации |
 | `StageRateAggregator` | `StageRateAggregator.swift` | Телеметрия: per-stage частоты, причины drop'ов, лаги; flush в логи в конце сессии |
 
@@ -62,7 +62,7 @@ drop'ов, резолв возможностей железа.
 - Старт записи → `RecordingSession.start(permissions:)`.
 - Резолв возможностей → `CapabilityProbe.probe()` → `CapabilityResolver.resolveStartProfile()`.
 - Построение пайплайнов → `RecordingSession.buildPipelines()`.
-- Drop'ы и состояние UI → `DropMonitor.observe()` → `recordingStateStream`.
+- Drop'ы и состояние UI → `DropMonitor.observe()` → `recordingStateStream`; детальная модель учёта и атрибуции по причинам — [`architecture/drop-accounting.md`](architecture/drop-accounting.md).
 - Отзыв источника (AC-12) → `RecordingSession.handleSourceEvent()`.
 - Роутинг в файлы → `DualFileOutputStage.routeVideo/routeAudio()`.
 
