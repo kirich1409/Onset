@@ -286,7 +286,11 @@ struct RecordingContentView: View {
         .padding(.top, Metrics.stopButtonTopPadding)
         .padding(.bottom, Metrics.stopButtonBottomPadding)
     }
+}
 
+// MARK: - RecordingContentView footer section
+
+extension RecordingContentView {
     // MARK: Footer section
 
     private var footerSection: some View {
