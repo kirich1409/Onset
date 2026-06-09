@@ -65,7 +65,7 @@ nonisolated struct DropHealthSnapshot {
     nonisolated let counters: DropCounters
     /// `true` when the session transitioned to `.degraded` at least once (live HUD flashed).
     nonisolated let sessionEverDegraded: Bool
-    /// The backpressure stage that accumulated the most drops, or `.none` if never degraded.
+    /// The backpressure stage that accumulated the most drops, or `.notDegraded` if never degraded.
     nonisolated let dominantCause: DropCause
 }
 
@@ -505,13 +505,13 @@ actor DropMonitor {
                 cfrNormalizationDrops: self.cfrNormalizationDrops
             ),
             sessionEverDegraded: self.sessionEverDegraded,
-            dominantCause: self.computeDominantCause()
+            dominantCause: self.sessionEverDegraded ? self.computeDominantCause() : .notDegraded
         )
     }
 
     /// Returns the backpressure stage that accumulated the most drops, using the deterministic
     /// tie-break order: writer > encode > captureScreen > captureCameraVideo > captureCameraAudio.
-    /// Returns `.none` when no backpressure drops occurred.
+    /// Returns `.notDegraded` when no backpressure drops occurred or the session was never degraded.
     private func computeDominantCause() -> DropCause {
         // Tie-break order (highest priority first): writer > encode > captureScreen >
         // captureCameraVideo > captureCameraAudio. The first non-zero bucket among those

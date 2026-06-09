@@ -448,3 +448,279 @@ struct DropMonitorBreakdownTests {
         #expect(bkd.captureCameraVideo == 6)
     }
 }
+
+// MARK: - DropMonitorHealthTests
+
+/// Tests for `DropHealthSnapshot` semantics: the `sessionEverDegraded` latch, the
+/// `dominantCause` invariant (`.notDegraded` iff `sessionEverDegraded == false`),
+/// tie-break order, and the misattribution guard that prevents non-backpressure drops
+/// from contributing to `dominantCause`.
+@Suite("DropMonitor — health snapshot semantics")
+struct DropMonitorHealthTests {
+    // Small window and threshold make test data compact without losing coverage.
+    private let windowSeconds = 2.0
+    private let threshold = 3
+
+    // MARK: Helpers
+
+    /// Polls until `sessionEverDegraded` is set (or gives up after 200 yields to avoid hanging
+    /// on a wiring regression). Mirrors `waitForBackpressureCount` in `DropMonitorTransitionTests`.
+    private func waitForLatch(_ monitor: DropMonitor) async {
+        for _ in 0..<200 {
+            if await monitor.snapshot().sessionEverDegraded { return }
+            await Task.yield()
+        }
+    }
+
+    // MARK: Test 1 — sub-threshold backpressure never sets the latch
+
+    /// Backpressure drops that stay under the threshold must not set `sessionEverDegraded` and
+    /// must leave `dominantCause` as `.notDegraded` (invariant: cause suppressed when not degraded).
+    @Test("sub-threshold backpressure — sessionEverDegraded false, dominantCause .notDegraded")
+    func subThresholdBackpressure_noLatch() async {
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        // threshold is 3 → count:3 is at-threshold (strict: count > threshold), not crossing.
+        let pts = CMTime(value: 1000, timescale: 1000)
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops, source: .writer, count: self.threshold, detectedAt: pts
+        ))
+        continuation.finish()
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        #expect(health.sessionEverDegraded == false)
+        #expect(health.dominantCause == .notDegraded)
+    }
+
+    // MARK: Test 2 — latch semantics: degraded then recovered → latch stays true
+
+    /// After the burst crosses the threshold and then the window recovers to `.normal`, the latch
+    /// `sessionEverDegraded` must remain `true`. This proves the one-way latch behaviour.
+    @Test("latch persists after recovery — sessionEverDegraded stays true, dominantCause non-.notDegraded")
+    func latch_persistsAfterRecovery() async {
+        // Large window: recovery is driven exclusively through `evaluate(nowSeconds:)` so the
+        // test cannot flake on the actor's background tick.
+        let monitor = DropMonitor(windowSeconds: 100.0, threshold: threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        // threshold+1 drops in a tight window → degraded transition, latch set.
+        let pts = CMTime(value: 100_000, timescale: 1000) // 100 s
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops,
+            source: .writer,
+            count: self.threshold + 1,
+            detectedAt: pts
+        ))
+        continuation.finish()
+
+        await self.waitForLatch(monitor)
+
+        // Drive recovery: advance synthetic clock well past the 100 s window.
+        await monitor.evaluate(nowSeconds: 300.0)
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        // Latch must not reset after recovery.
+        #expect(health.sessionEverDegraded == true)
+        // dominantCause must remain set (invariant: non-.notDegraded iff sessionEverDegraded).
+        // `!=` requires the Equatable conformance (InferIsolatedConformances → @MainActor);
+        // `!(lhs == rhs)` binds the concrete nonisolated `==` witness directly.
+        #expect(!(health.dominantCause == .notDegraded))
+    }
+
+    // MARK: Test 3 — dominant cause reflects concentrated backpressure source
+
+    /// When all backpressure is concentrated on `.writer`, `dominantCause` must be `.writer`.
+    @Test("writer-concentrated backpressure — dominantCause == .writer")
+    func writerConcentrated_dominantCauseWriter() async {
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        let pts = CMTime(value: 1000, timescale: 1000)
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops,
+            source: .writer,
+            count: self.threshold + 1,
+            detectedAt: pts
+        ))
+        continuation.finish()
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        #expect(health.dominantCause == .writer)
+    }
+
+    /// When all backpressure is concentrated on `.captureScreen`, `dominantCause` must be `.captureScreen`.
+    @Test("captureScreen-concentrated backpressure — dominantCause == .captureScreen")
+    func captureScreenConcentrated_dominantCauseCaptureScreen() async {
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        let pts = CMTime(value: 1000, timescale: 1000)
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops,
+            source: .captureScreen,
+            count: self.threshold + 1,
+            detectedAt: pts
+        ))
+        continuation.finish()
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        #expect(health.dominantCause == .captureScreen)
+    }
+
+    // MARK: Test 4 — tie-break order: writer beats encode when counts are equal
+
+    /// When `bpWriter == bpEncode` and both hold the highest count, `.writer` wins because
+    /// the tie-break order is writer > encode > captureScreen > captureCameraVideo > captureCameraAudio.
+    @Test("tie-break: equal writer and encode counts — dominantCause == .writer (writer beats encode)")
+    func tieBreak_writerBeatsEncode() async {
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        let pts = CMTime(value: 1000, timescale: 1000)
+        // Equal counts across writer and encode — threshold+1 each to ensure degradation.
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops,
+            source: .writer,
+            count: self.threshold + 1,
+            detectedAt: pts
+        ))
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops,
+            source: .encode,
+            count: self.threshold + 1,
+            detectedAt: pts
+        ))
+        continuation.finish()
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        #expect(health.dominantCause == .writer)
+    }
+
+    // MARK: Test 5 — misattribution guard
+
+    /// Heavy `.captureDrop` / `.cfrNormalizationDrops` events must never trigger degraded state
+    /// and must leave `dominantCause` as `.notDegraded`. These reasons do not increment the
+    /// `bp*` backpressure counters — they must not be misattributed as a dominant cause.
+    @Test("heavy captureDrop and cfrNormalizationDrops — no degradation, dominantCause .notDegraded")
+    func nonBackpressureDrops_noMisattribution() async {
+        // threshold:0 means even one backpressure drop would degrade — ensures the test catches
+        // any misrouting of captureDrop/CFR events into the bp* counters.
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: 0)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        let pts = CMTime(value: 1000, timescale: 1000)
+        continuation.yield(DropEvent(
+            reason: .captureDrop, source: .captureScreen, count: 100, detectedAt: pts
+        ))
+        continuation.yield(DropEvent(
+            reason: .cfrNormalizationDrops, source: .encode, count: 100, detectedAt: pts
+        ))
+        continuation.finish()
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        #expect(health.sessionEverDegraded == false)
+        #expect(health.dominantCause == .notDegraded)
+    }
+
+    // MARK: Test 6 — sub-threshold bp* > 0 suppresses cause
+
+    /// When backpressure drops accumulate but never cross the threshold, the window never
+    /// trips and `dominantCause` must stay `.notDegraded` even though `bp*` counters are non-zero.
+    /// This is the invariant enforced by the `sessionEverDegraded` gate in `snapshot()`.
+    @Test("sub-threshold bp* > 0 — dominantCause suppressed to .notDegraded (invariant gate)")
+    func subThreshold_bpNonZero_causeStillNotDegraded() async {
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        // count == threshold: strict check is count > threshold, so latch is NOT set.
+        let pts = CMTime(value: 1000, timescale: 1000)
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops,
+            source: .encode,
+            count: self.threshold,
+            detectedAt: pts
+        ))
+        continuation.finish()
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        // bp* counter is non-zero, but the window was never tripped.
+        #expect(health.counters.encoderBackpressureDrops == self.threshold)
+        #expect(health.sessionEverDegraded == false)
+        // The invariant gate in snapshot() must suppress cause to .notDegraded.
+        #expect(health.dominantCause == .notDegraded)
+    }
+}
+
+// MARK: - DropHealthSnapshotEquatableTests
+
+/// Round-trip tests for `DropHealthSnapshot.Equatable` — two equal snapshots compare `==`,
+/// two snapshots differing in exactly one field compare `!=`.
+@Suite("DropHealthSnapshot — Equatable round-trip")
+struct DropHealthSnapshotEquatableTests {
+    private let baseCounters = DropCounters(
+        encoderBackpressureDrops: 10,
+        captureDrops: 5,
+        cfrNormalizationDrops: 2
+    )
+
+    @Test("identical snapshots are equal")
+    func identical_areEqual() {
+        let lhs = DropHealthSnapshot(counters: baseCounters, sessionEverDegraded: true, dominantCause: .writer)
+        let rhs = DropHealthSnapshot(counters: baseCounters, sessionEverDegraded: true, dominantCause: .writer)
+        #expect(lhs == rhs)
+    }
+
+    // NOTE: `a != b` requires the Equatable conformance which is @MainActor-inferred under
+    // InferIsolatedConformances — unusable in #expect's nonisolated macro expansion.
+    // `!(lhs == rhs)` binds the concrete nonisolated `==` witness and compiles fine.
+
+    @Test("snapshots differing in dominantCause are not equal")
+    func differingDominantCause_notEqual() {
+        let lhs = DropHealthSnapshot(counters: baseCounters, sessionEverDegraded: true, dominantCause: .writer)
+        let rhs = DropHealthSnapshot(counters: baseCounters, sessionEverDegraded: true, dominantCause: .encode)
+        #expect(!(lhs == rhs))
+    }
+
+    @Test("snapshots differing in sessionEverDegraded are not equal")
+    func differingSessionEverDegraded_notEqual() {
+        let lhs = DropHealthSnapshot(counters: baseCounters, sessionEverDegraded: true, dominantCause: .writer)
+        let rhs = DropHealthSnapshot(
+            counters: baseCounters, sessionEverDegraded: false, dominantCause: .notDegraded
+        )
+        #expect(!(lhs == rhs))
+    }
+
+    @Test("snapshots differing in a counter field are not equal")
+    func differingCounter_notEqual() {
+        let otherCounters = DropCounters(
+            encoderBackpressureDrops: 99,
+            captureDrops: 5,
+            cfrNormalizationDrops: 2
+        )
+        let lhs = DropHealthSnapshot(counters: baseCounters, sessionEverDegraded: true, dominantCause: .writer)
+        let rhs = DropHealthSnapshot(counters: otherCounters, sessionEverDegraded: true, dominantCause: .writer)
+        #expect(!(lhs == rhs))
+    }
+}

@@ -291,15 +291,16 @@ extension DropReason: Hashable {
 /// Reported in the post-stop `DropHealthSnapshot` so the UI can surface the most actionable
 /// signal to the user. Covers only the **backpressure** path — `captureDrop` and
 /// `cfrNormalizationDrops` never trigger degraded state and therefore never produce a
-/// non-`.none` cause.
+/// non-`.notDegraded` cause.
 ///
 /// Tie-break order when multiple stages accumulated backpressure drops:
 ///   writer > encode > captureScreen > captureCameraVideo > captureCameraAudio
 /// The first matching non-zero bucket wins. The order is deterministic and documented so
 /// tests can rely on it.
 nonisolated enum DropCause {
-    /// No backpressure drops occurred during the session, or the session was never degraded.
+    /// The session was never degraded (latch `sessionEverDegraded == false`).
     ///
+    /// By invariant, `snapshot().dominantCause == .notDegraded` iff `sessionEverDegraded == false`.
     /// Named `notDegraded` rather than `none` to avoid ambiguity with `Optional<T>.none`,
     /// which the Swift compiler can conflate in type-inference contexts.
     case notDegraded

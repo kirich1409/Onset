@@ -173,7 +173,7 @@ final class RecordingCoordinator {
     private(set) var lastDroppedFrames = 0
 
     /// Dominant backpressure cause from the most recent finished session. Forwarded from
-    /// `DropHealthSnapshot.dominantCause`. Reset to `.none` in `acknowledgeDegradedWarning()` and
+    /// `DropHealthSnapshot.dominantCause`. Reset to `.notDegraded` in `acknowledgeDegradedWarning()` and
     /// `start()`.
     private(set) var dominantCause: DropCause = .notDegraded
 

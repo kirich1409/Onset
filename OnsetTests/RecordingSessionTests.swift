@@ -661,6 +661,9 @@ struct RecordingSessionStopTests {
             "threshold crossed → sessionEverDegraded latch → degradedWarning true (AC-8)"
         )
         #expect(result.drops.encoderBackpressureDrops > 0, "drop counter must reflect the emitted drops")
+        // `!=` requires the Equatable conformance (InferIsolatedConformances → @MainActor in
+        // nonisolated #expect expansion). `!(lhs == rhs)` binds the concrete nonisolated witness.
+        #expect(!(result.dominantCause == .notDegraded), "degraded session must report a non-.notDegraded cause")
     }
 
     @Test("degradedWarning false when backpressure drops never crossed the threshold (scattered drops)")
