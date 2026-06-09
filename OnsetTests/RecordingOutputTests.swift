@@ -303,4 +303,39 @@ struct RecordingOutputUniqueURLTests {
             "the returned URL must not already exist on disk"
         )
     }
+
+    // MARK: - Counter exhaustion fallback
+
+    /// When the base file plus every suffixed candidate `(2)`…`(999)` already exist,
+    /// `uniqueOutputURL` returns the unsuffixed base name and lets `AVAssetWriter` surface
+    /// the error — the documented fallback (spec §uniqueOutputURL, implementation comment).
+    @Test("uniqueOutputURL returns base name when all counters 2…999 are exhausted")
+    func counterExhaustion_returnsBaseName() throws {
+        try FileManager.default.createDirectory(at: self.tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: self.tempDir) }
+
+        let baseName = RecordingOutput.fileName(timestamp: self.testDate, kind: .screen)
+        let stem = URL(filePath: baseName).deletingPathExtension().lastPathComponent
+
+        // Pre-create the base file.
+        FileManager.default.createFile(
+            atPath: self.tempDir.appending(path: baseName).path(percentEncoded: false),
+            contents: nil
+        )
+
+        // Pre-create (2)…(999) — 998 additional files — to exhaust every disambiguator slot.
+        for counter in 2...999 {
+            let candidate = "\(stem) (\(counter)).mp4"
+            FileManager.default.createFile(
+                atPath: self.tempDir.appending(path: candidate).path(percentEncoded: false),
+                contents: nil
+            )
+        }
+
+        let url = RecordingOutput.uniqueOutputURL(in: self.tempDir, timestamp: self.testDate, kind: .screen)
+        #expect(
+            url.lastPathComponent == baseName,
+            "exhausted counters must fall back to the base name, got: \(url.lastPathComponent)"
+        )
+    }
 }

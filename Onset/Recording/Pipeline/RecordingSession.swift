@@ -92,13 +92,6 @@ actor RecordingSession {
     private let micDevice: MicrophoneDevice?
     private let config: RecordingConfiguration
 
-    /// The wall-clock time at which this session instance was created.
-    ///
-    /// Captured once in `init` and shared by both URL providers so the screen and camera output
-    /// files of the same session always carry an identical timestamp segment (spec §135, #198).
-    /// `RecordingSession` is one-shot — `init` ≈ session-start for naming purposes.
-    private let sessionStartDate: Date
-
     // MARK: - Seams
 
     private let probe: @Sendable () -> ProbeResult
@@ -185,7 +178,6 @@ actor RecordingSession {
         // Capture the session-start timestamp once. Both URL providers below close over this
         // value so screen and camera files always share an identical timestamp segment (#198).
         let startDate = Date()
-        self.sessionStartDate = startDate
 
         // UI state stream + its continuation, created here so a subscriber can iterate before
         // start() builds the DropMonitor whose transitions are forwarded into this continuation.
