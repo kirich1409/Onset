@@ -161,3 +161,51 @@ struct MainViewModelApplyDisplaysTests {
         #expect(sut.selectedDisplayID == nil)
     }
 }
+
+// MARK: - MainViewModel subscribe-path integration
+
+/// L2 test for `MainViewModel.subscribeToDisplayChanges()` — verifies that a single
+/// event from the `screenChangeEvents` seam triggers `loadDisplays()` and applies the result.
+///
+/// Uses the yield-then-finish pattern: `continuation.yield()` then `continuation.finish()`
+/// makes the `for await` loop process exactly one event and return deterministically — no
+/// polling, no race.
+///
+/// `@MainActor` is required because `MainViewModel` is `@Observable @MainActor`.
+@Suite("MainViewModel.subscribeToDisplayChanges — stream wiring")
+@MainActor
+struct MainViewModelSubscribeTests {
+    /// When `screenChangeEvents` fires once, `loadDisplays()` runs and `applyDisplays(_:)`
+    /// reconciles the result — verifying the subscribe→reload→reconcile chain end-to-end.
+    @Test("subscribeToDisplayChanges: one event → loadDisplays fires, displays and selection updated")
+    func subscribeToDisplayChanges_singleEvent_displaysAndSelectionUpdated() async {
+        let newDisplay = Display(
+            displayID: 42,
+            name: "Test Display",
+            pixelWidth: 1920,
+            pixelHeight: 1080,
+            refreshHz: 60
+        )
+        let (stream, continuation) = AsyncStream<Void>.makeStream()
+
+        let sut = MainViewModel(
+            permissions: FakePermissionsService(),
+            coordinator: RecordingCoordinator(),
+            discoverDisplays: { _ in [newDisplay] },
+            screenChangeEvents: { stream }
+        )
+        // Pre-condition: no prior selection; stream event will trigger AC-1 auto-select.
+        sut.selectedDisplayID = nil
+
+        // Enqueue exactly one event then terminate the stream. The for-await loop in
+        // subscribeToDisplayChanges() processes the yield (→ loadDisplays → applyDisplays),
+        // then encounters finish and returns — no polling required.
+        continuation.yield()
+        continuation.finish()
+
+        await sut.subscribeToDisplayChanges()
+
+        #expect(sut.displays.count == 1)
+        #expect(sut.selectedDisplayID == 42)
+    }
+}
