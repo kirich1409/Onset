@@ -44,8 +44,12 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
     /// When set, `start()` throws this (AC-6 / AC-11 path).
     var startError: (any Error)?
 
-    /// The counters returned by `currentDrops()` while recording.
-    var liveDrops = DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0)
+    /// The health snapshot returned by `currentDrops()` while recording.
+    var liveDrops = DropHealthSnapshot(
+        counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
+        sessionEverDegraded: false,
+        dominantCause: .notDegraded
+    )
 
     /// The result returned by `stop()`.
     var result: RecordingResult
@@ -76,7 +80,7 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
         return self.result
     }
 
-    func currentDrops() async -> DropCounters {
+    func currentDrops() async -> DropHealthSnapshot {
         self.liveDrops
     }
 
@@ -129,13 +133,17 @@ private enum CoordinatorFixtures {
         )
     }
 
-    static func result(backpressureDrops: Int = 0) -> RecordingResult {
+    static func result(backpressureDrops: Int = 0, sessionEverDegraded: Bool = false) -> RecordingResult {
         .completed(
             .screenOnly(.completed(url: URL(fileURLWithPath: "/tmp/onset-coordinator-screen.mp4"))),
-            DropCounters(
-                encoderBackpressureDrops: backpressureDrops,
-                captureDrops: 0,
-                cfrNormalizationDrops: 0
+            DropHealthSnapshot(
+                counters: DropCounters(
+                    encoderBackpressureDrops: backpressureDrops,
+                    captureDrops: 0,
+                    cfrNormalizationDrops: 0
+                ),
+                sessionEverDegraded: sessionEverDegraded,
+                dominantCause: sessionEverDegraded ? .encode : .notDegraded
             )
         )
     }
@@ -152,7 +160,11 @@ private enum CoordinatorFixtures {
                 url: URL(fileURLWithPath: "/tmp/onset-coordinator-screen.mp4"),
                 error: FakeWriteError()
             )),
-            DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0)
+            DropHealthSnapshot(
+                counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
+                sessionEverDegraded: false,
+                dominantCause: .notDegraded
+            )
         )
     }
 
@@ -317,17 +329,34 @@ struct RecordingCoordinatorTests {
 
     @Test("stop computes the degraded warning from the result")
     func stop_computesDegradedWarning() async throws {
+        // sessionEverDegraded: true makes the warning fire — not the raw backpressureDrops count.
         let fake = FakeRecordingControlling(
-            result: CoordinatorFixtures.result(backpressureDrops: 128)
+            result: CoordinatorFixtures.result(backpressureDrops: 128, sessionEverDegraded: true)
         )
         let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
 
         try await coordinator.start(CoordinatorFixtures.request())
         await coordinator.stop()
 
-        #expect(coordinator.lastDegradedWarning == true, "degradedWarning must come from the result")
+        #expect(coordinator.lastDegradedWarning == true, "degradedWarning must come from sessionEverDegraded latch")
         #expect(coordinator.lastDroppedFrames == 128, "lastDroppedFrames must be the frozen snapshot from stop()")
         #expect(coordinator.drops.encoderBackpressureDrops == 128, "final drops come from the result")
+    }
+
+    @Test("stop produces no degraded warning when sessionEverDegraded is false (even with backpressure drops)")
+    func stop_noDegradedWarning_whenNotEverDegraded() async throws {
+        // Key regression guard: high backpressureDrops but sessionEverDegraded == false means
+        // the drops were too scattered to trip the window. The post-stop alert must NOT fire.
+        let fake = FakeRecordingControlling(
+            result: CoordinatorFixtures.result(backpressureDrops: 128, sessionEverDegraded: false)
+        )
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        await coordinator.stop()
+
+        #expect(coordinator.lastDegradedWarning == false, "no warning when session was never degraded")
+        #expect(coordinator.lastDroppedFrames == 128, "lastDroppedFrames still tracked for reference")
     }
 
     @Test("stop is idempotent across concurrent paths — teardown runs once")
@@ -398,9 +427,9 @@ struct RecordingCoordinatorTests {
 
     @Test("AC-9 degraded-warning lifecycle: set on degraded stop, cleared by acknowledge, absent after clean session")
     func degradedWarning_lifecycle() async throws {
-        // Session 1: result carries degradedWarning=true.
+        // Session 1: result carries sessionEverDegraded=true.
         let fake1 = FakeRecordingControlling(
-            result: CoordinatorFixtures.result(backpressureDrops: 64)
+            result: CoordinatorFixtures.result(backpressureDrops: 64, sessionEverDegraded: true)
         )
         // Session 2 fake is returned on the second factory call (stateful factory box, see Counter pattern).
         let fake2 = FakeRecordingControlling(

@@ -46,6 +46,39 @@ nonisolated struct DropCounters {
     nonisolated let cfrNormalizationDrops: Int
 }
 
+// MARK: - DropHealthSnapshot
+
+/// End-of-session drop health report combining cumulative counters with the session-level
+/// degradation verdict and its dominant cause.
+///
+/// `sessionEverDegraded` is a one-way latch: it becomes `true` the first time `DropMonitor`
+/// transitions to `.degraded` (i.e., the live HUD pill flashed degraded at least once) and
+/// never resets within a session. This is intentionally stricter than
+/// `encoderBackpressureDrops > 0` — a handful of scattered backpressure drops spread too
+/// thinly across the window never trip the degraded state and should not trigger the
+/// post-stop warning.
+///
+/// `dominantCause` identifies the backpressure stage that accumulated the most drops (see
+/// `DropCause` tie-break order). `.notDegraded` when the session was never degraded.
+nonisolated struct DropHealthSnapshot {
+    /// Cumulative per-reason drop tallies (same data as `DropCounters`).
+    nonisolated let counters: DropCounters
+    /// `true` when the session transitioned to `.degraded` at least once (live HUD flashed).
+    nonisolated let sessionEverDegraded: Bool
+    /// The backpressure stage that accumulated the most drops, or `.none` if never degraded.
+    nonisolated let dominantCause: DropCause
+}
+
+// swiftformat:disable:next redundantEquatable
+extension DropHealthSnapshot: Equatable {
+    /// Manual `nonisolated` implementation (mirrors `DropCounters`).
+    nonisolated static func == (lhs: DropHealthSnapshot, rhs: DropHealthSnapshot) -> Bool {
+        lhs.counters == rhs.counters
+            && lhs.sessionEverDegraded == rhs.sessionEverDegraded
+            && lhs.dominantCause == rhs.dominantCause
+    }
+}
+
 // MARK: - DropBreakdown
 
 /// Per-source diagnostic drop counts accumulated over a session.
@@ -253,6 +286,25 @@ actor DropMonitor {
     private var captureDrops = 0
     private var cfrNormalizationDrops = 0
 
+    // MARK: - Degradation latch (never reset within a session)
+
+    /// One-way latch: set to `true` on the first `.normal → .degraded` transition, never reset.
+    /// Used by `snapshot()` to populate `DropHealthSnapshot.sessionEverDegraded` so the post-stop
+    /// warning is aligned with whether the live HUD pill actually flashed degraded.
+    private var sessionEverDegraded = false
+
+    // MARK: - Backpressure-only per-source counters (never reset)
+
+    // These count ONLY encoderBackpressureDrops events, keyed by DropSource. They are separate
+    // from breakdownCaptureScreen / breakdownEncode / etc. (which count ALL reasons) so that
+    // CFR-normalization and captureDrop events never misattribute the dominant backpressure cause.
+    // Incremented exclusively inside the .encoderBackpressureDrops branch of ingest(_:).
+    private var bpCaptureScreen = 0
+    private var bpCaptureCameraVideo = 0
+    private var bpCaptureCameraAudio = 0
+    private var bpEncode = 0
+    private var bpWriter = 0
+
     // MARK: - Per-source diagnostic counters (never reset)
 
     // These parallel the DropReason counters above but are keyed by DropSource, not DropReason.
@@ -328,6 +380,7 @@ actor DropMonitor {
         self.observeTasks.append(task)
     }
 
+    // swiftlint:disable cyclomatic_complexity
     /// Routes a single drop event: bumps the cumulative counter for its reason, and — for
     /// backpressure only — feeds the window and recomputes `RecordingState`. Also accumulates
     /// the per-source diagnostic breakdown (independent path, no effect on reason counters).
@@ -339,6 +392,25 @@ actor DropMonitor {
             let detectedAtSeconds = CMTimeGetSeconds(event.detectedAt)
             let degraded = self.window.record(atSeconds: detectedAtSeconds, count: event.count)
             self.applyDegraded(degraded)
+
+            // Backpressure-only per-source tally: incremented exclusively inside this branch so
+            // captureDrop and cfrNormalizationDrops events never misattribute dominant cause.
+            switch event.source {
+            case .captureScreen:
+                self.bpCaptureScreen += event.count
+
+            case .captureCameraVideo:
+                self.bpCaptureCameraVideo += event.count
+
+            case .captureCameraAudio:
+                self.bpCaptureCameraAudio += event.count
+
+            case .encode:
+                self.bpEncode += event.count
+
+            case .writer:
+                self.bpWriter += event.count
+            }
 
         case .captureDrop:
             // Counted for the AC-9 end-of-session warning; never a degraded-state trigger.
@@ -367,6 +439,8 @@ actor DropMonitor {
             self.breakdownWriter += event.count
         }
     }
+
+    // swiftlint:enable cyclomatic_complexity
 
     // MARK: - Recovery tick
 
@@ -410,20 +484,47 @@ actor DropMonitor {
         let newState: RecordingState = degraded ? .degraded : .normal
         guard newState != self.currentState else { return }
         self.currentState = newState
+        if newState == .degraded {
+            // One-way latch: set on the first .normal → .degraded transition, never reset.
+            self.sessionEverDegraded = true
+        }
         self.logger.notice("recording state → \(degraded ? "degraded" : "normal", privacy: .public)")
         self.stateContinuation.yield(newState)
     }
 
     // MARK: - Snapshot
 
-    /// Current cumulative drop tallies for the UI (#37). Counters are never reset, so this grows
-    /// monotonically over the session.
-    func snapshot() -> DropCounters {
-        DropCounters(
-            encoderBackpressureDrops: self.encoderBackpressureDrops,
-            captureDrops: self.captureDrops,
-            cfrNormalizationDrops: self.cfrNormalizationDrops
+    /// Current drop health snapshot for the session, combining cumulative counters with the
+    /// degradation latch and dominant backpressure cause. Used by `RecordingSession.stop()`
+    /// to assemble `RecordingResult` and by `currentDrops()` (polled by the live drop pill).
+    func snapshot() -> DropHealthSnapshot {
+        DropHealthSnapshot(
+            counters: DropCounters(
+                encoderBackpressureDrops: self.encoderBackpressureDrops,
+                captureDrops: self.captureDrops,
+                cfrNormalizationDrops: self.cfrNormalizationDrops
+            ),
+            sessionEverDegraded: self.sessionEverDegraded,
+            dominantCause: self.computeDominantCause()
         )
+    }
+
+    /// Returns the backpressure stage that accumulated the most drops, using the deterministic
+    /// tie-break order: writer > encode > captureScreen > captureCameraVideo > captureCameraAudio.
+    /// Returns `.none` when no backpressure drops occurred.
+    private func computeDominantCause() -> DropCause {
+        // Tie-break order (highest priority first): writer > encode > captureScreen >
+        // captureCameraVideo > captureCameraAudio. The first non-zero bucket among those
+        // with the highest count wins; ties use this order as a deterministic decider.
+        let candidates: [(Int, DropCause)] = [
+            (self.bpWriter, .writer),
+            (self.bpEncode, .encode),
+            (self.bpCaptureScreen, .captureScreen),
+            (self.bpCaptureCameraVideo, .captureCameraVideo),
+            (self.bpCaptureCameraAudio, .captureCameraAudio),
+        ]
+        guard let maxCount = candidates.map(\.0).max(), maxCount > 0 else { return .notDegraded }
+        return candidates.first { $0.0 == maxCount }?.1 ?? .notDegraded
     }
 
     /// Current per-source diagnostic breakdown. Counters are never reset. Used by `stop()` to

@@ -163,10 +163,10 @@ struct DropMonitorCounterSeparationTests {
 
         #expect(emissions.isEmpty) // never degraded
 
-        let counters = await monitor.snapshot()
-        #expect(counters.captureDrops == 4)
-        #expect(counters.cfrNormalizationDrops == 7)
-        #expect(counters.encoderBackpressureDrops == 0)
+        let health = await monitor.snapshot()
+        #expect(health.counters.captureDrops == 4)
+        #expect(health.counters.cfrNormalizationDrops == 7)
+        #expect(health.counters.encoderBackpressureDrops == 0)
     }
 }
 
@@ -223,8 +223,8 @@ struct DropMonitorTransitionTests {
         #expect(emissions == [.degraded, .normal])
 
         // Cumulative counter is unaffected by recovery (never reset).
-        let counters = await monitor.snapshot()
-        #expect(counters.encoderBackpressureDrops == threshold + 1)
+        let health = await monitor.snapshot()
+        #expect(health.counters.encoderBackpressureDrops == threshold + 1)
     }
 
     /// Polls the monitor until at least `atLeast` backpressure drops are recorded, so the test does
@@ -232,7 +232,7 @@ struct DropMonitorTransitionTests {
     private func waitForBackpressureCount(_ monitor: DropMonitor, atLeast: Int) async {
         let maxAttempts = 200
         for _ in 0..<maxAttempts {
-            if await monitor.snapshot().encoderBackpressureDrops >= atLeast {
+            if await monitor.snapshot().counters.encoderBackpressureDrops >= atLeast {
                 return
             }
             await Task.yield()
@@ -413,11 +413,11 @@ struct DropMonitorBreakdownTests {
 
         await monitor.stop()
 
-        let counters = await monitor.snapshot()
+        let health = await monitor.snapshot()
         let bkd = await monitor.breakdownSnapshot()
         let sourceSum = bkd.captureScreen + bkd.captureCameraVideo + bkd.captureCameraAudio + bkd.encode + bkd.writer
         #expect(
-            counters.encoderBackpressureDrops == sourceSum,
+            health.counters.encoderBackpressureDrops == sourceSum,
             "UI reason counter must equal sum of source buckets — source dimension must not alter UI total"
         )
     }
@@ -439,11 +439,11 @@ struct DropMonitorBreakdownTests {
 
         await monitor.stop()
 
-        let counters = await monitor.snapshot()
+        let health = await monitor.snapshot()
         let bkd = await monitor.breakdownSnapshot()
         // captureDrop is counted in captureDrops, NOT encoderBackpressureDrops.
-        #expect(counters.captureDrops == 6)
-        #expect(counters.encoderBackpressureDrops == 0)
+        #expect(health.counters.captureDrops == 6)
+        #expect(health.counters.encoderBackpressureDrops == 0)
         // Source bucket is incremented independently.
         #expect(bkd.captureCameraVideo == 6)
     }

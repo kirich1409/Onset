@@ -130,7 +130,7 @@ Key integration points:
 - Файлы устойчивы к крашу (`movieFragmentInterval`).
 - Не закладывать `AVCaptureMultiCamSession` (нет на macOS) и `SCRecordingOutput` как основной путь.
 - Presenter Overlay не использовать как composite-механизм (нет API управления — включается только пользователем).
-- Входной pixel-rate экрана не превышает бюджет, измеренный CapabilityProbe под фактический чип: 5K/6K дисплеи downscale до вписывания (дефолт ≤ 4K60).
+- Входной pixel-rate экрана не превышает бюджет, измеренный CapabilityProbe под фактический чип: 5K/6K дисплеи downscale до вписывания (дефолт ≤ 4K60). _(5K/6K — граничная защита на гипотетические дисплеи; MVP-цель — 4K.)_
 - Глобальный hotkey только через `RegisterEventHotKey` — без Accessibility/Input Monitoring.
 - Нет исходящего сетевого трафика (no telemetry/analytics; без `com.apple.security.network.client`).
 - Приложение не подавляет и не имитирует системный индикатор записи экрана; запись всегда визуально индицирована.
@@ -200,7 +200,7 @@ Key integration points:
 | Архитектура расширяемости | Pluggable codec/container + RecordingConfiguration + two-tier UX с самого старта | Требование пользователя: добавлять кодеки/форматы/настройки без переписывания |
 | Файлов на запись | 2 (экран + камера), звук микрофона в оба | Явное требование пользователя. Макетная строка-сводка перечисляет 3 ИСТОЧНИКА (экран+камера+микрофон), не 3 файла — файлов 2 |
 | Модель распространения | MVP — Developer ID + Hardened Runtime + notarization, **без App Sandbox**; post-MVP — MAS-совместимость (App Sandbox) | Sandbox конфликтует с прямым доступом к `~/Movies` и авто-relaunch; так делают OBS/ScreenFlow. MAS — отдельная фаза |
-| Верхняя граница разрешения экрана | Дефолт CFR 60; входной pixel-rate экрана **cap по бюджету движка** (CapabilityProbe); 5K/6K дисплеи downscale до вписывания | Research считал 4K60 (0.62–0.75× движка); 5K60 = 1.01–1.14× → на base/Pro 2×HEVC не влезает. Cap по разрешению — рычаг из research |
+| Верхняя граница разрешения экрана | Дефолт CFR 60; входной pixel-rate экрана **cap по бюджету движка** (CapabilityProbe); 5K/6K дисплеи downscale до вписывания | Research считал 4K60 (0.62–0.75× движка); 5K60 = 1.01–1.14× → на base/Pro 2×HEVC не влезает. Cap по разрешению — рычаг из research. _5K/6K — граничная защита, MVP-цель 4K._ |
 | Глобальный hotkey | `RegisterEventHotKey` (Carbon-class), НЕ event-tap | Не требует Accessibility/Input Monitoring TCC (нет 4-го разрешения), MAS-ready |
 | Сеть | Нет сетевого клиента (no egress) | Гарантирует privacy-обещание AC-8 на уровне сборки |
 | Язык / concurrency | Swift 6 + strict concurrency | Compile-time data-race safety для actor-пайплайнов; цена битого файла высока |

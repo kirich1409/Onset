@@ -141,6 +141,43 @@ nonisolated struct DropCounters {
 
 Счётчики суммируют `DropEvent.count` за всю сессию и никогда не сбрасываются.
 
+### `DropHealthSnapshot` — снапшот состояния сессии (#100)
+
+Возвращается `DropMonitor.snapshot()` и передаётся через `RecordingResult`.
+
+```swift
+nonisolated struct DropHealthSnapshot {
+    nonisolated let counters: DropCounters
+    nonisolated let sessionEverDegraded: Bool  // одноразовый latch: сессия хотя бы раз вышла в .degraded
+    nonisolated let dominantCause: DropCause   // доминирующий источник backpressure-дропов
+}
+```
+
+`sessionEverDegraded` — флаг, который устанавливается в `true` при **первом** переходе
+`currentState: .normal → .degraded` (вызов `applyDegraded(true)`) и никогда не сбрасывается
+в пределах сессии. Гарантирует, что `RecordingResult.degradedWarning` срабатывает тогда и
+только тогда, когда скользящее окно (`BackpressureDegradationWindow`) реально пробило порог
+degraded-триггера хотя бы раз — а не на любой единичный исторический дроп.
+
+### `DropCause` — причина degraded-состояния (#100)
+
+```swift
+nonisolated enum DropCause {
+    case notDegraded        // сессия не была degraded (или не было backpressure-дропов)
+    case captureScreen      // dominant: ScreenSource → encoder AsyncStream overflow
+    case captureCameraVideo // dominant: CameraSource video → encoder AsyncStream overflow
+    case captureCameraAudio // dominant: CameraSource audio → encoder AsyncStream overflow
+    case encode             // dominant: VideoEncoder pendingFrameCount gate
+    case writer             // dominant: FileWriter isReadyForMoreMediaData
+}
+```
+
+Доминирующая причина вычисляется по backpressure-only per-source тали (`bpCaptureScreen`,
+`bpCaptureCameraVideo`, `bpCaptureCameraAudio`, `bpEncode`, `bpWriter`) — отдельно от
+существующих breakdown-счётчиков, которые накапливают дропы всех причин.
+Tie-break детерминирован: `writer > encode > captureScreen > captureCameraVideo > captureCameraAudio`.
+Возвращается `.notDegraded`, если сессия ни разу не была degraded (все bp-тали равны нулю).
+
 ### `BackpressureDegradationWindow` — sliding window
 
 - Хранит timestamp'ы backpressure-дропов (только `.encoderBackpressureDrops`).
@@ -150,31 +187,33 @@ nonisolated struct DropCounters {
 
 ### Параметры degraded-триггера
 
-Определены в `Onset/Configuration/RecordingConfiguration.swift`, строки 283–284:
+Определены в `Onset/Configuration/RecordingConfiguration.swift`:
 
 ```swift
 degradedBackpressureThreshold: 30,
 degradedWindowSeconds: 2.0,
 ```
 
-`DropMonitor` получает их при создании (`RecordingSession.swift:287–291`).
+`DropMonitor` получает их при создании (`RecordingSession`).
 
 ### Подписка на каналы в `RecordingSession`
 
 `Onset/Recording/Pipeline/RecordingSession.swift`:
 
-| Строка | Канал |
-|--------|-------|
-| 300 | `monitor.observe(writer.drops)` — FileWriter экрана или камеры (lazy, при создании writer) |
-| 377 | `monitor.observe(source.drops)` — ScreenSource |
-| 378 | `monitor.observe(encoder.drops)` — VideoEncoder экрана |
-| 417 | `monitor.observe(source.drops)` — CameraSource |
-| 418 | `monitor.observe(encoder.drops)` — VideoEncoder камеры |
+| Канал |
+|-------|
+| `monitor.observe(writer.drops)` — FileWriter экрана или камеры (lazy, при создании writer) |
+| `monitor.observe(source.drops)` — ScreenSource |
+| `monitor.observe(encoder.drops)` — VideoEncoder экрана |
+| `monitor.observe(source.drops)` — CameraSource |
+| `monitor.observe(encoder.drops)` — VideoEncoder камеры |
 
 ### Маршрутизация по `DropReason` внутри `DropMonitor`
 
 ```
-.encoderBackpressureDrops → encoderBackpressureDrops (накопитель) + sliding window (Degraded)
+.encoderBackpressureDrops → encoderBackpressureDrops (накопитель)
+                          + bp* per-source тали (captureScreen / captureCameraVideo / … / writer)
+                          + sliding window (Degraded-триггер + sessionEverDegraded latch)
 .captureDrop              → captureDrops (накопитель только)
 .cfrNormalizationDrops    → cfrNormalizationDrops (накопитель только)
 ```
@@ -209,15 +248,21 @@ Menu bar реагирует на `RecordingState` (`.normal` / `.degraded`), а 
 
 ### 5.3 Completion-алерт (`MainView`)
 
-Файл: `Onset/UI/Main/MainView.swift`, строки 59–346.
+Файл: `Onset/UI/Main/MainView.swift`.
 
-После остановки сессии `RecordingCoordinator` устанавливает `lastDegradedWarning = result.degradedWarning`.
+После остановки сессии `RecordingCoordinator` устанавливает `lastDegradedWarning = result.degradedWarning`
+и `lastSessionEverDegraded = result.sessionEverDegraded`.
 
-`RecordingResult.degradedWarning` (`Onset/Recording/Pipeline/RecordingResult.swift:31–34`):
+`RecordingResult.degradedWarning` (`Onset/Recording/Pipeline/RecordingResult.swift`):
 
 ```swift
-// degradedWarning = drops.encoderBackpressureDrops > 0
+// degradedWarning = self.sessionEverDegraded
+// (до #100: drops.encoderBackpressureDrops > 0 — любой единичный дроп приводил к алерту)
 ```
+
+`PostStopAlert.resolve` принимает `degraded: Bool` — гейт алерта «пропущены кадры» завязан
+на `degradedWarning`, а не на `droppedFrames > 0`. Это гарантирует, что алерт появляется
+тогда и только тогда, когда сессия реально прошла через `.degraded` (порог пробит в окне).
 
 Приоритет алертов (`.writeError` > `.degradedWarning` > `nil`): при одновременном write-failure
 алерт про диск перекрывает алерт про дропы.
@@ -231,31 +276,27 @@ Menu bar реагирует на `RecordingState` (`.normal` / `.degraded`), а 
 
 ## 6. Спека vs код — известные дефекты
 
-Документ описывает фактическое поведение. Расхождения со спекой (#100):
+### ~~Дефект 1: конфляция источников дропов в `.encoderBackpressureDrops` (#100)~~ — исправлено в #100
 
-### Дефект 1: конфляция источников дропов в `.encoderBackpressureDrops` (#100)
+**Было**: в `.encoderBackpressureDrops` попадали четыре разных события (capture overflow экрана,
+capture overflow камеры video/audio, encoder pendingFrame gate, FileWriter disk backpressure) —
+все под одним именем. Пользователь видел ложный диагноз «диск не успевает», когда причина была
+в capture-стриме.
 
-**Спека** (`docs/specs/2026-06-02-onset-recording-mvp.md`, AC-8): счётчики раздельны по семантике;
-`encoderBackpressureDrops` — только `isReadyForMoreMediaData == false` (перегрузка энкодера/диска);
-источник backpressure логируется с признаком «энкодер vs writer/диск».
+**Теперь**: добавлен `DropCause` enum и backpressure-only per-source тали (`bpCaptureScreen`,
+`bpCaptureCameraVideo`, `bpCaptureCameraAudio`, `bpEncode`, `bpWriter`). Доминирующая причина
+вычисляется при вызове `snapshot()` и передаётся через `DropHealthSnapshot.dominantCause`
+→ `RecordingResult.dominantCause`. UI-отображение per-cause причины — post-MVP.
 
-**Код**: в `.encoderBackpressureDrops` попадают **четыре разных** события:
-1. Переполнение `AsyncStream` экрана (`ScreenSource`) — стадия capture, не encode.
-2. Переполнение `AsyncStream` камеры video/audio (`CameraSourceHelpers`) — стадия capture.
-3. Гейт `pendingFrameCount >= 4` в `VideoEncoder` — стадия encode.
-4. `isReadyForMoreMediaData == false` в `FileWriter` — стадия write/disk.
+### ~~Дефект 2: `degradedWarning = encoderBackpressureDrops > 0` (#100)~~ — исправлено в #100
 
-Следствие: degraded-pill «Пропущено N кадров · диск», completion-алерт «пропущены кадры
-из-за перегрузки диска» и degraded-состояние срабатывают на любой overflow capture-стрима —
-в т.ч. когда диск ни при чём. Пользователь получает заведомо ложный диагноз.
+**Было**: `RecordingResult.degradedWarning` вычислялось как `encoderBackpressureDrops > 0` —
+любой единственный дроп за всю запись приводил к completion-алерту. Скользящее окно
+(`DropMonitor`) влияло на живое `.degraded`-состояние, но не на completion-алерт.
 
-### Дефект 2: `degradedWarning = encoderBackpressureDrops > 0` (#100)
-
-**Спека**: Degraded — backpressure-дропы за скользящее окно выше порога (30 за 2с).
-
-**Код**: `RecordingResult.degradedWarning` вычисляется как `encoderBackpressureDrops > 0` —
-любой единственный дроп за всю запись приводит к алерту. Скользящее окно (`DropMonitor`)
-влияет на живое `.degraded`-состояние, но не на completion-алерт.
+**Теперь**: введён `sessionEverDegraded` latch в `DropMonitor`. Флаг устанавливается только при
+реальном переходе `.normal → .degraded` (порог sliding window пробит). Формула:
+`degradedWarning = self.sessionEverDegraded`. Единичный исторический дроп не даёт алерта.
 
 ### ~~Дефект 3: отсутствие структурированного логирования стадии дропа (#100)~~ — исправлено в #102
 
@@ -292,7 +333,7 @@ log stream --predicate 'subsystem == "dev.androidbroadcast.Onset" and category =
 ```
 
 **Примечание**: телеметрия устраняет диагностическую часть Дефекта 3. Конфляция счётчиков
-(Дефект 1) и некорректная формула `degradedWarning` (Дефект 2) остаются открытыми (#100).
+(Дефект 1) и некорректная формула `degradedWarning` (Дефект 2) исправлены в #100.
 
 ### Issue #65 — предыстория
 
@@ -320,9 +361,9 @@ Camera capture работает с фиксированным форматом 3
 log stream --predicate 'subsystem == "dev.androidbroadcast.Onset" and category == "telemetry"'
 ```
 
-Все четыре источника `encoderBackpressureDrops` по-прежнему суммируются в один счётчик в UI
-(Дефект 1, #100 не закрыт). Телеметрия показывает `gate_drop` (гейт энкодера) отдельно,
-но writer-backpressure в отдельное поле не вынесен — полное разделение счётчиков остаётся за #100.
+Все четыре источника `encoderBackpressureDrops` суммируются в один накопительный счётчик в UI
+(live pill). Телеметрия показывает `gate_drop` (гейт энкодера) отдельно.
+`DropCause.dominantCause` (#100) несёт доминирующую причину, но per-cause отображение в UI — post-MVP.
 
 ### Устаревшая диагностика через FileWriter
 
@@ -332,12 +373,6 @@ log stream --predicate 'subsystem == "dev.androidbroadcast.Onset" and category =
 ```bash
 log stream --predicate 'subsystem == "dev.androidbroadcast.Onset"' --level debug
 ```
-
-### Открытые пункты (#100)
-
-`VideoEncoder` пока не логирует encode-латентность слота (время submit → callback).
-`FileWriter` не логирует длительность эпизодов `!isReadyForMoreMediaData`. Оба пункта —
-часть плана #100.
 
 ---
 
