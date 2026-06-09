@@ -18,16 +18,20 @@ private let cameraPreviewLogger = Logger(
 /// non-Sendable `CALayer` or `AVCaptureVideoPreviewLayer` occurs because both are created on
 /// `MainActor`.
 ///
-/// Uses layer-**hosting**: `init` creates the `AVCaptureVideoPreviewLayer`, assigns it directly
-/// to `self.layer`, then sets `wantsLayer = true`. Order matters — assign `self.layer` first,
-/// then `wantsLayer = true`; the reverse order causes AppKit to create a generic backing layer
-/// that shadows the preview layer.
+/// Uses **sublayer composition**: `init` creates `AVCaptureVideoPreviewLayer` and stores it as
+/// `previewLayer`; `wantsLayer = true` makes AppKit create (and own) a generic backing layer;
+/// `viewDidMoveToWindow()` adds `previewLayer` as a sublayer of that backing layer.
 ///
-/// Layer-hosting is robust in an `NSViewRepresentable` context because `makeNSView` returns
-/// a fully-configured view; AppKit does not preempt or replace the hosted layer. The
-/// `makeBackingLayer()` override approach is unreliable here because SwiftUI's hosting
-/// infrastructure may install a backing layer before `makeBackingLayer()` fires, silently
-/// discarding the preview layer.
+/// Layer-**hosting** (assigning `self.layer = previewLayer` before `wantsLayer = true`) is
+/// incompatible with `NSViewRepresentable`: SwiftUI's hosting infrastructure applies clip shapes
+/// and size constraints by owning/masking the hosted NSView's backing layer. Assigning the
+/// `AVCaptureVideoPreviewLayer` as `self.layer` causes SwiftUI to shadow or detach it from the
+/// compositing tree — the layer has a valid session, connection, and bounds but is never
+/// rendered, producing a permanently black frame.
+///
+/// With the sublayer approach the SwiftUI-managed backing layer remains the compositing root
+/// (clip and frame constraints apply correctly); `previewLayer` as a sublayer receives rendered
+/// frames and is clipped by the backing layer — matching the visual intent.
 ///
 /// `AVCaptureVideoPreviewLayer.session` is a nullable settable property. Setting it to `nil`
 /// shows a black frame; setting it to a running session starts live preview immediately.
@@ -37,16 +41,18 @@ private let cameraPreviewLogger = Logger(
 /// and persists; `updateNSView` calls `update(sessionHandle:)` as the handle becomes available.
 @MainActor
 final class CameraPreviewView: NSView {
-    /// The `AVCaptureVideoPreviewLayer` hosted as this view's layer.
+    /// The `AVCaptureVideoPreviewLayer` added as a sublayer of the SwiftUI-managed backing layer.
     ///
-    /// Assigned in `init` before `wantsLayer = true`. Non-nil for the lifetime of the view.
+    /// Created in `init`, attached in `viewDidMoveToWindow()` (when `self.layer` is available),
+    /// and sized to `self.bounds` in `layout()`. Non-nil for the lifetime of the view.
     private let previewLayer: AVCaptureVideoPreviewLayer
 
     /// Initialises the view with an optional live camera session.
     ///
-    /// Creates the `AVCaptureVideoPreviewLayer`, attaches `sessionHandle.session` if provided,
-    /// then hosts it as the view's own layer. If `sessionHandle` is nil the layer renders black
-    /// until `update(sessionHandle:)` is called with a live session.
+    /// Creates the `AVCaptureVideoPreviewLayer` and sets `wantsLayer = true` so AppKit allocates
+    /// a generic backing layer that SwiftUI will manage. Does **not** assign `self.layer = previewLayer`
+    /// — that causes the layer-hosting incompatibility described in the type doc. The preview layer
+    /// is attached as a sublayer in `viewDidMoveToWindow()` when `self.layer` is available.
     ///
     /// - Parameter sessionHandle: Wraps the running `AVCaptureSession` to attach to the
     ///   preview layer. May be `nil`; the session is attached via `update(sessionHandle:)`
@@ -59,16 +65,14 @@ final class CameraPreviewView: NSView {
 
         super.init(frame: .zero)
 
-        // Layer-hosting: assign self.layer BEFORE wantsLayer = true.
-        // Reversing the order causes AppKit to allocate a generic CALayer and host
-        // the preview layer as a sublayer, which does not receive automatic layout.
-        self.layer = self.previewLayer
+        // wantsLayer = true without self.layer assignment: AppKit creates a generic backing
+        // layer that SwiftUI manages. The preview layer attaches as a sublayer in
+        // viewDidMoveToWindow(), once self.layer is realized.
         self.wantsLayer = true
 
         cameraPreviewLogger.debug(
-            "preview view init — session=\(sessionHandle != nil ? "real" : "nil")"
+            "preview view init — session=\(sessionHandle != nil ? "real" : "nil", privacy: .public)"
         )
-        cameraPreviewLogger.debug("preview layer hosted")
     }
 
     @available(*, unavailable)
@@ -76,10 +80,38 @@ final class CameraPreviewView: NSView {
         fatalError("init(coder:) is unavailable")
     }
 
+    /// Attaches `previewLayer` as a sublayer of the SwiftUI-managed backing layer.
+    ///
+    /// Called when the view enters a window, at which point `self.layer` is realized.
+    /// The add is idempotent: the check `previewLayer.superlayer == nil` prevents double-adding
+    /// if `viewDidMoveToWindow()` is called more than once (e.g. moving between windows).
+    ///
+    /// Sets `previewLayer.frame = self.bounds` immediately after attaching so the first
+    /// render does not show a zero-sized frame before `layout()` fires.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+
+        if self.previewLayer.superlayer == nil {
+            self.layer?.addSublayer(self.previewLayer)
+            // Size the sublayer immediately — layout() may not fire before the first frame is
+            // composited, and a zero frame on first attach would show black.
+            self.previewLayer.frame = self.bounds
+        }
+
+        cameraPreviewLogger.debug(
+            """
+            preview attached — \
+            selfLayerIsPreview=\(self.layer === self.previewLayer, privacy: .public) \
+            superlayerSet=\(self.previewLayer.superlayer != nil, privacy: .public) \
+            layerType=\(String(describing: type(of: self.layer)), privacy: .public)
+            """
+        )
+    }
+
     /// Updates the live preview session without recreating the view.
     ///
     /// Called from `NSViewRepresentable.updateNSView(_:context:)` whenever the session
-    /// handle changes. Reassigns `session` on the hosted `AVCaptureVideoPreviewLayer` — the
+    /// handle changes. Reassigns `session` on the `AVCaptureVideoPreviewLayer` — the
     /// layer is always available because it is created in `init`.
     ///
     /// - When `sessionHandle` is non-nil: attaches the running session to start live preview.
@@ -87,17 +119,20 @@ final class CameraPreviewView: NSView {
     func update(sessionHandle: SessionHandle?) {
         self.previewLayer.session = sessionHandle?.session
         cameraPreviewLogger.debug(
-            "preview session updated — session=\(sessionHandle != nil ? "real" : "nil")"
+            "preview session updated — session=\(sessionHandle != nil ? "real" : "nil", privacy: .public)"
         )
     }
 
-    /// Keeps the preview layer sized to the view's bounds on layout.
+    /// Keeps the preview sublayer sized to the view's bounds on every layout pass.
     ///
-    /// Layer-hosting does not auto-size the hosted layer — AppKit only auto-sizes
-    /// backing layers managed by `makeBackingLayer`. This override is therefore required
-    /// (not merely a safety net) to keep the preview layer filling the view.
+    /// AppKit does not auto-size manually-added sublayers — only backing layers managed by
+    /// `makeBackingLayer` are auto-sized. This override is required to keep `previewLayer`
+    /// filling the view after every bounds change.
     override func layout() {
         super.layout()
         self.previewLayer.frame = self.bounds
+        cameraPreviewLogger.debug(
+            "preview layout — bounds=\(NSStringFromRect(self.bounds), privacy: .public)"
+        )
     }
 }
