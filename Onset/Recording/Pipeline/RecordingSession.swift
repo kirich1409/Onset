@@ -735,9 +735,10 @@ actor RecordingSession {
         } else {
             .empty(healthSnapshot)
         }
+        let warn = result.degradedWarning(threshold: self.config.postStopDropWarningThreshold)
         self.logger.info(
             // swiftlint:disable:next line_length
-            "RecordingSession stopped — files=\(result.outputURLs.count) warn=\(result.sessionEverDegraded) cause=\(String(describing: result.dominantCause))"
+            "RecordingSession stopped — files=\(result.outputURLs.count) warn=\(warn) cause=\(String(describing: result.dominantCause))"
         )
         return result
     }

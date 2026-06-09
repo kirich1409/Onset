@@ -251,19 +251,19 @@ Menu bar реагирует на `RecordingState` (`.normal` / `.degraded`), а 
 
 Файл: `Onset/UI/Main/MainView.swift`.
 
-После остановки сессии `RecordingCoordinator` устанавливает `lastDegradedWarning = result.degradedWarning`
-и `lastSessionEverDegraded = result.sessionEverDegraded`.
+После остановки сессии `RecordingCoordinator` устанавливает `lastDroppedFrames` из `result.drops.encoderBackpressureDrops`;
+`lastDegradedWarning` вычисляется как `lastDroppedFrames >= RecordingConfiguration.postStopDropWarningThreshold`.
 
-`RecordingResult.degradedWarning` (`Onset/Recording/Pipeline/RecordingResult.swift`):
+`RecordingResult.degradedWarning(threshold:)` (`Onset/Recording/Pipeline/RecordingResult.swift`):
 
 ```swift
-// degradedWarning = self.sessionEverDegraded
-// (до #100: drops.encoderBackpressureDrops > 0 — любой единичный дроп приводил к алерту)
+// degradedWarning(threshold:) = drops.encoderBackpressureDrops >= threshold
+// Порог: RecordingConfiguration.postStopDropWarningThreshold (default 5, placeholder)
 ```
 
-`PostStopAlert.resolve` принимает `degraded: Bool` — гейт алерта «пропущены кадры» завязан
-на `degradedWarning`, а не на `droppedFrames > 0`. Это гарантирует, что алерт появляется
-тогда и только тогда, когда сессия реально прошла через `.degraded` (порог пробит в окне).
+`PostStopAlert.resolve(writeError:droppedFrames:threshold:)` — гейт алерта «пропущены кадры» завязан
+на сравнении `droppedFrames >= threshold`. Алерт появляется тогда и только тогда, когда кумулятивное
+число `encoderBackpressureDrops` за сессию достигло порога.
 
 Приоритет алертов (`.writeError` > `.degradedWarning` > `nil`): при одновременном write-failure
 алерт про диск перекрывает алерт про дропы.
@@ -289,15 +289,16 @@ capture overflow камеры video/audio, encoder pendingFrame gate, FileWriter
 вычисляется при вызове `snapshot()` и передаётся через `DropHealthSnapshot.dominantCause`
 → `RecordingResult.dominantCause`. UI-отображение per-cause причины — post-MVP.
 
-### ~~Дефект 2: `degradedWarning = encoderBackpressureDrops > 0` (#100)~~ — исправлено в #100
+### ~~Дефект 2: `degradedWarning = encoderBackpressureDrops > 0` (#100)~~ — исправлено в #132
 
 **Было**: `RecordingResult.degradedWarning` вычислялось как `encoderBackpressureDrops > 0` —
 любой единственный дроп за всю запись приводил к completion-алерту. Скользящее окно
 (`DropMonitor`) влияло на живое `.degraded`-состояние, но не на completion-алерт.
 
-**Теперь**: введён `sessionEverDegraded` latch в `DropMonitor`. Флаг устанавливается только при
-реальном переходе `.normal → .degraded` (порог sliding window пробит). Формула:
-`degradedWarning = self.sessionEverDegraded`. Единичный исторический дроп не даёт алерта.
+**Стало**: `RecordingResult.degradedWarning(threshold:)` — метод, принимающий `postStopDropWarningThreshold`
+из `RecordingConfiguration`. Алерт срабатывает при `encoderBackpressureDrops >= threshold` (AC-9: кумулятивный
+итог, не скользящее окно). Порог отдельный от AC-8 (`degradedBackpressureThreshold`) — разная семантика
+(кумулятив vs. rate).
 
 ### ~~Дефект 3: отсутствие структурированного логирования стадии дропа (#100)~~ — исправлено в #102
 

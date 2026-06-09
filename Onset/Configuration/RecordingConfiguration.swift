@@ -148,6 +148,16 @@ nonisolated struct RecordingConfiguration {
     /// **Placeholder** — calibrate post-MVP.
     nonisolated let degradedWindowSeconds: Double
 
+    /// Minimum cumulative encoder-backpressure drop count across the whole session that triggers
+    /// the post-stop "возможны рывки" alert (AC-9). Inclusive: `total >= threshold` → alert.
+    ///
+    /// Intentionally separate from `degradedBackpressureThreshold` (the live sliding-window rate
+    /// threshold, AC-8): the live indicator measures rate within a short window; the post-stop
+    /// alert measures the session-total and should only fire for a significant number of drops.
+    /// `>= threshold` here vs `>` in AC-8 — each comparison matches its own spec wording.
+    /// **Placeholder** — calibrate post-MVP against real hardware drop rates.
+    nonisolated let postStopDropWarningThreshold: Int
+
     // MARK: - Engine Budget Cap
 
     /// Throughput ceiling for the encode engine. Used by CapabilityProbe pre-flight.
@@ -288,6 +298,7 @@ nonisolated struct RecordingConfiguration {
             // Degraded-state policy placeholders — калибруется post-MVP against real drop rates.
             degradedBackpressureThreshold: 30,
             degradedWindowSeconds: 2.0,
+            postStopDropWarningThreshold: 5,
             budgetCap: budgetCap,
             outputDirectory: outputDirectory
         )
@@ -323,6 +334,7 @@ extension RecordingConfiguration: Equatable {
             && lhs.movieFragmentInterval == rhs.movieFragmentInterval
             && lhs.degradedBackpressureThreshold == rhs.degradedBackpressureThreshold
             && lhs.degradedWindowSeconds == rhs.degradedWindowSeconds
+            && lhs.postStopDropWarningThreshold == rhs.postStopDropWarningThreshold
             && lhs.budgetCap == rhs.budgetCap
             && lhs.outputDirectory == rhs.outputDirectory
     }
