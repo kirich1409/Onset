@@ -221,3 +221,4 @@ TCC-разрешения, политика записи, запись MP4.
 - Миграция на Swift 6 concurrency — <https://www.swift.org/migration/>
 - Каталог правил SwiftLint — <https://realm.github.io/SwiftLint/rule-directory.html>
 - Правила SwiftFormat — <https://github.com/nicklockwood/SwiftFormat/blob/main/Rules.md>
+- Ограничения AVFoundation на macOS (4K/60fps, L5-verified) — [`docs/quality/macos-avfoundation-camera-limits.md`](quality/macos-avfoundation-camera-limits.md)
