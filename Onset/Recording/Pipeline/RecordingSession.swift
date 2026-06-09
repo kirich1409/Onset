@@ -92,6 +92,13 @@ actor RecordingSession {
     private let micDevice: MicrophoneDevice?
     private let config: RecordingConfiguration
 
+    /// The wall-clock time at which this session instance was created.
+    ///
+    /// Captured once in `init` and shared by both URL providers so the screen and camera output
+    /// files of the same session always carry an identical timestamp segment (spec §135, #198).
+    /// `RecordingSession` is one-shot — `init` ≈ session-start for naming purposes.
+    private let sessionStartDate: Date
+
     // MARK: - Seams
 
     private let probe: @Sendable () -> ProbeResult
@@ -175,6 +182,11 @@ actor RecordingSession {
         self.encoderFactory = encoderFactory
         self.sourceFactory = sourceFactory
 
+        // Capture the session-start timestamp once. Both URL providers below close over this
+        // value so screen and camera files always share an identical timestamp segment (#198).
+        let startDate = Date()
+        self.sessionStartDate = startDate
+
         // UI state stream + its continuation, created here so a subscriber can iterate before
         // start() builds the DropMonitor whose transitions are forwarded into this continuation.
         let (stateStream, stateContinuation) = AsyncStream.makeStream(of: RecordingState.self)
@@ -191,8 +203,10 @@ actor RecordingSession {
         self.probe = probe ?? { CapabilityProbe.probe(display: display, cameraFormat: cameraFormat, config: config) }
 
         // Default live writer factory: place both files in the configured output directory.
+        // Both kinds close over `startDate` — not a fresh Date() per call — so the pair of files
+        // for one session is guaranteed to share the same timestamp component (#198).
         self.writerFactory = writerFactory ?? LiveWriterFactory(configuration: config) { kind in
-            RecordingSession.defaultOutputURL(for: kind, config: config)
+            RecordingSession.defaultOutputURL(for: kind, config: config, date: startDate)
         }
     }
 
@@ -747,21 +761,25 @@ actor RecordingSession {
     // MARK: - Default output URL
 
     /// Builds the default output URL for a pipeline under the configured output directory.
+    ///
+    /// Delegates to `RecordingOutput.uniqueOutputURL` for spec-compliant naming (§135) and
+    /// collision avoidance. The `date` parameter is the session-start timestamp shared by
+    /// both pipelines in the same session so screen and camera files carry identical timestamps.
     private static func defaultOutputURL(
         for kind: RecordingPipelineKind,
-        config: RecordingConfiguration
+        config: RecordingConfiguration,
+        date: Date
     )
     -> URL {
-        let suffix = switch kind {
-        case .screen:
-            "screen"
-
-        case .camera:
-            "camera"
+        let fileKind: RecordingFileKind = switch kind {
+        case .screen: .screen
+        case .camera: .camera
         }
-        let timestamp = Int(Date().timeIntervalSince1970)
-        return config.outputDirectory
-            .appending(path: "Onset-\(timestamp)-\(suffix).mp4")
+        return RecordingOutput.uniqueOutputURL(
+            in: config.outputDirectory,
+            timestamp: date,
+            kind: fileKind
+        )
     }
 }
 

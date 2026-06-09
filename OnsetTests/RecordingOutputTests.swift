@@ -150,3 +150,134 @@ struct RecordingOutputDirectoryTests {
         #expect(perms == 0o600)
     }
 }
+
+// MARK: - RecordingOutput.uniqueOutputURL — collision guard (#198)
+
+@Suite("RecordingOutput.uniqueOutputURL")
+struct RecordingOutputUniqueURLTests {
+    /// Shared fixed timestamp — same value used throughout to control the base name.
+    ///
+    /// 1_749_038_205 = 2026-06-04 14:30:05 UTC.
+    private var testDate: Date {
+        Date(timeIntervalSince1970: 1_749_038_205)
+    }
+
+    /// UUID-scoped temp directory: each `@Suite` instance is fresh so parallel tests
+    /// do not share a directory.
+    private let tempDir: URL = FileManager.default.temporaryDirectory
+        .appending(path: "UniqueURLTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+
+    // MARK: - No collision
+
+    @Test("uniqueOutputURL returns base name when no file exists")
+    func noCollision_returnsBaseName() throws {
+        try FileManager.default.createDirectory(at: self.tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: self.tempDir) }
+
+        let url = RecordingOutput.uniqueOutputURL(in: self.tempDir, timestamp: self.testDate, kind: .screen)
+        let name = url.lastPathComponent
+        #expect(name == RecordingOutput.fileName(timestamp: self.testDate, kind: .screen))
+    }
+
+    // MARK: - Shared timestamp across kinds
+
+    @Test("screen and camera URLs from the same timestamp share the date segment")
+    func sameTimestamp_screenAndCameraShareDateSegment() throws {
+        try FileManager.default.createDirectory(at: self.tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: self.tempDir) }
+
+        let screenURL = RecordingOutput.uniqueOutputURL(in: self.tempDir, timestamp: self.testDate, kind: .screen)
+        let cameraURL = RecordingOutput.uniqueOutputURL(in: self.tempDir, timestamp: self.testDate, kind: .camera)
+
+        // Extract date segment from each name.
+        let screenName = screenURL.lastPathComponent
+        let cameraName = cameraURL.lastPathComponent
+        let screenDate = screenName.dropFirst("Onset ".count).dropLast(" — Screen.mp4".count)
+        let cameraDate = cameraName.dropFirst("Onset ".count).dropLast(" — Camera.mp4".count)
+
+        #expect(
+            String(screenDate) == String(cameraDate),
+            "screen and camera must share the identical timestamp segment"
+        )
+    }
+
+    // MARK: - Collision: single pre-existing file
+
+    @Test("uniqueOutputURL appends (2) when the base name already exists")
+    func collision_appendsTwoSuffix() throws {
+        try FileManager.default.createDirectory(at: self.tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: self.tempDir) }
+
+        // Pre-create the base file so a collision is guaranteed.
+        let baseName = RecordingOutput.fileName(timestamp: self.testDate, kind: .screen)
+        let basePath = self.tempDir.appending(path: baseName).path(percentEncoded: false)
+        FileManager.default.createFile(atPath: basePath, contents: nil)
+
+        let url = RecordingOutput.uniqueOutputURL(in: self.tempDir, timestamp: self.testDate, kind: .screen)
+        let name = url.lastPathComponent
+        #expect(name.hasSuffix("(2).mp4"), "expected (2) disambiguator, got: \(name)")
+        #expect(name.hasPrefix("Onset "), "must keep the Onset prefix: \(name)")
+        #expect(name != baseName, "must be different from the colliding base name")
+    }
+
+    // MARK: - Collision: multiple pre-existing files
+
+    @Test("uniqueOutputURL increments counter past existing (2) file")
+    func collision_incrementsCounterPastTwo() throws {
+        try FileManager.default.createDirectory(at: self.tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: self.tempDir) }
+
+        let base = RecordingOutput.fileName(timestamp: self.testDate, kind: .camera)
+        let stem = URL(filePath: base).deletingPathExtension().lastPathComponent
+        // Pre-create base + (2) to force counter to reach (3).
+        let basePath = self.tempDir.appending(path: base).path(percentEncoded: false)
+        let twoPath = self.tempDir.appending(path: "\(stem) (2).mp4").path(percentEncoded: false)
+        FileManager.default.createFile(atPath: basePath, contents: nil)
+        FileManager.default.createFile(atPath: twoPath, contents: nil)
+
+        let url = RecordingOutput.uniqueOutputURL(in: self.tempDir, timestamp: self.testDate, kind: .camera)
+        let name = url.lastPathComponent
+        #expect(name.hasSuffix("(3).mp4"), "expected (3) disambiguator, got: \(name)")
+    }
+
+    // MARK: - Kind mapping correctness
+
+    @Test("uniqueOutputURL — screen kind produces a — Screen suffix")
+    func kindMapping_screen() throws {
+        try FileManager.default.createDirectory(at: self.tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: self.tempDir) }
+
+        let url = RecordingOutput.uniqueOutputURL(in: self.tempDir, timestamp: self.testDate, kind: .screen)
+        #expect(url.lastPathComponent.contains("— Screen"), "screen kind must embed — Screen suffix")
+    }
+
+    @Test("uniqueOutputURL — camera kind produces a — Camera suffix")
+    func kindMapping_camera() throws {
+        try FileManager.default.createDirectory(at: self.tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: self.tempDir) }
+
+        let url = RecordingOutput.uniqueOutputURL(in: self.tempDir, timestamp: self.testDate, kind: .camera)
+        #expect(url.lastPathComponent.contains("— Camera"), "camera kind must embed — Camera suffix")
+    }
+
+    // MARK: - Uniquifier result does not exist on disk
+
+    @Test("uniqueOutputURL result path does not exist on disk after collision")
+    func collision_resultDoesNotExistOnDisk() throws {
+        try FileManager.default.createDirectory(at: self.tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: self.tempDir) }
+
+        // Pre-create the base to force a collision.
+        let baseName = RecordingOutput.fileName(timestamp: self.testDate, kind: .screen)
+        FileManager.default.createFile(
+            atPath: self.tempDir.appending(path: baseName).path(percentEncoded: false),
+            contents: nil
+        )
+
+        let url = RecordingOutput.uniqueOutputURL(in: self.tempDir, timestamp: self.testDate, kind: .screen)
+        #expect(
+            !FileManager.default.fileExists(atPath: url.path(percentEncoded: false)),
+            "the returned URL must not already exist on disk"
+        )
+    }
+}
