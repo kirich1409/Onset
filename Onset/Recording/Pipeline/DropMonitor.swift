@@ -32,8 +32,9 @@ import os
 /// Cumulative, never-reset drop tallies for the UI (#37) and the AC-9 end-of-session warning.
 ///
 /// Each counter accumulates `DropEvent.count` over the whole session and is NEVER reset — these
-/// are distinct from the sliding window that drives `RecordingState`. The three fields map 1-to-1
-/// with `DropReason`.
+/// are distinct from the sliding window that drives `RecordingState`. Three fields cover four
+/// `DropReason` cases: `.captureDrop` and `.captureBackpressureDrops` fold into `captureDrops`;
+/// only `.encoderBackpressureDrops` feeds the degraded-state window.
 nonisolated struct DropCounters {
     /// Total `DropReason.encoderBackpressureDrops` seen this session. Also the only reason that
     /// feeds the degraded-state window.

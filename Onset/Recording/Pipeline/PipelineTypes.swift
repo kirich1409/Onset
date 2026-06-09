@@ -211,7 +211,9 @@ nonisolated struct EncodedSample: @unchecked Sendable {
 
 /// The pipeline stage responsible for a dropped frame or sample.
 ///
-/// Maps 1-to-1 with the four DropMonitor counters tracked by #35/#36/#100:
+/// Maps to three `DropMonitor` counters (tracked by #35/#36/#100) — not one-to-one:
+/// `.captureDrop` and `.captureBackpressureDrops` both fold into the single `captureDrops`
+/// counter and do NOT drive the degraded-state window:
 /// - `captureDrop`: counted at the source (SCStream / AVCapture delivery callback).
 /// - `cfrNormalizationDrops`: counted by the CFR normalizer when duplicate frames are
 ///   emitted for hold-repeat but the downstream is already full.
