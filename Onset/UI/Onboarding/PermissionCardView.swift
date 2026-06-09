@@ -231,7 +231,12 @@ struct PermissionCardView: View {
     /// Extracted as a `static` pure function so tests can verify the composed string
     /// without instantiating a view.
     ///
-    /// Format: «\(title). \(subtitle). \(statusText)»
+    /// Format: «\(title). \(subtitle). \(statusText)» when subtitle is non-empty,
+    /// or «\(title). \(statusText)» when subtitle is empty.
+    ///
+    /// Subtitle source strings often end with a period (e.g. "Logitech MX Brio."); this
+    /// helper strips exactly one trailing period before composing so VoiceOver does not
+    /// read a double-stop.
     static func cardLabel(title: String, subtitle: String, status: PermissionCardStatus) -> String {
         let statusText = switch status {
         case .required: "Требуется"
@@ -239,7 +244,13 @@ struct PermissionCardView: View {
         case .denied: "Запрещён"
         case .authorized: "Выдано"
         }
-        return "\(title). \(subtitle). \(statusText)"
+        // Strip a single trailing period from subtitle: source strings like
+        // "Logitech MX Brio." would otherwise produce a double-stop when composed.
+        let normalizedSubtitle = subtitle.hasSuffix(".") ? String(subtitle.dropLast()) : subtitle
+        if normalizedSubtitle.isEmpty {
+            return "\(title). \(statusText)"
+        }
+        return "\(title). \(normalizedSubtitle). \(statusText)"
     }
 }
 
