@@ -267,6 +267,15 @@ actor ScreenSource: VideoFrameSource {
             screenSourceLogger.error("startCapture failed: \(error)")
             throw RecordingError.captureSetupFailed(error)
         }
+        // Close the stop()-during-.starting race: if stop() ran while startCapture()
+        // was suspended, captureState is now .stopped and streams are already finished.
+        // Continuing would overwrite .stopped with .running, creating a zombie SCStream
+        // that captures forever (screen-recording indicator stuck, resource leak).
+        guard case .starting = self.captureState else {
+            try? await scStream.stopCapture()
+            screenSourceLogger.info("Capture aborted — stop() called during startup")
+            return
+        }
         self.captureState = .running(stream: scStream, shim: shim)
         screenSourceLogger.info("Capture started — fps: \(self.plan.screenFps)")
     }
