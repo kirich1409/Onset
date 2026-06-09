@@ -69,7 +69,7 @@ struct RecordingView: View {
 /// trivially previewable and all display-logic paths unit-testable via `RecordingDisplayMapper`.
 struct RecordingContentView: View {
     private enum Metrics {
-        // Layout
+        // Layout — static: not Dynamic-Type-scaled
         static let outerPadding: CGFloat = 20
         static let sectionSpacing: CGFloat = 0
         static let statusSpacing: CGFloat = 4
@@ -89,18 +89,30 @@ struct RecordingContentView: View {
         static let stopButtonCornerRadius: CGFloat = 10
         static let stopButtonIconSpacing: CGFloat = 6
         static let statusDotSize: CGFloat = 8
-
-        // Typography
-        static let statusFontSize: CGFloat = 13
-        static let timerFontSize: CGFloat = 56
-        static let pillFontSize: CGFloat = 12
-        static let checklistLabelFontSize: CGFloat = 13
-        static let checklistCheckmarkFontSize: CGFloat = 11
-        static let stopButtonIconFontSize: CGFloat = 12
-        static let stopButtonLabelFontSize: CGFloat = 14
-        static let footerFontSize: CGFloat = 11
         static let footerSpacing: CGFloat = 4
     }
+
+    /// Typography — `@ScaledMetric`: scales with the system Dynamic Type setting (issue #136).
+    /// `@ScaledMetric` cannot be static, so typography values live as instance properties here
+    /// rather than in the `Metrics` enum.
+    @ScaledMetric(relativeTo: .body)
+    private var statusFontSize: CGFloat = 13
+    /// The timer is large by design; scaling relative to .largeTitle preserves its visual
+    /// weight across Dynamic Type sizes while still responding to accessibility preferences.
+    @ScaledMetric(relativeTo: .largeTitle)
+    private var timerFontSize: CGFloat = 56
+    @ScaledMetric(relativeTo: .caption)
+    private var pillFontSize: CGFloat = 12
+    @ScaledMetric(relativeTo: .body)
+    private var checklistLabelFontSize: CGFloat = 13
+    @ScaledMetric(relativeTo: .caption)
+    private var checklistCheckmarkFontSize: CGFloat = 11
+    @ScaledMetric(relativeTo: .caption)
+    private var stopButtonIconFontSize: CGFloat = 12
+    @ScaledMetric(relativeTo: .callout)
+    private var stopButtonLabelFontSize: CGFloat = 14
+    @ScaledMetric(relativeTo: .caption2)
+    private var footerFontSize: CGFloat = 11
 
     let state: RecordingState
     let elapsed: Int
@@ -110,17 +122,30 @@ struct RecordingContentView: View {
     let onStop: () -> Void
 
     var body: some View {
-        VStack(spacing: Metrics.sectionSpacing) {
-            self.statusSection
-            self.timerSection
-            self.dropPillSection
-            Divider()
-                .padding(.top, Metrics.checklistTopDividerTopPadding)
-            self.checklistSection
-            self.stopButtonSection
-            self.footerSection
+        // Sticky-footer layout: scrollable content + pinned stop button (issue #136).
+        // The stop button stays outside the ScrollView so it is always reachable even when
+        // content overflows at a large Dynamic Type size. macOS auto-hides scrollbars, so
+        // relying on scroll-to-reach for a critical CTA is not acceptable.
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(spacing: Metrics.sectionSpacing) {
+                    self.statusSection
+                    self.timerSection
+                    self.dropPillSection
+                    Divider()
+                        .padding(.top, Metrics.checklistTopDividerTopPadding)
+                    self.checklistSection
+                }
+                .padding(Metrics.outerPadding)
+            }
+            // Stop button + footer pinned below the scroll area — always visible.
+            VStack(spacing: 0) {
+                self.stopButtonSection
+                self.footerSection
+            }
+            .padding(.horizontal, Metrics.outerPadding)
+            .padding(.bottom, Metrics.outerPadding)
         }
-        .padding(Metrics.outerPadding)
         // Fixed size matching the window scene's .windowResizability(.contentSize).
         // alignment: .top pins the content to the top edge when content is shorter than the window.
         .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight, alignment: .top)
@@ -134,7 +159,7 @@ struct RecordingContentView: View {
                 .fill(RecordingDisplayMapper.dotColor(for: self.state))
                 .frame(width: Metrics.statusDotSize, height: Metrics.statusDotSize)
             Text(RecordingDisplayMapper.statusText(for: self.state))
-                .font(.system(size: Metrics.statusFontSize, weight: .semibold))
+                .font(.system(size: self.statusFontSize, weight: .semibold))
                 .foregroundStyle(RecordingDisplayMapper.statusTextColor(for: self.state))
         }
         .frame(maxWidth: .infinity)
@@ -145,7 +170,7 @@ struct RecordingContentView: View {
 
     private var timerSection: some View {
         Text(ElapsedFormatter.string(from: self.elapsed))
-            .font(.system(size: Metrics.timerFontSize, weight: .regular, design: .monospaced))
+            .font(.system(size: self.timerFontSize, weight: .regular, design: .monospaced))
             .foregroundStyle(.primary)
             .frame(maxWidth: .infinity)
             .padding(.bottom, Metrics.timerBottomPadding)
@@ -163,7 +188,7 @@ struct RecordingContentView: View {
                 .fill(RecordingDisplayMapper.pillDotColor(for: self.state))
                 .frame(width: Metrics.pillDotSize, height: Metrics.pillDotSize)
             Text(RecordingDisplayMapper.pillText(state: self.state, drops: self.drops))
-                .font(.system(size: Metrics.pillFontSize))
+                .font(.system(size: self.pillFontSize))
                 .foregroundStyle(RecordingDisplayMapper.pillTextColor(for: self.state))
                 .accessibilityLabel(pillLabel)
                 .accessibilityAddTraits(.updatesFrequently)
@@ -221,14 +246,14 @@ struct RecordingContentView: View {
         )
         HStack {
             Text(label)
-                .font(.system(size: Metrics.checklistLabelFontSize))
+                .font(.system(size: self.checklistLabelFontSize))
                 .foregroundStyle(.primary)
             Spacer()
             Text(RecordingDisplayMapper.checklistRowValueText(value: value, isLive: isLive, gender: gender))
-                .font(.system(size: Metrics.checklistLabelFontSize))
+                .font(.system(size: self.checklistLabelFontSize))
                 .foregroundStyle(.secondary)
             Image(systemName: RecordingDisplayMapper.checklistRowIcon(isLive: isLive))
-                .font(.system(size: Metrics.checklistCheckmarkFontSize, weight: .semibold))
+                .font(.system(size: self.checklistCheckmarkFontSize, weight: .semibold))
                 .foregroundStyle(RecordingDisplayMapper.checklistRowIconColor(isLive: isLive))
         }
         .padding(.horizontal, Metrics.checklistRowHPadding)
@@ -246,9 +271,9 @@ struct RecordingContentView: View {
             label: {
                 HStack(spacing: Metrics.stopButtonIconSpacing) {
                     Image(systemName: "stop.fill")
-                        .font(.system(size: Metrics.stopButtonIconFontSize, weight: .semibold))
+                        .font(.system(size: self.stopButtonIconFontSize, weight: .semibold))
                     Text("Остановить")
-                        .font(.system(size: Metrics.stopButtonLabelFontSize, weight: .semibold))
+                        .font(.system(size: self.stopButtonLabelFontSize, weight: .semibold))
                 }
                 .frame(maxWidth: .infinity)
                 .frame(height: Metrics.stopButtonHeight)
@@ -267,13 +292,13 @@ struct RecordingContentView: View {
     private var footerSection: some View {
         HStack(spacing: Metrics.footerSpacing) {
             Image(systemName: "lock.fill")
-                .font(.system(size: Metrics.footerFontSize))
+                .font(.system(size: self.footerFontSize))
                 .foregroundStyle(.secondary)
             Text("Настройки недоступны во время записи — глобальный hotkey")
-                .font(.system(size: Metrics.footerFontSize))
+                .font(.system(size: self.footerFontSize))
                 .foregroundStyle(.secondary)
             Text("⌘⌥⌃R")
-                .font(.system(size: Metrics.footerFontSize, weight: .semibold))
+                .font(.system(size: self.footerFontSize, weight: .semibold))
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
@@ -544,6 +569,23 @@ nonisolated enum RecordingDisplayMapper {
     )
     .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
     .preferredColorScheme(.dark)
+}
+
+#Preview("Large font — Dynamic Type accessibility5 (issue #136)") {
+    RecordingContentView(
+        state: .normal,
+        elapsed: 257,
+        drops: .init(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
+        checklist: .init(
+            screenDescription: "3840×2160 @ 60 Гц",
+            cameraDescription: "MX Brio · 1920×1080",
+            microphoneDescription: "MacBook Pro"
+        ),
+        sourceLiveness: .allLive,
+        onStop: {}
+    )
+    .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
+    .dynamicTypeSize(.accessibility5)
 }
 
 // swiftlint:enable trailing_closure

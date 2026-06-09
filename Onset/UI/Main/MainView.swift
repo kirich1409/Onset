@@ -202,18 +202,32 @@ struct MainView: View {
     // MARK: - Main content
 
     var mainContent: some View {
-        ScrollView {
-            VStack(spacing: Metrics.sectionSpacing) {
-                self.screenSection
-                self.cameraSection
-                self.microphoneSection
-                Spacer(minLength: Metrics.footerBottomPad)
-                self.recordButton
-                self.recordFooter
+        // Sticky-footer layout: sections scroll freely; the primary CTA stays pinned at the bottom
+        // so it is always visible regardless of Dynamic Type size (issue #136).
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(spacing: Metrics.sectionSpacing) {
+                    self.screenSection
+                    self.cameraSection
+                    self.microphoneSection
+                }
+                .padding(.horizontal, Metrics.outerPaddingH)
+                .padding(.vertical, Metrics.outerPaddingV)
             }
-            .padding(.horizontal, Metrics.outerPaddingH)
-            .padding(.vertical, Metrics.outerPaddingV)
+            self.stickyFooter
         }
+    }
+
+    /// The sticky footer: record button + optional reason/error text.
+    ///
+    /// Lives outside the `ScrollView` so the primary CTA is visible at any Dynamic Type size.
+    private var stickyFooter: some View {
+        VStack(spacing: Metrics.footerBottomPad) {
+            self.recordButton
+            self.recordFooter
+        }
+        .padding(.horizontal, Metrics.outerPaddingH)
+        .padding(.bottom, Metrics.outerPaddingV)
     }
 
     // MARK: - Record footer (reason / error)
