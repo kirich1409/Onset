@@ -25,6 +25,12 @@ merge-ready PR. Never pause mid-task to ask "should I continue?".
 - Merge-ready = local gates green: `scripts/preflight.sh` (mirrors CI pr-gate) +
   docs updated in the same PR + L5 on reference hardware (MX Brio) when the change
   touches recording/devices — build + unit alone do not close L5.
+- The cycle usually closes only on the target Mac. Cloud Claude sessions and GitHub
+  CI have no macOS toolchain, screen, or camera: they cannot run `preflight.sh`, the
+  UI loop, or L5 — and so cannot finish such a task. From there: open the PR, state
+  in its body which gates remain and where they run, leave it unmerged and the issue
+  out of Done until a session on the target hardware verifies. Merge from cloud only
+  when no remaining gate needs macOS (docs/CI-config-only changes).
 - When gates pass: mark PR ready + `gh pr merge --auto --squash`, no per-PR
   confirmation (personal repo). Evidence over assertions in the PR body: Swift
   Testing summary line, lint result, screenshot for UI changes — not "it works".
@@ -37,8 +43,7 @@ merge-ready PR. Never pause mid-task to ask "should I continue?".
 ## Commands
 
 ```bash
-# Pre-push gate: lint + privacy manifest + build + unit — mirrors CI pr-gate,
-# cheapest-first; run before EVERY push
+# Pre-push gate (lint + privacy manifest + build + unit, mirrors CI pr-gate)
 scripts/preflight.sh
 
 # Build (pipe to xcbeautify if installed — token-cheap output; plain otherwise)
@@ -82,8 +87,7 @@ Artifact checks (CI `artifact-checks` job):
 - BEFORE any L5 run: check stale test hosts with `pgrep -la Onset`; kill them with
   `pkill -9 Onset` (exactly this name, never broader). One `xcodebuild test` at a
   time — hardware tests fight over the camera and hang, spawning extra instances.
-- Reference hardware for L5: Logitech MX Brio
-  (see `docs/quality/production-quality-bar.md`).
+- Reference hardware for L5: Logitech MX Brio (`docs/quality/production-quality-bar.md`).
 - Recordings land in `~/Movies/Onset/` — L5 outputs for verify-cfr/ffprobe live there.
 - Test-writing conventions (fakes, naming, suites): `OnsetTests/CLAUDE.md`.
 - Coverage on by default in `Onset.xctestplan`, scoped to target `Onset` (not the test
@@ -147,19 +151,15 @@ Full type-level map (Russian): `docs/architecture.md`.
   `Backlog` → `Ready` → `In progress` (work started / draft PR) →
   `In review` (PR ready) → `Done` (merged).
 - On creation set: relationships (Parent issue / sub-issues, "blocked by #N"),
-  `Priority` (P0–P2), `Size` (XS–XL), `Estimate`. Size + Priority drive the executing
-  agent's model: XS/S → sonnet (haiku for mechanical chores), M → sonnet,
-  L/XL or architectural work → opus planning + sonnet implementation;
-  P0 bumps one tier up.
+  `Priority` (P0–P2), `Size` (XS–XL), `Estimate`. Size + Priority drive the agent's
+  model: XS/S/M → sonnet (haiku for mechanical chores), L/XL or architectural work →
+  opus planning + sonnet implementation; P0 bumps one tier up.
 
 ## Source of truth
 
-- Specs: `docs/specs/` (product overview, recording MVP, permissions/onboarding,
-  devops/CI).
-- Quality bar: `docs/quality/production-quality-bar.md`.
+- Specs: `docs/specs/`. Quality bar: `docs/quality/production-quality-bar.md`.
 - Design references: `docs/design-ref/`.
-- Framework/tool documentation links: `docs/architecture.md`, раздел «Ссылки на
-  документацию».
+- Framework/tool doc links: `docs/architecture.md`, раздел «Ссылки на документацию».
 
 ## Code style
 
@@ -195,6 +195,5 @@ Full type-level map (Russian): `docs/architecture.md`.
 - `AVCaptureDevice.authorizationStatus` is cached in-process (macOS 26.x): a TCC
   revoke is visible only after app restart. Platform behavior, NOT a bug — don't
   investigate it as one.
-- `com/` at repo root is a JVM artifact of Claude tooling; `.codex/` is the Xcode MCP
-  bridge config — ignore both, never analyze as product code.
-- `swarm-report/` is gitignored orchestration state, not part of the product.
+- Not product code, never analyze: `com/` (JVM artifact of Claude tooling), `.codex/`
+  (Xcode MCP bridge config), `swarm-report/` (gitignored orchestration state).
