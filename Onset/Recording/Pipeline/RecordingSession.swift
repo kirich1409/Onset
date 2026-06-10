@@ -205,6 +205,9 @@ actor RecordingSession {
         // can subscribe before start() is called. Yields once on first real screen frame, then
         // finishes. Finished in both performStop() and teardownAfterFailedStart() so subscribers
         // never hang regardless of how the session ends.
+        // Relies on the DEFAULT .unbounded buffering: a yield that fires before the coordinator
+        // subscribes is retained in the buffer. A .bufferingNewest/Oldest(1) policy would silently
+        // drop it and leave the coordinator hanging until the 30 s timeout.
         let (captureActiveStream, captureActiveContinuation) = AsyncStream.makeStream(of: Void.self)
         self.captureActiveStream = captureActiveStream
         self.captureActiveContinuation = captureActiveContinuation

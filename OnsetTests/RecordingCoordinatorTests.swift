@@ -50,6 +50,11 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
     /// When `true`, `captureActiveStream` is never yielded — simulates consent denied / timeout.
     var simulateCaptureNeverActivates = false
 
+    /// When `true`, `start()` suspends until `releaseStart()` is called.
+    /// Use to simulate a stop() that races the `session.start()` suspension window (Fix 2 scenario b).
+    var gateStartEnabled = false
+    private let (gateStream, gateContinuation) = AsyncStream.makeStream(of: Void.self)
+
     /// The health snapshot returned by `currentDrops()` while recording.
     var liveDrops = DropHealthSnapshot(
         counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
@@ -68,6 +73,9 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
         let (revocationStream, revocationContinuation) = AsyncStream.makeStream(of: RecordingRevocation.self)
         self.sourceRevocationStream = revocationStream
         self.revocationContinuation = revocationContinuation
+        // Relies on the DEFAULT .unbounded buffering: a yield that fires before the coordinator
+        // subscribes is retained in the buffer. A .bufferingNewest/Oldest(1) policy would silently
+        // drop it and leave the coordinator hanging until the 30 s timeout.
         let (captureActiveStream, captureActiveContinuation) = AsyncStream.makeStream(of: Void.self)
         self.captureActiveStream = captureActiveStream
         self.captureActiveContinuation = captureActiveContinuation
@@ -77,6 +85,14 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
         self.startCalled = true
         self.startCount += 1
         if let startError { throw startError }
+        // When gateStartEnabled, suspend here until releaseStart() is called. This lets a test
+        // call coordinator.stop() while start() is blocked — making activationTask still nil at
+        // that point — to exercise the Fix 2 (b) race window.
+        if self.gateStartEnabled {
+            for await _ in self.gateStream {
+                break
+            }
+        }
         // Default behaviour: immediately signal that capture is active, mirroring a live session
         // where consent is pre-granted and the first frame arrives quickly. Tests that want to
         // control the timing call emitCaptureActive() / finishCaptureActiveWithoutActivation()
@@ -85,6 +101,12 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
             self.captureActiveContinuation.yield(())
             self.captureActiveContinuation.finish()
         }
+    }
+
+    /// Test hook: unblock a `start()` suspension gated by `gateStartEnabled`.
+    func releaseStart() {
+        self.gateContinuation.yield(())
+        self.gateContinuation.finish()
     }
 
     func stop() async -> RecordingResult {
@@ -1074,6 +1096,115 @@ struct RecordingCoordinatorConsentOrderingTests {
         #expect(!threwError, "stop() during consent wait must not surface an error to the caller")
         #expect(coordinator.phase == .main, "phase must return to .main after user cancel")
         #expect(coordinator.session == nil, "session must be nil after user cancel — no leak (#2)")
+    }
+
+    // MARK: Fix 2 regression tests
+
+    /// Scenario (b): stop() arrives while session.start() is still suspended — activationTask is
+    /// nil at that point so Task.cancel() is a no-op. The cancel flag must survive the resume and
+    /// trigger a silent revert (phase stays .main, no error thrown).
+    ///
+    /// This is the regression test that catches the old bug: the original code reset
+    /// `activationCancelledByUser = false` at the TOP of the activation block (after the
+    /// `session.start()` await) — wiping the flag set by stop() and letting recording proceed.
+    @Test("stop() during session.start() suspension reverts silently (Fix 2b — no activationTask wipe)")
+    func stop_duringSessionStartSuspension_revertsWithoutError() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        // Gate session.start() so stop() can race it while activationTask is still nil.
+        fake.gateStartEnabled = true
+
+        var openedRecording = false
+        let coordinator = RecordingCoordinator(
+            sessionFactory: { _ in fake },
+            activationTimeoutSeconds: 100
+        )
+        coordinator.enterMain()
+        coordinator.bindWindowActions(
+            openRecordingWindow: { openedRecording = true },
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+
+        // Launch start() — it will suspend inside fake.start() (activationTask is nil here).
+        let startTask = Task {
+            try await coordinator.start(CoordinatorFixtures.request())
+        }
+
+        // Give start() a chance to reach the gate suspension.
+        try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+
+        // stop() sets activationCancelledByUser = true; activationTask is still nil so cancel is
+        // a no-op — this is the exact race that the old reset wiped.
+        await coordinator.stop()
+
+        // Unblock session.start() — auto-emit will fire (simulateCaptureNeverActivates is false)
+        // so captureActivated == true. The fix must catch the flag BEFORE the guard and revert.
+        fake.releaseStart()
+
+        var threwError = false
+        do {
+            try await startTask.value
+        } catch {
+            threwError = true
+        }
+
+        #expect(!threwError, "stop() during session.start() must revert silently, not throw")
+        #expect(coordinator.phase == .main, "phase must be .main after silent revert")
+        #expect(!openedRecording, "recording window must NOT open after cancel during session.start()")
+        // stop() in isStarting mode only calls cancelActivation() (does not stop the session itself);
+        // the fix adds session.stop() in the pre-guard cancel branch → stopCount == 1.
+        #expect(fake.stopCount == 1, "session must be stopped exactly once")
+    }
+
+    /// Scenario (a) deterministic variant: stop() races the activation wait after the stream has
+    /// already yielded. Implemented via the start-gate (same seam as scenario b) so the timing is
+    /// deterministic: gate keeps session.start() in suspension; stop() sets the flag; releaseStart()
+    /// fires auto-emit (captureActivated == true); pre-guard check catches the flag → silent revert.
+    ///
+    /// Note: the pure success-path race (stop after activationTask.value but before resume) has no
+    /// fake seam and is not representable deterministically — both tests fold through the start-gate.
+    @Test("stop() after activation yielded true reverts silently — pre-guard cancel check (Fix 2a)")
+    func stop_afterActivationYielded_revertsWithoutError() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        // Gate start() — same seam; after releaseStart() auto-emit fires giving captureActivated=true.
+        fake.gateStartEnabled = true
+
+        var openedRecording = false
+        let coordinator = RecordingCoordinator(
+            sessionFactory: { _ in fake },
+            activationTimeoutSeconds: 100
+        )
+        coordinator.enterMain()
+        coordinator.bindWindowActions(
+            openRecordingWindow: { openedRecording = true },
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+
+        let startTask = Task {
+            try await coordinator.start(CoordinatorFixtures.request())
+        }
+
+        try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+
+        // Set the cancel flag while start() is still suspended.
+        await coordinator.stop()
+
+        // Release the gate — captureActivated will be true; fix must revert via the pre-guard check.
+        fake.releaseStart()
+
+        var threwError = false
+        do {
+            try await startTask.value
+        } catch {
+            threwError = true
+        }
+
+        #expect(!threwError, "stop() before activation completes must revert silently, not throw")
+        #expect(coordinator.phase == .main, "phase must be .main after cancel-flag revert")
+        #expect(!openedRecording, "recording window must NOT open when cancel flag is set")
     }
 }
 

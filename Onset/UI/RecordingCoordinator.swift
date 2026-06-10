@@ -384,6 +384,9 @@ final class RecordingCoordinator {
             return
         }
         self.isStarting = true
+        // Reset the cancel flag immediately — before any `await` — so a stop() that races
+        // session.start() (where activationTask is still nil) cannot be wiped on resume.
+        self.activationCancelledByUser = false
         defer { self.isStarting = false }
 
         let session = self.sessionFactory(request)
@@ -414,7 +417,6 @@ final class RecordingCoordinator {
         // Wait for the first real screen frame — this is when consent is actually granted (#171).
         // Fix #3: the wait is cancellable: cancelActivation() can be called from stop() / handleHotKey()
         // while isStarting is true. The activationTask is stored so those paths can cancel it.
-        self.activationCancelledByUser = false
         let activationTask = Task {
             await self.awaitCaptureActivation(
                 session: session,
@@ -425,16 +427,22 @@ final class RecordingCoordinator {
         let captureActivated = await activationTask.value
         self.activationTask = nil
 
-        guard captureActivated else {
-            // `false` means: stream finished without yielding, timeout elapsed, or user cancelled.
+        // Check the cancel flag BEFORE the captureActivated guard so a stop() that raced the
+        // activation window (including the session.start() suspension) is never dropped.
+        // This covers two races the old placement missed:
+        //   (a) stop() after emitCaptureActive() but before start() resumes (flag set, guard would pass)
+        //   (b) stop() during session.start() suspension (activationTask nil → cancel no-op; flag set,
+        //       but old code wiped it at the top of the wait block)
+        if self.activationCancelledByUser {
+            // User pressed stop / hotkey during the consent wait — revert silently (no error).
+            coordinatorLogger.notice("Consent wait cancelled by user — reverting silently")
+            self.activationCancelledByUser = false
             _ = await session.stop()
-            if self.activationCancelledByUser {
-                // User pressed stop / hotkey during the consent wait — revert silently (no error).
-                coordinatorLogger.notice("Consent wait cancelled by user — reverting silently")
-                self.activationCancelledByUser = false
-                return
-            }
+            return
+        }
+        guard captureActivated else {
             // Genuine denial or timeout: revert and throw so the UI can surface a message.
+            _ = await session.stop()
             coordinatorLogger.notice("Capture did not activate (consent denied or timeout) — reverting (#171)")
             throw RecordingError.captureDidNotActivate
         }
