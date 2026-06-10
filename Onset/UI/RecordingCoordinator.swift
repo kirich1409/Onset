@@ -154,12 +154,11 @@ final class RecordingCoordinator {
     /// stop completes.
     private(set) var lastResult: RecordingResult?
 
-    /// `true` when the most recent finished session had the live HUD pill flash `.degraded` at
-    /// least once (AC-9 warning). Derived from `lastSessionEverDegraded` — the one-way latch from
-    /// `DropMonitor`, which is stricter than `lastDroppedFrames > 0`: scattered backpressure drops
-    /// that never crossed the sliding-window threshold do not trigger the post-stop warning.
+    /// `true` when the most recent finished session had enough encoder-backpressure drops to
+    /// warrant the post-stop warning (AC-9). Threshold from `RecordingConfiguration`.
+    /// Derived from `lastDroppedFrames` — single source of truth, no lockstep pair needed.
     var lastDegradedWarning: Bool {
-        self.lastSessionEverDegraded
+        self.lastDroppedFrames >= RecordingConfiguration.mvpDefault.postStopDropWarningThreshold
     }
 
     /// One-way degradation latch from the most recent finished session. `true` when the live HUD
@@ -495,7 +494,7 @@ final class RecordingCoordinator {
             coordinatorLogger.error(
                 "Recording finished with write failure — \(writeError)"
             )
-        } else if result.sessionEverDegraded {
+        } else if result.degradedWarning(threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold) {
             coordinatorLogger.notice(
                 // swiftlint:disable:next line_length
                 "Recording finished with degraded warning — backpressureDrops=\(result.drops.encoderBackpressureDrops) dominantCause=\(String(describing: result.dominantCause))"

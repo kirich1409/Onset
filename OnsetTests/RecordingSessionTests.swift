@@ -629,11 +629,14 @@ struct RecordingSessionStopTests {
         // No drops emitted → degradedWarning should be false.
 
         let result = await session.stop()
-        #expect(result.degradedWarning == false, "no backpressure drops → no warning (AC-8 policy)")
+        #expect(
+            result.degradedWarning(threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold) == false,
+            "no backpressure drops → no warning"
+        )
     }
 
-    @Test("degradedWarning true when session crossed the degraded-state threshold (sessionEverDegraded latch)")
-    func degradedWarning_true_whenThresholdCrossed() async throws {
+    @Test("degradedWarning true when backpressure drops reach postStopDropWarningThreshold (AC-9)")
+    func degradedWarning_true_whenBackpressureDropReachesThreshold() async throws {
         let probe = SampleProbeOK()
         let encoders = FakeEncoderFactory()
         let writers = SessionFakeWriterFactory()
@@ -646,54 +649,22 @@ struct RecordingSessionStopTests {
         try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
         _ = await eventually { writers.bothWritersCreated }
 
-        // Emit threshold+1 (31) backpressure drops as one batched event in a tight window.
-        // Default threshold is 30; count:31 crosses it in a single CMTime instant → latch set.
+        // Emit exactly postStopDropWarningThreshold backpressure drops — the post-stop alert
+        // fires at >= threshold (AC-9), so this is the minimum count that must trigger it.
+        let threshold = RecordingConfiguration.mvpDefault.postStopDropWarningThreshold
         let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
         encoders.screenEncoder.emitDrop(DropEvent(
-            reason: .encoderBackpressureDrops, source: .encode, count: 31, detectedAt: dropPts
-        ))
-        // Poll until sessionEverDegraded is latched — avoids racing the observe child task.
-        _ = await eventually { await session.currentDrops().sessionEverDegraded }
-
-        let result = await session.stop()
-        #expect(
-            result.degradedWarning == true,
-            "threshold crossed → sessionEverDegraded latch → degradedWarning true (AC-8)"
-        )
-        #expect(result.drops.encoderBackpressureDrops > 0, "drop counter must reflect the emitted drops")
-        // `!=` requires the Equatable conformance (InferIsolatedConformances → @MainActor in
-        // nonisolated #expect expansion). `!(lhs == rhs)` binds the concrete nonisolated witness.
-        #expect(!(result.dominantCause == .notDegraded), "degraded session must report a non-.notDegraded cause")
-    }
-
-    @Test("degradedWarning false when backpressure drops never crossed the threshold (scattered drops)")
-    func degradedWarning_false_whenDropsBelowThreshold() async throws {
-        let probe = SampleProbeOK()
-        let encoders = FakeEncoderFactory()
-        let writers = SessionFakeWriterFactory()
-        let sources = FakeSourceFactory()
-        // Default threshold (30): one drop is never enough to flip the latch — no warning.
-        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
-
-        try await session.start(permissions: SessionFixtures.fullPermissions())
-        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
-        try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
-        _ = await eventually { writers.bothWritersCreated }
-
-        // One drop — far below default threshold(30). Window never crosses → latch stays false.
-        let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
-        encoders.screenEncoder.emitDrop(DropEvent(
-            reason: .encoderBackpressureDrops, source: .encode, count: 1, detectedAt: dropPts
+            reason: .encoderBackpressureDrops, source: .encode, count: threshold, detectedAt: dropPts
         ))
         // Poll until the drop is ingested so the test doesn't stop before the monitor sees it.
         _ = await eventually { await session.currentDrops().counters.encoderBackpressureDrops >= 1 }
 
         let result = await session.stop()
         #expect(
-            result.degradedWarning == false,
-            "below-threshold drops → latch never set → degradedWarning false (regression guard)"
+            result.degradedWarning(threshold: threshold) == true,
+            "backpressure drops >= threshold → post-stop warning must fire (AC-9)"
         )
-        #expect(result.drops.encoderBackpressureDrops == 1, "drop counter still reflects the emitted drop")
+        #expect(result.drops.encoderBackpressureDrops == threshold, "drop counter must reflect the emitted drops")
     }
 
     @Test("stop() is idempotent — second call returns the same result (Gap B)")
@@ -727,7 +698,8 @@ struct RecordingSessionStopTests {
             "stop() must return identical drop counters on re-entry"
         )
         #expect(
-            first.degradedWarning == second.degradedWarning,
+            first.degradedWarning(threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold)
+                == second.degradedWarning(threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold),
             "stop() must return identical degradedWarning on re-entry"
         )
         // The first result must have non-zero drops to confirm the test is non-vacuous.
@@ -771,7 +743,8 @@ struct RecordingSessionStopTests {
             "concurrent stop() must return identical drop counters"
         )
         #expect(
-            first.degradedWarning == second.degradedWarning,
+            first.degradedWarning(threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold)
+                == second.degradedWarning(threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold),
             "concurrent stop() must return identical degradedWarning"
         )
         // Non-vacuous: the first result must carry the emitted drop.
@@ -799,7 +772,10 @@ struct RecordingSessionStopTests {
             return
         }
         #expect(result.outputURLs.isEmpty, "no URLs expected when stop fires before start")
-        #expect(result.degradedWarning == false, "no drops can have accumulated before start")
+        #expect(
+            result.degradedWarning(threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold) == false,
+            "no drops can have accumulated before start"
+        )
         // No writer interactions must have occurred.
         #expect(!writers.screenWriter.markFinishedCalled, "screen writer must not be touched")
         #expect(!writers.cameraWriter.markFinishedCalled, "camera writer must not be touched")
@@ -1239,6 +1215,7 @@ struct RecordingSessionOutputDirectoryTests {
             movieFragmentInterval: mvp.movieFragmentInterval,
             degradedBackpressureThreshold: mvp.degradedBackpressureThreshold,
             degradedWindowSeconds: mvp.degradedWindowSeconds,
+            postStopDropWarningThreshold: mvp.postStopDropWarningThreshold,
             budgetCap: mvp.budgetCap,
             outputDirectory: tempDir
         )
