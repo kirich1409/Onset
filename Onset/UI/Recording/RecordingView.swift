@@ -155,7 +155,8 @@ struct RecordingContentView: View {
 
     // MARK: Drop pill section
 
-    @ViewBuilder private var dropPillSection: some View {
+    @ViewBuilder
+    private var dropPillSection: some View {
         let pillLabel = RecordingDisplayMapper.pillAccessibilityLabel(state: self.state, drops: self.drops)
         HStack(spacing: Metrics.pillDotSpacing) {
             Circle()

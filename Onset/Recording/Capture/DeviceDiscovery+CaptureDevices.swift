@@ -23,16 +23,20 @@ extension DeviceDiscovery {
         .continuityCamera,
     ]
 
-    /// Enumerates all connected camera devices.
+    /// Enumerates all connected camera devices that are currently able to capture.
     ///
     /// Queries `AVCaptureDevice.DiscoverySession` for the three macOS 26 video types:
     /// `.builtInWideAngleCamera`, `.external`, and `.continuityCamera`.
     ///
+    /// Suspended devices (`isSuspended == true`) are excluded: the built-in FaceTime
+    /// camera reports suspended while the notebook lid is closed and cannot deliver
+    /// frames, so showing it in pickers would offer a dead device.
+    ///
     /// - Parameter cameraAuthorized: Pass `true` when the process holds camera permission.
     ///   Pass `false` to receive an empty array without any AVFoundation calls.
     ///
-    /// - Returns: One `CameraDevice` snapshot per device, each containing the device's
-    ///   `uniqueID` and the full list of its `AVCaptureDevice.Format` snapshots.
+    /// - Returns: One `CameraDevice` snapshot per non-suspended device, each containing the
+    ///   device's `uniqueID` and the full list of its `AVCaptureDevice.Format` snapshots.
     nonisolated static func cameras(cameraAuthorized: Bool) -> [CameraDevice] {
         guard cameraAuthorized else {
             discoveryDeviceLogger.debug("Camera enumeration skipped — camera permission not granted")
@@ -45,12 +49,19 @@ extension DeviceDiscovery {
             position: .unspecified
         )
 
-        let devices = session.devices.map { device in
+        let allDevices = session.devices
+        let availableDevices = allDevices.filter { !$0.isSuspended }
+        let devices = availableDevices.map { device in
             Self.makeCameraDevice(from: device)
         }
 
         // PII policy: log counts only, never device names or uniqueIDs.
-        discoveryDeviceLogger.info("Camera enumeration complete — count: \(devices.count)")
+        discoveryDeviceLogger.info(
+            """
+            Camera enumeration complete — count: \(devices.count), \
+            suspended filtered: \(allDevices.count - availableDevices.count)
+            """
+        )
         return devices
     }
 
@@ -94,14 +105,19 @@ extension DeviceDiscovery {
 // MARK: - Microphone enumeration
 
 extension DeviceDiscovery {
-    /// Enumerates all connected microphone devices.
+    /// Enumerates all connected microphone devices that are currently able to capture.
     ///
     /// Queries `AVCaptureDevice.DiscoverySession` for `.microphone` (macOS 14+).
+    ///
+    /// Suspended devices (`isSuspended == true`) are excluded, mirroring camera
+    /// enumeration. If the built-in microphone never reports suspended (it keeps working
+    /// with the lid closed on some models), the filter is a no-op — which is correct,
+    /// because the device is genuinely usable then.
     ///
     /// - Parameter microphoneAuthorized: Pass `true` when the process holds microphone
     ///   permission. Pass `false` to receive an empty array without any AVFoundation calls.
     ///
-    /// - Returns: One `MicrophoneDevice` snapshot per device.
+    /// - Returns: One `MicrophoneDevice` snapshot per non-suspended device.
     nonisolated static func microphones(microphoneAuthorized: Bool) -> [MicrophoneDevice] {
         guard microphoneAuthorized else {
             discoveryDeviceLogger.debug("Microphone enumeration skipped — microphone permission not granted")
@@ -114,12 +130,19 @@ extension DeviceDiscovery {
             position: .unspecified
         )
 
-        let devices = session.devices.map { device in
+        let allDevices = session.devices
+        let availableDevices = allDevices.filter { !$0.isSuspended }
+        let devices = availableDevices.map { device in
             Self.makeMicrophoneDevice(from: device)
         }
 
         // PII policy: log counts only, never device names or uniqueIDs.
-        discoveryDeviceLogger.info("Microphone enumeration complete — count: \(devices.count)")
+        discoveryDeviceLogger.info(
+            """
+            Microphone enumeration complete — count: \(devices.count), \
+            suspended filtered: \(allDevices.count - availableDevices.count)
+            """
+        )
         return devices
     }
 

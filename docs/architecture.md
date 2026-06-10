@@ -17,7 +17,8 @@
 | `ScreenSource` | `ScreenSource.swift` | Актор: захват дисплея через ScreenCaptureKit, обрабатывает hot-plug отключение |
 | `CameraDevice` | `CaptureDeviceModels.swift` | Иммутабельный снапшот камеры (uniqueID + форматы), без живых ссылок на `AVCaptureDevice` |
 | `Display` | `CaptureDeviceModels.swift` | Иммутабельный снапшот дисплея: `CGDirectDisplayID`, размеры, частота |
-| `DeviceDiscovery` | `DeviceDiscovery+Displays.swift`, `DeviceDiscovery+CaptureDevices.swift` | Nonisolated-перечисление устройств с чистыми мапперами для тестов |
+| `DeviceDiscovery` | `DeviceDiscovery+Displays.swift`, `DeviceDiscovery+CaptureDevices.swift` | Nonisolated-перечисление устройств с чистыми мапперами для тестов; suspended-устройства (`isSuspended`, например FaceTime-камера при закрытой крышке) исключаются из результатов |
+| `DeviceAvailabilityObserver` | `DeviceAvailabilityObserver.swift` | Поток событий топологии устройств (`DeviceChangeEvent`): NotificationCenter connect/disconnect + KVO `isSuspended`; время жизни привязано к стриму (teardown через `onTermination`) |
 | `ScreenStreamConfigurationBuilder` | `ScreenStreamConfigurationBuilder.swift` | Чистый билдер `ResolvedRecordingPlan` → `SCStreamConfiguration` |
 
 Где искать:
@@ -52,8 +53,8 @@ drop'ов, резолв возможностей железа.
 | `DualFileOutputStage` | `DualFileOutputStage.swift` | Актор: фан-аут закодированных video/audio в два writer'а; ретайминг, replay отложенного аудио, ленивое создание writer'ов |
 | `CapabilityResolver` | `CapabilityResolver.swift` | Чистая логика: размеры/fps экрана и камеры в рамках бюджета кодирования |
 | `CapabilityProbe` | `CapabilityProbe.swift` | Преflight (AC-6): проверка HW-кодера, финальный план через `CapabilityResolver` |
-| `DropMonitor` | `DropMonitor.swift` | Актор: учёт drop'ов и backpressure; эмитит `.normal` ↔ `.degraded` в UI |
-| `PipelineTypes` | `PipelineTypes.swift` | Общие value-типы: `HostTimeAnchor` (T0), `VideoFrame`, `AudioSample`, `EncodedSample`, `DropEvent`, `RecordingState`, `SourceEvent` |
+| `DropMonitor` | `DropMonitor.swift` | Актор: учёт drop'ов и backpressure; эмитит `.normal` ↔ `.degraded` в UI; атрибутирует backpressure-потери по стадии и отдаёт `DropHealthSnapshot` (счётчики + доминирующая причина + latch `sessionEverDegraded`, на котором гейтится post-stop предупреждение) |
+| `PipelineTypes` | `PipelineTypes.swift` | Общие value-типы: `HostTimeAnchor` (T0), `VideoFrame`, `AudioSample`, `EncodedSample`, `DropEvent`, `DropCause`, `RecordingState`, `SourceEvent` |
 | `RecordingComponentFactories` | `RecordingComponentFactories.swift` | DI-протоколы: `EncoderControlling`, `WriterControlling`, `EncoderFactory`, `WriterFactory`, `SourceFactory` + live-реализации |
 | `StageRateAggregator` | `StageRateAggregator.swift` | Телеметрия: per-stage частоты, причины drop'ов, лаги; flush в логи в конце сессии |
 
@@ -62,7 +63,7 @@ drop'ов, резолв возможностей железа.
 - Старт записи → `RecordingSession.start(permissions:)`.
 - Резолв возможностей → `CapabilityProbe.probe()` → `CapabilityResolver.resolveStartProfile()`.
 - Построение пайплайнов → `RecordingSession.buildPipelines()`.
-- Drop'ы и состояние UI → `DropMonitor.observe()` → `recordingStateStream`.
+- Drop'ы и состояние UI → `DropMonitor.observe()` → `recordingStateStream`; детальная модель учёта и атрибуции по причинам — [`architecture/drop-accounting.md`](architecture/drop-accounting.md).
 - Отзыв источника (AC-12) → `RecordingSession.handleSourceEvent()`.
 - Роутинг в файлы → `DualFileOutputStage.routeVideo/routeAudio()`.
 
@@ -155,7 +156,7 @@ TCC-разрешения, политика записи, запись MP4.
 | Тип | Файл | Роль |
 |---|---|---|
 | `RecordingCoordinator` | `UI/RecordingCoordinator.swift` | Единственный владелец состояния записи (phase, recordingState, drops, elapsed) и единственный подписчик стримов сессии |
-| `MainViewModel` | `UI/Main/MainViewModel.swift` | Выбор устройств и enable-логика кнопки Record (AC-2: экран обязателен, камера опциональна, guard невыбранного микрофона) |
+| `MainViewModel` | `UI/Main/MainViewModel.swift` | Выбор устройств и enable-логика кнопки Record (AC-2: экран обязателен, камера опциональна, guard невыбранного микрофона); список камер/микрофонов обновляется вживую через `observeDeviceChanges()` (`MainViewModel+Devices.swift`) |
 | `OnboardingViewModel` | `UI/Onboarding/OnboardingViewModel.swift` | Статусы карточек разрешений из `PermissionsProviding`; поллинг TCC экрана |
 | `RecordingControlling` | `UI/RecordingControlling.swift` | Nonisolated-протокол над `RecordingSession` для координатора — юнит-тесты без железа |
 | `RecordingView` | `UI/Recording/RecordingView.swift` | Тонкий reader состояния координатора; логика статуса/drop-pill в `RecordingDisplayMapper` |
@@ -182,7 +183,8 @@ TCC-разрешения, политика записи, запись MP4.
 - Чистые nonisolated-мапперы (`MenuBarLabelMapper`, `RecordingDisplayMapper`) в паре
   с тонкими `@MainActor`-view.
 - DI через closure-швы: `discoverDisplays`/`discoverCameras`/`discoverMicrophones`/
-  `makeCameraSource` на `MainViewModel`, `startSessionOverride` для шпионажа в тестах.
+  `makeDeviceChangeStream`/`makeCameraSource` на `MainViewModel`, `startSessionOverride`
+  для шпионажа в тестах.
 - `@State` + передача параметрами (никаких `@EnvironmentObject`).
 
 ## Тесты — `OnsetTests/`

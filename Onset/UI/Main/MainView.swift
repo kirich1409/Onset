@@ -50,7 +50,8 @@ struct MainView: View {
 
     // MARK: - Dependencies
 
-    @Bindable var model: MainViewModel
+    @Bindable
+    var model: MainViewModel
 
     /// Called when the user wants to return to onboarding.
     let onReturnToOnboarding: () -> Void
@@ -61,7 +62,8 @@ struct MainView: View {
     /// only the write-error alert fires (the file was not saved — higher severity).
     /// Using `alert(item:)` with an enum enforces the priority ordering and avoids two
     /// simultaneous `isPresented` bindings competing for the same presentation slot.
-    @State private var pendingAlert: PostStopAlert?
+    @State
+    private var pendingAlert: PostStopAlert?
 
     // MARK: - Body
 
@@ -79,6 +81,9 @@ struct MainView: View {
         .frame(width: WindowDefaults.width, height: WindowDefaults.height)
         .task {
             await self.model.loadDevices()
+            // Parks here until the view disappears: SwiftUI cancels the task, which
+            // terminates the device-change stream and tears down its observer.
+            await self.model.observeDeviceChanges()
         }
         // Post-stop alerts: surface on re-appear or on async flag changes.
         // `.onAppear` covers the case where the flag is already set when the main window
@@ -129,6 +134,7 @@ struct MainView: View {
     private func resolvedAlert() -> PostStopAlert? {
         PostStopAlert.resolve(
             writeError: self.model.coordinator.lastWriteError,
+            degraded: self.model.coordinator.lastDegradedWarning,
             droppedFrames: self.model.coordinator.lastDroppedFrames
         )
     }
@@ -158,7 +164,7 @@ struct MainView: View {
                 message: Text(alert.message),
                 dismissButton: .default(Text("ОК")) {
                     self.model.coordinator.acknowledgeDegradedWarning()
-                    // resolvedAlert() returns nil here (lastDroppedFrames is 0 after acknowledge);
+                    // resolvedAlert() returns nil here (lastDegradedWarning is false after acknowledge);
                     // explicit assignment keeps the dismiss path symmetrical with writeError.
                     self.pendingAlert = self.resolvedAlert()
                 }
@@ -286,7 +292,8 @@ let sectionCardTitleKerning: CGFloat = 0.5
 /// Reusable card container for a labeled settings section.
 struct SectionCard<Content: View>: View {
     let title: String
-    @ViewBuilder let content: () -> Content
+    @ViewBuilder
+    let content: () -> Content
 
     var body: some View {
         VStack(alignment: .leading, spacing: sectionCardHeaderSpacing) {
@@ -359,13 +366,16 @@ enum PostStopAlert: Identifiable {
     ///
     /// - Parameters:
     ///   - writeError:    Human-readable write-failure reason, or `nil` when the file was saved.
-    ///   - droppedFrames: `RecordingCoordinator.lastDroppedFrames` at call time — a non-zero value
-    ///                    means the session had encoder-backpressure drops and the warning is shown.
-    nonisolated static func resolve(writeError: String?, droppedFrames: Int) -> Self? {
+    ///   - degraded:      `RecordingCoordinator.lastDegradedWarning` — `true` when the live HUD
+    ///                    pill flashed `.degraded` at least once (the one-way latch from
+    ///                    `DropMonitor`). Drives the gate, not the raw `droppedFrames` count.
+    ///   - droppedFrames: `RecordingCoordinator.lastDroppedFrames` at call time — used for message
+    ///                    pluralization only; does NOT gate the alert.
+    nonisolated static func resolve(writeError: String?, degraded: Bool, droppedFrames: Int) -> Self? {
         if let reason = writeError {
             return .writeError(reason: reason)
         }
-        if droppedFrames > 0 {
+        if degraded {
             return .degradedWarning(droppedFrames: droppedFrames)
         }
         return nil

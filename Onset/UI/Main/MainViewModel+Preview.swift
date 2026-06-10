@@ -33,9 +33,15 @@ extension MainViewModel {
     func managePreview(for cameraID: String?) async {
         await self.stopCurrentPreview()
 
-        guard let cameraID,
-              let camera = self.cameras.first(where: { $0.uniqueID == cameraID })
-        else {
+        guard let cameraID else {
+            // Normal deselect (camera toggle off or no cameras available).
+            self.previewGeneration += 1
+            return
+        }
+
+        guard let camera = self.cameras.first(where: { $0.uniqueID == cameraID }) else {
+            // Camera was removed from the available list (hot-unplug race).
+            mainViewModelLogger.warning("Camera preview skipped — selected device not in available list")
             self.previewGeneration += 1
             return
         }
@@ -73,7 +79,9 @@ extension MainViewModel {
                 minFps: Double(RecordingConfiguration.mvpDefault.minCameraFps)
             )
         } catch {
-            mainViewModelLogger.warning("No suitable camera format for preview — showing placeholder")
+            mainViewModelLogger.warning(
+                "No suitable camera format for preview — showing placeholder: \(String(describing: error))"
+            )
             self.previewGeneration += 1
             return nil
         }
@@ -84,7 +92,9 @@ extension MainViewModel {
         do {
             try await source.start(anchoredTo: HostTimeAnchor.now())
         } catch {
-            mainViewModelLogger.warning("Camera preview start failed — showing placeholder")
+            mainViewModelLogger.warning(
+                "Camera preview start failed — showing placeholder: \(String(describing: error))"
+            )
             self.previewSource = nil
             self.previewGeneration += 1
             return nil
