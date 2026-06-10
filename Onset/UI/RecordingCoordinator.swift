@@ -457,7 +457,6 @@ final class RecordingCoordinator {
 
     // MARK: - Stop (AC-9) — funnel for all three stop paths
 
-    // swiftlint:disable function_body_length
     /// Stops the active recording. Funnel for the three stop paths (button / hotkey / menu —
     /// AC-9). Re-entrancy-guarded so the teardown (reveal, warning, phase transition) runs exactly
     /// once even under concurrent calls: `isStopping` is flipped synchronously before the first
@@ -532,8 +531,6 @@ final class RecordingCoordinator {
             "Recording stopped — files=\(result.outputURLs.count) origin=\(String(describing: self.origin))"
         )
     }
-
-    // swiftlint:enable function_body_length
 
     // MARK: - Global hotkey (#67 / AC-9 third stop path)
 
