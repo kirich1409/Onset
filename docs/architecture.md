@@ -148,6 +148,32 @@ TCC-разрешения, политика записи, запись MP4.
   `AppRouter`) не импортируют AVFoundation; маппинг во framework-константы — на
   уровне кодера/writer'а/обёрток.
 
+## Диагностика — `Onset/Diagnostics/`
+
+Экспорт журнала событий приложения для поддержки (#164).
+
+| Тип | Файл | Роль |
+|---|---|---|
+| `DiagnosticLogEntry` | `Diagnostics/DiagnosticLogEntry.swift` | Чистый value-тип: одна запись журнала (date, subsystem, category, level, message) |
+| `LogExportFormatter` | `Diagnostics/LogExportFormatter.swift` | Чистый nonisolated enum: форматирование записей в text-файл, генерация имени файла |
+| `LogEntryProviding` | `Diagnostics/LogEntryProviding.swift` | DI-шов: `entries(since:) async throws -> [DiagnosticLogEntry]` |
+| `OSLogEntryProvider` | `Diagnostics/DiagnosticsExportService.swift` | Живая реализация `LogEntryProviding` через `OSLogStore(scope: .currentProcessIdentifier)` |
+| `DiagnosticsSaveCoordinator` | `Diagnostics/DiagnosticsSaveCoordinator.swift` | `@MainActor @Observable`: оркестрирует сбор → NSSavePanel → запись → reveal в Finder |
+
+Где искать:
+
+- Кнопка «Экспортировать диагностику» → `MenuBarMenu.idleMenu`.
+- Настройки временного окна (30 мин) → `DiagnosticsSaveCoordinator.defaultLookBackInterval`.
+- Инструкции для пользователей (включая crash-логи `.ips`) → `docs/support/diagnostics.md`.
+
+Конвенции:
+
+- `OSLogStore(scope: .currentProcessIdentifier)` — читает только записи текущего процесса,
+  специальный entitlement не нужен (macOS 12.0+). Исключительно локальный: сетевых соединений
+  нет, инвариант `check-no-network.sh` соблюдён.
+- `Task.detached` в `OSLogEntryProvider` — блокирующий disk I/O OSLogStore вынесен с
+  вызывающего актора в пул кооперативных потоков.
+
 ## UI — `Onset/UI/`
 
 Три поверхности (главное окно, окно записи, онбординг) + меню-бар и хоткей,
