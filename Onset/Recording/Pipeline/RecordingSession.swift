@@ -456,10 +456,20 @@ actor RecordingSession {
         // retain the session actor. Yield once + finish immediately: the coordinator only
         // needs the "first real frame arrived" signal, extra yields are not consumed.
         let captureActiveContinuation = self.captureActiveContinuation
-        let framesTask = Self.makeFramesTask(source: source, encoder: encoder) {
-            captureActiveContinuation.yield(())
-            captureActiveContinuation.finish()
-        }
+        let framesTask = Self.makeFramesTask(
+            source: source,
+            encoder: encoder,
+            onFirstFrame: {
+                captureActiveContinuation.yield(())
+                captureActiveContinuation.finish()
+            },
+            // Fix #1: when the frames stream ends without a first frame (consent denied or
+            // terminal stop), finish the continuation so awaitCaptureActivation returns
+            // promptly rather than waiting the full 30-second timeout.
+            onEndWithoutFirstFrame: {
+                captureActiveContinuation.finish()
+            }
+        )
         let routeVideoTask = Self.makeRouteVideoTask(encoder: encoder, kind: .screen, stage: stage)
 
         self.screenPipeline = Pipeline(
@@ -526,7 +536,8 @@ actor RecordingSession {
     private static func makeFramesTask(
         source: any VideoFrameSource,
         encoder: any EncoderControlling,
-        onFirstFrame: (@Sendable () -> Void)? = nil
+        onFirstFrame: (@Sendable () -> Void)? = nil,
+        onEndWithoutFirstFrame: (@Sendable () -> Void)? = nil
     )
     -> Task<Void, Never> {
         Task {
@@ -537,6 +548,13 @@ actor RecordingSession {
                     onFirstFrame?()
                 }
                 await encoder.ingest(frame)
+            }
+            // If the stream ended without ever delivering a frame (consent denied / terminal stop),
+            // signal the coordinator so it can revert promptly instead of waiting for the full timeout.
+            // finish() on the captureActiveContinuation is idempotent: calling it after onFirstFrame
+            // already ran is a safe no-op (AsyncStream silently drops the extra finish).
+            if !firstFrameSeen {
+                onEndWithoutFirstFrame?()
             }
         }
     }

@@ -911,7 +911,9 @@ struct RecordingCoordinatorWriterFailedTests {
 /// the first real screen frame arrives (`captureActiveStream` yields). These tests exercise:
 ///
 /// 1. Phase stays pre-recording until activation signal arrives.
-/// 2. Consent denied / stream terminal-stop → clean revert, `.captureConsentDenied` thrown.
+/// 2. Consent denied / stream terminal-stop → clean revert, `.captureDidNotActivate` thrown.
+/// 3. Timeout (stream never yields, never finishes) → clean revert, `.captureDidNotActivate` thrown.
+/// 4. User-cancel during consent wait → clean revert, no error thrown.
 ///
 /// Each test controls the activation timing manually by setting
 /// `fake.simulateCaptureNeverActivates = true` and calling `emitCaptureActive()` or
@@ -939,6 +941,8 @@ struct RecordingCoordinatorConsentOrderingTests {
         let startTask = Task { try await coordinator.start(CoordinatorFixtures.request()) }
 
         // Give the task a chance to run up to the activation wait.
+        // The 50 ms sleep is necessary here: we must observe the state *while suspended in the wait*,
+        // so there is an inherent ordering dependency on the Task being scheduled first.
         try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
 
         // Phase must still be pre-recording and UI must not have opened.
@@ -955,17 +959,24 @@ struct RecordingCoordinatorConsentOrderingTests {
         #expect(coordinator.phase == .recording, "phase must flip to .recording after first frame")
         #expect(openedRecording, "recording window must open after first frame")
         #expect(dismissedMain, "main window must dismiss after first frame")
+        // Fix #6: startedAt must be set — timer anchors to first-frame time.
+        #expect(coordinator.startedAt != nil, "startedAt must be set after activation (#171)")
 
         await coordinator.stop()
     }
 
-    @Test("start reverts to pre-recording state when captureActiveStream finishes without a frame")
+    @Test("start reverts promptly on deny/terminal-stop — not after full timeout (fix #1 regression)")
     func start_revertsToPreRecording_onDenyOrTerminalStop() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
         fake.simulateCaptureNeverActivates = true
 
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
-        coordinator.enterMain() // establish pre-recording phase = .main
+        // Use a LARGE timeout (100 s) so that if stream-finish is NOT the trigger, the test would
+        // block for 100 s (deterministic proof that fix #1 drives the revert, not the timeout).
+        let coordinator = RecordingCoordinator(
+            sessionFactory: { _ in fake },
+            activationTimeoutSeconds: 100
+        )
+        coordinator.enterMain()
 
         var openedRecording = false
         coordinator.bindWindowActions(
@@ -984,20 +995,85 @@ struct RecordingCoordinatorConsentOrderingTests {
         try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
 
         // Simulate consent denied: stream finishes without yielding.
+        // The revert must happen PROMPTLY (not after the 100-second timeout).
         fake.finishCaptureActiveWithoutActivation()
 
-        // start() must throw .captureConsentDenied.
-        var threwConsentDenied = false
+        // start() must throw .captureDidNotActivate (renamed from captureConsentDenied).
+        var threwCaptureDidNotActivate = false
         do {
             try await startTask.value
         } catch let error as RecordingError {
-            if case .captureConsentDenied = error { threwConsentDenied = true }
+            if case .captureDidNotActivate = error { threwCaptureDidNotActivate = true }
         }
 
-        #expect(threwConsentDenied, "start() must throw .captureConsentDenied when stream ends without activation")
+        #expect(
+            threwCaptureDidNotActivate,
+            "start() must throw .captureDidNotActivate when stream ends without activation"
+        )
         #expect(coordinator.phase == .main, "phase must revert to pre-recording state after deny")
         #expect(!openedRecording, "recording window must NOT have opened")
         #expect(coordinator.elapsed == 0, "elapsed must be 0 — timer must not have started")
+        // Fix #6: session must have been stopped exactly once (no leak).
+        #expect(fake.stopCount == 1, "session must be stopped exactly once — no leak (#2)")
+    }
+
+    @Test("start reverts on timeout when captureActiveStream never yields and never finishes")
+    func start_revertsOnTimeout_whenStreamNeverActivates() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        // simulateCaptureNeverActivates=true AND never call finishCaptureActiveWithoutActivation
+        // → stream hangs forever. The injected tiny timeout drives the revert.
+        fake.simulateCaptureNeverActivates = true
+
+        // Use a tiny timeout (50 ms) so the test does not take 30 s.
+        let coordinator = RecordingCoordinator(
+            sessionFactory: { _ in fake },
+            activationTimeoutSeconds: 0.05
+        )
+        coordinator.enterMain()
+
+        var threwCaptureDidNotActivate = false
+        do {
+            try await coordinator.start(CoordinatorFixtures.request())
+        } catch let error as RecordingError {
+            if case .captureDidNotActivate = error { threwCaptureDidNotActivate = true }
+        }
+
+        #expect(threwCaptureDidNotActivate, "start() must throw .captureDidNotActivate on activation timeout")
+        #expect(coordinator.phase == .main, "phase must revert to .main after timeout")
+        #expect(coordinator.session == nil, "session must be nil after timeout — no leak (#2)")
+    }
+
+    @Test("stop() during consent wait reverts silently — no error thrown to caller")
+    func stop_duringConsentWait_revertsWithoutError() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        fake.simulateCaptureNeverActivates = true
+
+        let coordinator = RecordingCoordinator(
+            sessionFactory: { _ in fake },
+            activationTimeoutSeconds: 100
+        )
+        coordinator.enterMain()
+
+        let startTask = Task {
+            try await coordinator.start(CoordinatorFixtures.request())
+        }
+
+        // Give start() a chance to reach the activation wait.
+        try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+
+        // User cancels by pressing stop — must NOT produce an error alert.
+        await coordinator.stop()
+
+        var threwError = false
+        do {
+            try await startTask.value
+        } catch {
+            threwError = true
+        }
+
+        #expect(!threwError, "stop() during consent wait must not surface an error to the caller")
+        #expect(coordinator.phase == .main, "phase must return to .main after user cancel")
+        #expect(coordinator.session == nil, "session must be nil after user cancel — no leak (#2)")
     }
 }
 

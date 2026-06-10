@@ -98,12 +98,33 @@ nonisolated enum RecordingError: Error {
     /// frame as the activation signal. This error is thrown when:
     ///
     /// - the consent dialog is dismissed / denied (the stream emits a terminal stop
-    ///   event and `captureActiveStream` finishes without yielding), or
-    /// - no frame arrives within the bounded timeout (~30 s).
+    ///   event and `captureActiveStream` finishes without yielding),
+    /// - macOS silently denies consent without emitting a terminal stop and the
+    ///   bounded timeout (~30 s) elapses, or
+    /// - any other terminal stop occurs before the first frame.
     ///
     /// Recording is automatically reverted to the pre-recording state before this error
     /// propagates to the UI.
-    case captureConsentDenied
+    case captureDidNotActivate
+}
+
+extension RecordingError: LocalizedError {
+    /// Actionable description surfaced to the user.
+    ///
+    /// Only `captureDidNotActivate` returns a string; other cases fall through to Swift's
+    /// default formatting — their callers set explicit UI copy at the call site.
+    nonisolated var errorDescription: String? {
+        switch self {
+        case .captureDidNotActivate:
+            // Actionable instruction: tell the user where to grant permission and how to retry.
+            "Не удалось начать запись экрана. " +
+                "Разрешите запись экрана в Системных настройках → " +
+                "Конфиденциальность и безопасность → Запись экрана и попробуйте снова."
+
+        default:
+            nil
+        }
+    }
 }
 
 extension RecordingError: Equatable {
@@ -118,7 +139,7 @@ extension RecordingError: Equatable {
              (.budgetExceeded, .budgetExceeded),
              (.noVideoSource, .noVideoSource),
              (.noSuitableCameraFormat, .noSuitableCameraFormat),
-             (.captureConsentDenied, .captureConsentDenied):
+             (.captureDidNotActivate, .captureDidNotActivate):
             true
 
         case let (.captureSetupFailed(lErr), .captureSetupFailed(rErr)),

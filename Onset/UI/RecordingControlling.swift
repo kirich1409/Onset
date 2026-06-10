@@ -37,9 +37,15 @@ nonisolated protocol RecordingControlling: Sendable {
     /// is genuinely live.
     ///
     /// This stream yields exactly ONE `Void` element when the first real screen frame is delivered,
-    /// then finishes immediately. If the session ends before any frame arrives (consent denied,
-    /// terminal stop, or timeout), the stream finishes WITHOUT yielding — the coordinator treats
-    /// an empty finish as activation failure and reverts to the pre-recording state.
+    /// then finishes immediately.
+    ///
+    /// ### Finish behaviour on non-activation
+    /// - **Terminal stop** (e.g. SCStream `didStopWithError`) → the session finishes this stream
+    ///   WITHOUT yielding. The coordinator treats an empty finish as activation failure.
+    /// - **Silent consent denial** → macOS 26 may NOT emit a terminal stop when the user
+    ///   dismisses the consent dialog without granting access. In this case the stream may
+    ///   never finish. Callers MUST bound the wait independently (the coordinator does,
+    ///   with a 30-second timeout backstop via `activationTimeoutSeconds`).
     ///
     /// **Single-consumer.** The coordinator is the ONLY iterator.
     nonisolated var captureActiveStream: AsyncStream<Void> { get }
