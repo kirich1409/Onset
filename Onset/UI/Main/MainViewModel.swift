@@ -1,3 +1,8 @@
+// swiftlint:disable file_length
+// Rationale: MainViewModel owns all device discovery, camera-toggle, preview lifecycle,
+// AC-2 record-button logic, and DI seams in one observable class. Splitting across files
+// (e.g. +Devices, +Preview, +Record) is already done for extensions; the core type keeps
+// its property declarations and computed predicates together for readability.
 import AVFoundation
 import os
 import SwiftUI
@@ -191,6 +196,17 @@ final class MainViewModel {
     /// Equivalent to `activeCamera != nil`; surfaced separately for readability at call sites.
     var isCameraActive: Bool {
         self.activeCamera != nil
+    }
+
+    /// True when the camera toggle is on but no camera is available — show a placeholder
+    /// in the preview slot instead of leaving it empty.
+    ///
+    /// This happens in clamshell mode: the built-in FaceTime camera is suspended and
+    /// filtered from `cameras[]` by `DeviceDiscovery` (#215), leaving an empty list.
+    /// The `CameraDeniedRow` owns the denied case; this predicate covers the not-denied,
+    /// toggle-on, no-available-device case.
+    var shouldShowCameraUnavailablePlaceholder: Bool {
+        self.cameraEnabled && !self.isCameraActive && !self.isCameraDenied
     }
 
     // MARK: - Error state

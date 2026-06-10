@@ -44,7 +44,8 @@ struct OnboardingView: View {
     // MARK: - Local state
 
     /// Controls the expandable instructions on the screen-recording card.
-    @State private var showScreenInstructions = true
+    @State
+    private var showScreenInstructions = true
 
     // MARK: - Body
 

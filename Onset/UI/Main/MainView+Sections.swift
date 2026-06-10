@@ -77,6 +77,16 @@ extension MainView {
                     await self.model.managePreview(for: self.model.activeCamera?.uniqueID)
                 }
                 .accessibilityLabel("Предварительный просмотр камеры")
+        } else if self.model.shouldShowCameraUnavailablePlaceholder {
+            // Clamshell mode: built-in camera is suspended (isSuspended == true), filtered
+            // from cameras[] by DeviceDiscovery (#215). Show a placeholder that matches the
+            // preview slot dimensions so the card does not collapse.
+            CameraUnavailableRow()
+                .frame(
+                    maxWidth: Metrics.previewMaxHeight * Metrics.previewAspectRatio,
+                    maxHeight: Metrics.previewMaxHeight
+                )
+                .frame(maxWidth: .infinity)
         }
     }
 
@@ -141,7 +151,8 @@ private struct ScreenDeniedRow: View {
 /// The «Запись экрана» toggle was removed: screen is the mandatory video source in MVP
 /// (decision B, issue #61). Camera-only recording is deferred post-MVP.
 private struct ScreenEnabledContent: View {
-    @Bindable var model: MainViewModel
+    @Bindable
+    var model: MainViewModel
 
     var body: some View {
         DisplayPickerContent(model: self.model)
@@ -151,7 +162,8 @@ private struct ScreenEnabledContent: View {
 // MARK: - DisplayPickerContent
 
 private struct DisplayPickerContent: View {
-    @Bindable var model: MainViewModel
+    @Bindable
+    var model: MainViewModel
 
     var body: some View {
         if self.model.displays.isEmpty {
@@ -238,5 +250,26 @@ private struct MicrophoneUnavailableRow: View {
                 .foregroundStyle(.secondary)
         }
         .accessibilityLabel("Микрофон недоступен. Запись будет вестись без звука.")
+    }
+}
+
+// MARK: - CameraUnavailableRow
+
+/// Placeholder shown in the camera preview slot when the camera toggle is on but no
+/// camera is available — e.g. the built-in FaceTime camera is suspended (lid closed)
+/// and no external camera is connected. Matches the `MicrophoneUnavailableRow` style.
+private struct CameraUnavailableRow: View {
+    var body: some View {
+        HStack(spacing: MainView.Metrics.accessorySpacing) {
+            Image(systemName: "camera.slash")
+                .foregroundStyle(.secondary)
+                .frame(width: MainView.Metrics.iconColumnWidth)
+                .accessibilityHidden(true)
+            Text("Камера недоступна")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+        }
+        .accessibilityLabel("Камера недоступна.")
     }
 }

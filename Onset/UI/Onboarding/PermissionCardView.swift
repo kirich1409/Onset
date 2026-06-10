@@ -66,7 +66,8 @@ struct PermissionCardView: View {
     /// Optional uppercase caption shown above the instruction steps.
     let instructionsHeader: String?
 
-    @Binding var showInstructions: Bool
+    @Binding
+    var showInstructions: Bool
 
     // MARK: - Body
 

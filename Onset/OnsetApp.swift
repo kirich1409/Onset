@@ -61,7 +61,8 @@ struct OnsetApp: App {
     /// `PermissionsService.init` only performs non-prompting TCC status reads
     /// (`CGPreflightScreenCaptureAccess`, `AVCaptureDevice.authorizationStatus`) — no
     /// observers, timers, or async work — so it is safe to construct under test as well.
-    @State private var permissionsService = PermissionsService(
+    @State
+    private var permissionsService = PermissionsService(
         screenPermission: ScreenRecordingPermission(),
         capturePermission: CaptureDevicePermission(),
         relauncher: AppRelauncher()
@@ -69,14 +70,16 @@ struct OnsetApp: App {
 
     /// The single recording-lifecycle owner, shared by all recording-aware surfaces (#36/#37/#38).
     /// Window actions are wired into it from `WindowActionsBridge` once the env actions exist.
-    @State private var coordinator = RecordingCoordinator()
+    @State
+    private var coordinator = RecordingCoordinator()
 
     /// System-wide hotkey monitor (#67 / AC-9 third stop path). Created at app-init time;
     /// registered once from `WindowActionsBridge.onAppear` after the coordinator is wired.
     /// Suppressed under XCTest — a test host must not grab the system-wide ⌘⌥⌃R shortcut
     /// (would fight any other test run on the same machine and could accidentally stop a
     /// real recording if the key is pressed during a test session).
-    @State private var hotKeyMonitor = GlobalHotKeyMonitor()
+    @State
+    private var hotKeyMonitor = GlobalHotKeyMonitor()
 
     var body: some Scene {
         Window("Onset", id: WindowID.main) {
@@ -147,8 +150,10 @@ private struct WindowActionsBridge: View {
     let coordinator: RecordingCoordinator
     let hotKeyMonitor: GlobalHotKeyMonitor
 
-    @Environment(\.openWindow) private var openWindow
-    @Environment(\.dismissWindow) private var dismissWindow
+    @Environment(\.openWindow)
+    private var openWindow
+    @Environment(\.dismissWindow)
+    private var dismissWindow
 
     var body: some View {
         Color.clear
@@ -220,25 +225,30 @@ struct RootView: View {
     ///
     /// Held in `@State` so it can be cleared when the user acknowledges the allSet screen,
     /// preventing the route from sticking on `.allSet` after the user taps "Перейти к записи".
-    @State private var hasPostScreenGrantArg: Bool
+    @State
+    private var hasPostScreenGrantArg: Bool
 
     /// `true` when the user explicitly chose to proceed without full permissions
     /// («Позже» / «Продолжить без экрана» / «Записать без звука»).
     ///
     /// Overrides the status-based route so `onProceedToMain` can navigate even when
     /// `allGranted` is false. Reset when `allGranted` becomes `true` (no bypass needed).
-    @State private var bypassToMain = false
+    @State
+    private var bypassToMain = false
 
     // MARK: - View-owned VMs
 
-    @State private var onboardingViewModel: OnboardingViewModel
+    @State
+    private var onboardingViewModel: OnboardingViewModel
 
     /// The main screen view model, created once and owned for the lifetime of `RootView`.
-    @State private var mainViewModel: MainViewModel
+    @State
+    private var mainViewModel: MainViewModel
 
     // MARK: - Environment
 
-    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.scenePhase)
+    private var scenePhase
 
     // MARK: - Init
 

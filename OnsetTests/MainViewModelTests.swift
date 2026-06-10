@@ -493,3 +493,87 @@ struct MainViewModelStaleCameraIDTests {
         #expect(sut.selectedCameraID == "cam-only")
     }
 }
+
+// MARK: - MainViewModel — clamshell / unavailable camera placeholder (#206)
+
+/// Tests for `shouldShowCameraUnavailablePlaceholder`, the pure-logic predicate that drives
+/// the clamshell placeholder in the camera preview slot.
+///
+/// `DeviceDiscovery.cameras()` filters `isSuspended == true` devices, so in clamshell mode
+/// (lid closed, built-in camera suspended) `cameras` is empty and `isCameraActive` is `false`.
+/// This predicate distinguishes the "toggle on, no camera" state from "denied" (which owns
+/// `CameraDeniedRow`) and "toggle off" (which hides the section).
+@Suite("MainViewModel — camera unavailable placeholder")
+@MainActor
+struct MainViewModelCameraUnavailableTests {
+    private static func makeCamera(id: String) -> CameraDevice {
+        CameraDevice(uniqueID: id, formats: [
+            CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30, maxFps: 60),
+        ])
+    }
+
+    private func makeSUT(
+        cameraStatus: PermissionStatus = .authorized,
+        cameras: [CameraDevice] = []
+    ) throws
+    -> MainViewModel {
+        let store = try #require(InMemoryUserDefaults(suiteName: nil))
+        let perms = FakePermissionsService(
+            screen: .authorized,
+            camera: cameraStatus,
+            microphone: .authorized
+        )
+        let coordinator = RecordingCoordinator()
+        return MainViewModel(
+            permissions: perms,
+            coordinator: coordinator,
+            discoverDisplays: { _ in [] },
+            discoverCameras: { _ in cameras },
+            discoverMicrophones: { _ in [] },
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: store) }
+        )
+    }
+
+    @Test("Toggle on, no cameras → shouldShowCameraUnavailablePlaceholder is true")
+    func toggleOn_noCameras_showsPlaceholder() throws {
+        let sut = try makeSUT(cameras: [])
+        sut.cameras = []
+        sut.selectedCameraID = nil
+        sut.cameraEnabled = true
+
+        #expect(sut.shouldShowCameraUnavailablePlaceholder == true)
+    }
+
+    @Test("Toggle on, camera available → shouldShowCameraUnavailablePlaceholder is false")
+    func toggleOn_cameraAvailable_noPlaceholder() throws {
+        let cam = Self.makeCamera(id: "cam-1")
+        let sut = try makeSUT(cameras: [cam])
+        sut.cameras = [cam]
+        sut.selectedCameraID = cam.uniqueID
+        sut.cameraEnabled = true
+
+        #expect(sut.isCameraActive == true)
+        #expect(sut.shouldShowCameraUnavailablePlaceholder == false)
+    }
+
+    @Test("Toggle off → shouldShowCameraUnavailablePlaceholder is false")
+    func toggleOff_noPlaceholder() throws {
+        let sut = try makeSUT(cameras: [])
+        sut.cameras = []
+        sut.selectedCameraID = nil
+        sut.cameraEnabled = false
+
+        #expect(sut.shouldShowCameraUnavailablePlaceholder == false)
+    }
+
+    @Test("Camera denied → shouldShowCameraUnavailablePlaceholder is false (CameraDeniedRow owns that state)")
+    func cameraDenied_noPlaceholder() throws {
+        let sut = try makeSUT(cameraStatus: .denied, cameras: [])
+        sut.cameras = []
+        sut.selectedCameraID = nil
+        sut.cameraEnabled = true
+
+        #expect(sut.isCameraDenied == true)
+        #expect(sut.shouldShowCameraUnavailablePlaceholder == false)
+    }
+}
