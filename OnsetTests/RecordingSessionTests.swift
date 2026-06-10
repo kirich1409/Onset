@@ -1704,6 +1704,166 @@ struct RecordingSessionFaultTests {
     }
 }
 
+// MARK: - L5 production file-naming regression (#198)
+
+/// Returns `true` when the #198 production naming regression test should run.
+///
+/// Gated on `ONSET_RUN_L5_CAPTURE=1` — same env var as the existing L5 recording suite.
+/// The Onset-L5 test plan sets this automatically; see root `CLAUDE.md` § Testing.
+private func l5NamingEnabled() -> Bool {
+    ProcessInfo.processInfo.environment["ONSET_RUN_L5_CAPTURE"] == "1"
+}
+
+/// L5 regression test for #198: verifies that production file naming (via `RecordingSession`
+/// default factories, i.e. no injected `writerFactory`) produces spec §135-compliant names
+/// sharing an identical session timestamp for both files.
+///
+/// ## Why this test exists
+/// The existing `RecordingSessionLiveTests` inject a custom `writerFactory` that writes
+/// `l5-*.mp4` to a temp dir, bypassing `RecordingOutput.uniqueOutputURL` entirely.
+/// This suite exercises the production code path: no injected factory → `LiveWriterFactory`
+/// → `RecordingSession.defaultOutputURL` → `RecordingOutput.uniqueOutputURL` → `~/Movies/Onset/`.
+///
+/// ## Cleanup
+/// Created files are deleted from `~/Movies/Onset/` in a `defer` block unless
+/// `ONSET_L5_KEEP_OUTPUT=1` is set, so the user's recordings directory is not polluted.
+@Suite(
+    "RecordingSession — L5 production naming regression (#198)",
+    .serialized,
+    .timeLimit(.minutes(3))
+)
+struct RecordingSessionProductionNamingTests {
+    @Test(
+        "production session writes two spec §135 files with identical timestamps (#198)",
+        .enabled(if: l5NamingEnabled())
+    )
+    func liveProductionRecording_namesFilesPerSpec135() async throws {
+        let namingLogger = Logger(
+            subsystem: "dev.androidbroadcast.Onset",
+            category: "RecordingSessionNamingL5"
+        )
+
+        // Resolve real hardware — same discovery pattern as RecordingSessionLiveTests.
+        let displays = try await DeviceDiscovery.displays(screenAuthorized: true)
+        let display = try #require(displays.first, "no display available — L5 requires a real screen")
+        let cameras = DeviceDiscovery.cameras(cameraAuthorized: true)
+        let camera: CameraDevice = if let nameFilter = l5CameraName() {
+            try #require(
+                pickCamera(from: cameras, nameFilter: nameFilter),
+                "no camera matching '\(nameFilter)' — set ONSET_L5_CAMERA_NAME or leave it unset"
+            )
+        } else {
+            try #require(cameras.first, "no camera available — L5 requires the MX Brio")
+        }
+        let format = try CameraFormatSelector.pickBestFormat(from: camera.formats, minFps: 30)
+        let mic = DeviceDiscovery.microphones(microphoneAuthorized: true).first
+
+        namingLogger.notice(
+            "L5_NAMING_START w=\(format.pixelWidth) h=\(format.pixelHeight)"
+        )
+
+        let config = RecordingConfiguration.mvpDefault
+        let plan = ResolvedRecordingPlan(
+            displayID: display.displayID,
+            screenWidth: display.pixelWidth.isMultiple(of: 2) ? display.pixelWidth : display.pixelWidth - 1,
+            screenHeight: display.pixelHeight.isMultiple(of: 2) ? display.pixelHeight : display.pixelHeight - 1,
+            screenFps: config.maxScreenFps,
+            cameraPlan: ResolvedCameraPlan(
+                width: Int(format.pixelWidth),
+                height: Int(format.pixelHeight),
+                fps: Int(format.maxFps)
+            )
+        )
+
+        // Production-default session — NO injected writerFactory/encoderFactory/sourceFactory.
+        // This exercises the live naming path: init picks up LiveWriterFactory with
+        // RecordingSession.defaultOutputURL → RecordingOutput.uniqueOutputURL → ~/Movies/Onset/.
+        let session = RecordingSession(
+            plan: plan,
+            display: display,
+            cameraDevice: camera,
+            cameraFormat: format,
+            micDevice: mic,
+            config: config
+        )
+
+        // All permissions granted.
+        try await session.start(permissions: EffectivePermissions(
+            screenAvailable: true,
+            cameraAvailable: true,
+            microphoneAvailable: mic != nil
+        ))
+        try await Task.sleep(for: .seconds(3))
+        let result = await session.stop()
+
+        // Collect the two output URLs before any assertions so cleanup always runs.
+        let urls = result.outputURLs
+
+        // Defer cleanup: remove the created files from ~/Movies/Onset/ unless ONSET_L5_KEEP_OUTPUT=1.
+        defer {
+            if l5KeepOutput() {
+                for url in urls {
+                    namingLogger.info("L5_NAMING_KEEP path=\(url.path(percentEncoded: false))")
+                }
+            } else {
+                for url in urls {
+                    let path = url.path(percentEncoded: false)
+                    do {
+                        try FileManager.default.removeItem(at: url)
+                        namingLogger.notice("L5_NAMING_CLEANUP removed=\(path)")
+                    } catch {
+                        namingLogger.error("L5_NAMING_CLEANUP failed path=\(path) error=\(error)")
+                    }
+                }
+            }
+        }
+
+        namingLogger.notice("L5_NAMING_END files=\(urls.count)")
+        for url in urls {
+            namingLogger.notice("L5_NAMING_FILE name=\(url.lastPathComponent)")
+        }
+
+        // Assert exactly two files were produced (screen + camera).
+        let names = urls.map(\.lastPathComponent)
+        #expect(urls.count == 2, "expected 2 output files (screen + camera), got \(urls.count): \(names)")
+
+        // Spec §135 pattern: "Onset YYYY-MM-DD HH.mm.ss — Screen.mp4" / "… — Camera.mp4"
+        let spec135 = /^Onset \d{4}-\d{2}-\d{2} \d{2}\.\d{2}\.\d{2} — (Screen|Camera)\.mp4$/
+        for url in urls {
+            let name = url.lastPathComponent
+            #expect(
+                name.wholeMatch(of: spec135) != nil,
+                "file name does not match spec §135 pattern: '\(name)'"
+            )
+        }
+
+        // Both files must share the identical YYYY-MM-DD HH.mm.ss segment (#198 fix).
+        // Extract the 19-character timestamp substring from each name:
+        // "Onset " (6) + "YYYY-MM-DD HH.mm.ss" (19) = chars 6..<25.
+        let timestamps = urls.map { url -> Substring in
+            let name = url.lastPathComponent
+            guard name.count >= 25 else { return "" }
+            let start = name.index(name.startIndex, offsetBy: 6)
+            let end = name.index(name.startIndex, offsetBy: 25)
+            return name[start..<end]
+        }
+        #expect(
+            timestamps.count == 2 && timestamps[0] == timestamps[1],
+            "screen and camera files must share the same session timestamp (#198): \(urls.map(\.lastPathComponent))"
+        )
+
+        // Both files must exist on disk and be non-empty.
+        let fileManager = FileManager.default
+        for url in urls {
+            let path = url.path(percentEncoded: false)
+            #expect(fileManager.fileExists(atPath: path), "file must exist on disk: \(url.lastPathComponent)")
+            let attrs = try? fileManager.attributesOfItem(atPath: path)
+            let size = (attrs?[.size] as? Int) ?? 0
+            #expect(size > 0, "file must be non-empty: \(url.lastPathComponent) size=\(size)")
+        }
+    }
+}
+
 // swiftlint:enable no_magic_numbers
 // swiftlint:enable function_body_length
 // file_length stays disabled through EOF: it is a whole-file rule, so re-enabling it before the
