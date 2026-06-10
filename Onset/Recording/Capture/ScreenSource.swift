@@ -58,7 +58,7 @@ nonisolated func backpressureDropEvent(
 )
 -> DropEvent? {
     guard case .dropped = yieldResult else { return nil }
-    return DropEvent(reason: .encoderBackpressureDrops, source: .captureScreen, count: 1, detectedAt: pts)
+    return DropEvent(reason: .captureBackpressureDrops, source: .captureScreen, count: 1, detectedAt: pts)
 }
 
 /// Returns `true` when `frameHostTime >= sessionStart`.

@@ -211,10 +211,14 @@ nonisolated struct EncodedSample: @unchecked Sendable {
 
 /// The pipeline stage responsible for a dropped frame or sample.
 ///
-/// Maps 1-to-1 with the three DropMonitor counters tracked by #35/#36:
+/// Maps to three `DropMonitor` counters (tracked by #35/#36/#100) — not one-to-one:
+/// `.captureDrop` and `.captureBackpressureDrops` both fold into the single `captureDrops`
+/// counter and do NOT drive the degraded-state window:
 /// - `captureDrop`: counted at the source (SCStream / AVCapture delivery callback).
 /// - `cfrNormalizationDrops`: counted by the CFR normalizer when duplicate frames are
 ///   emitted for hold-repeat but the downstream is already full.
+/// - `captureBackpressureDrops`: counted when the capture→encoder `AsyncStream` buffer
+///   overflows. Distinct from encoder/disk pressure — does NOT drive the degraded alert.
 /// - `encoderBackpressureDrops`: counted when an `AsyncStream` buffer overflows because
 ///   the encoder or writer is not consuming fast enough.
 nonisolated enum DropReason {
@@ -230,6 +234,14 @@ nonisolated enum DropReason {
     /// Occurs when the source tick interval fires but the downstream stream buffer is full.
     /// The normalizer still accounts for the tick so the pts sequence is contiguous.
     case cfrNormalizationDrops
+
+    /// A frame or sample was dropped because the capture→encoder `AsyncStream` buffer overflowed.
+    ///
+    /// Distinct from `.encoderBackpressureDrops` (encoder-gate / writer pressure): capture
+    /// overflow indicates the capture layer is producing faster than the encoder consumes,
+    /// NOT that the encoder or disk is overloaded. Folds into the `captureDrops` counter in
+    /// `DropMonitor` and does NOT drive the degraded-state sliding window or post-stop alert.
+    case captureBackpressureDrops
 
     /// A frame or sample was dropped because the downstream `AsyncStream` buffer overflowed.
     ///
@@ -249,6 +261,7 @@ extension DropReason: Equatable {
         switch (lhs, rhs) {
         case (.captureDrop, .captureDrop),
              (.cfrNormalizationDrops, .cfrNormalizationDrops),
+             (.captureBackpressureDrops, .captureBackpressureDrops),
              (.encoderBackpressureDrops, .encoderBackpressureDrops):
             true
 
@@ -276,10 +289,15 @@ extension DropReason: Hashable {
         case .cfrNormalizationDrops:
             hasher.combine(1)
 
-        case .encoderBackpressureDrops:
-            // Ordinal tag for the third enum case; 2 is not in no_magic_numbers' exempt list.
+        case .captureBackpressureDrops:
+            // Ordinal tag for the third enum case; 3 is not in no_magic_numbers' exempt list.
             // swiftlint:disable:next no_magic_numbers
-            hasher.combine(2)
+            hasher.combine(3)
+
+        case .encoderBackpressureDrops:
+            // Ordinal tag for the fourth enum case; 4 is not in no_magic_numbers' exempt list.
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(4)
         }
     }
 }
