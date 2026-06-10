@@ -76,7 +76,7 @@ Artifact checks (CI `artifact-checks` job):
 | Dir | Purpose | Key types |
 |---|---|---|
 | `Onset/OnsetApp.swift` | Entry: two fixed-size `Window` scenes + `MenuBarExtra`, hotkey ⌘⌥⌃R | `OnsetApp` |
-| `Onset/Recording/Capture/` | Frame/sample acquisition into AsyncStreams | `VideoFrameSource`/`AudioSampleSource` (protocols), `CameraSource`, `ScreenSource`, `DeviceDiscovery` |
+| `Onset/Recording/Capture/` | Frame/sample acquisition into AsyncStreams | `VideoFrameSource`/`AudioSampleSource` (protocols), `CameraSource`, `ScreenSource`, `DeviceDiscovery`, `DeviceAvailabilityObserver` |
 | `Onset/Recording/Pipeline/` | Session orchestration, two-file output, capability preflight | `RecordingSession`, `DualFileOutputStage`, `CapabilityProbe`/`CapabilityResolver`, `DropMonitor`, `PipelineTypes.swift` |
 | `Onset/Encode/` | HW HEVC encoding + CFR normalization | `VideoEncoder`, `CFRNormalizer` (pure), `EncoderConfigBuilder`, `LiveCompressionSession` |
 | `Onset/Permissions/` | TCC statuses, startup routing, relaunch | `PermissionsService`, `PermissionsProviding`, `EffectivePermissions` (pure), `AppRouter` (pure) |

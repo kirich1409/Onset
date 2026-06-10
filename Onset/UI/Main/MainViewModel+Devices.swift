@@ -1,5 +1,18 @@
 import os
 
+// MARK: - Constants
+
+/// Constants for device-change handling, extracted outside the class because
+/// `nonisolated` static lets are not available directly inside `@Observable` classes
+/// without `@ObservationIgnored`.
+private enum MainViewModelDeviceConstants {
+    /// Debounce before reloading after a device-change event. A lid close fires a burst
+    /// of KVO + notification events; combined with the stream's `.bufferingNewest(1)`
+    /// policy this bounds a burst to at most two cheap, idempotent reloads.
+    // swiftlint:disable:next no_magic_numbers
+    static let deviceChangeDebounce: Duration = .milliseconds(300)
+}
+
 // MARK: - MainViewModel — Device loading
 
 extension MainViewModel {
@@ -114,6 +127,30 @@ extension MainViewModel {
         mainViewModelLogger.info(
             "Capture devices loaded — cameras: \(foundCameras.count), mics: \(foundMics.count)"
         )
+    }
+
+    // MARK: - Live device-change observation
+
+    /// Re-runs camera/microphone loading on every device topology change (connect,
+    /// disconnect, `isSuspended` flip — e.g. notebook lid closed/opened) while the main
+    /// window is open.
+    ///
+    /// Call after `loadDevices()` from MainView's `.task`; the loop runs until the task
+    /// is cancelled (view disappears), which terminates the stream and tears down the
+    /// underlying `DeviceAvailabilityObserver` via its `onTermination` hook.
+    ///
+    /// Reload safety: `loadCamerasAndMicrophones()` is idempotent — repeated runs re-resolve
+    /// the persisted selection (`.disconnected` notice when the device vanished, `.restore`
+    /// when it came back) without clobbering the saved record.
+    func observeDeviceChanges() async {
+        for await _ in self.makeDeviceChangeStream() {
+            // Coalesce bursts: the sleep absorbs trailing events into the stream's
+            // 1-slot buffer, so a burst costs at most two reloads.
+            try? await Task.sleep(for: MainViewModelDeviceConstants.deviceChangeDebounce)
+            guard !Task.isCancelled else { return }
+            self.loadCamerasAndMicrophones()
+            mainViewModelLogger.debug("Device change handled — capture device lists reloaded")
+        }
     }
 }
 
