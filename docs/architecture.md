@@ -17,7 +17,8 @@
 | `ScreenSource` | `ScreenSource.swift` | Актор: захват дисплея через ScreenCaptureKit, обрабатывает hot-plug отключение |
 | `CameraDevice` | `CaptureDeviceModels.swift` | Иммутабельный снапшот камеры (uniqueID + форматы), без живых ссылок на `AVCaptureDevice` |
 | `Display` | `CaptureDeviceModels.swift` | Иммутабельный снапшот дисплея: `CGDirectDisplayID`, размеры, частота |
-| `DeviceDiscovery` | `DeviceDiscovery+Displays.swift`, `DeviceDiscovery+CaptureDevices.swift` | Nonisolated-перечисление устройств с чистыми мапперами для тестов |
+| `DeviceDiscovery` | `DeviceDiscovery+Displays.swift`, `DeviceDiscovery+CaptureDevices.swift` | Nonisolated-перечисление устройств с чистыми мапперами для тестов; suspended-устройства (`isSuspended`, например FaceTime-камера при закрытой крышке) исключаются из результатов |
+| `DeviceAvailabilityObserver` | `DeviceAvailabilityObserver.swift` | Поток событий топологии устройств (`DeviceChangeEvent`): NotificationCenter connect/disconnect + KVO `isSuspended`; время жизни привязано к стриму (teardown через `onTermination`) |
 | `ScreenStreamConfigurationBuilder` | `ScreenStreamConfigurationBuilder.swift` | Чистый билдер `ResolvedRecordingPlan` → `SCStreamConfiguration` |
 
 Где искать:
@@ -155,7 +156,7 @@ TCC-разрешения, политика записи, запись MP4.
 | Тип | Файл | Роль |
 |---|---|---|
 | `RecordingCoordinator` | `UI/RecordingCoordinator.swift` | Единственный владелец состояния записи (phase, recordingState, drops, elapsed) и единственный подписчик стримов сессии |
-| `MainViewModel` | `UI/Main/MainViewModel.swift` | Выбор устройств и enable-логика кнопки Record (AC-2: экран обязателен, камера опциональна, guard невыбранного микрофона) |
+| `MainViewModel` | `UI/Main/MainViewModel.swift` | Выбор устройств и enable-логика кнопки Record (AC-2: экран обязателен, камера опциональна, guard невыбранного микрофона); список камер/микрофонов обновляется вживую через `observeDeviceChanges()` (`MainViewModel+Devices.swift`) |
 | `OnboardingViewModel` | `UI/Onboarding/OnboardingViewModel.swift` | Статусы карточек разрешений из `PermissionsProviding`; поллинг TCC экрана |
 | `RecordingControlling` | `UI/RecordingControlling.swift` | Nonisolated-протокол над `RecordingSession` для координатора — юнит-тесты без железа |
 | `RecordingView` | `UI/Recording/RecordingView.swift` | Тонкий reader состояния координатора; логика статуса/drop-pill в `RecordingDisplayMapper` |
@@ -182,7 +183,8 @@ TCC-разрешения, политика записи, запись MP4.
 - Чистые nonisolated-мапперы (`MenuBarLabelMapper`, `RecordingDisplayMapper`) в паре
   с тонкими `@MainActor`-view.
 - DI через closure-швы: `discoverDisplays`/`discoverCameras`/`discoverMicrophones`/
-  `makeCameraSource` на `MainViewModel`, `startSessionOverride` для шпионажа в тестах.
+  `makeDeviceChangeStream`/`makeCameraSource` на `MainViewModel`, `startSessionOverride`
+  для шпионажа в тестах.
 - `@State` + передача параметрами (никаких `@EnvironmentObject`).
 
 ## Тесты — `OnsetTests/`
