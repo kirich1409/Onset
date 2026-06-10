@@ -19,6 +19,7 @@ nonisolated private let menuBarMenuLogger = Logger(
 /// - «Открыть Onset» — opens and focuses the main window.
 /// - «Начать запись» — dispatches `coordinator.menuBarRecordIntent` when the main window is
 ///   mounted (intent installed by `MainView.onAppear`), or opens the main window as fallback.
+/// - «Экспортировать диагностику» — collects recent OS log entries and presents NSSavePanel.
 /// - «Версия X.Y.Z (N)» — non-interactive build attribution label for beta feedback (#166).
 /// - «Выход»
 ///
@@ -26,10 +27,11 @@ nonisolated private let menuBarMenuLogger = Logger(
 /// - «Остановить» — calls `coordinator.stop()` (the AC-9 menu-bar stop path).
 /// - «Открыть окно записи» — focuses the recording window.
 ///
-/// Pure reader of `coordinator` — no own state.
+/// Pure reader of `coordinator` and `diagnosticsCoordinator` — no own state.
 @MainActor
 struct MenuBarMenu: View {
     let coordinator: RecordingCoordinator
+    let diagnosticsCoordinator: DiagnosticsSaveCoordinator
 
     @Environment(\.openWindow)
     private var openWindow
@@ -61,6 +63,13 @@ struct MenuBarMenu: View {
                 AppActivation.bringToFront()
             }
         }
+
+        Divider()
+
+        Button("Экспортировать диагностику") {
+            self.diagnosticsCoordinator.export()
+        }
+        .disabled(self.diagnosticsCoordinator.isExporting)
 
         Divider()
 
