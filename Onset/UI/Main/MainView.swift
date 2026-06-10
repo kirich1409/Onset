@@ -81,6 +81,9 @@ struct MainView: View {
         .frame(width: WindowDefaults.width, height: WindowDefaults.height)
         .task {
             await self.model.loadDevices()
+            // Parks here until the view disappears: SwiftUI cancels the task, which
+            // terminates the device-change stream and tears down its observer.
+            await self.model.observeDeviceChanges()
         }
         .task {
             await self.model.subscribeToDisplayChanges()
@@ -118,8 +121,8 @@ struct MainView: View {
                 self.pendingAlert = alert
             }
         }
-        .onChange(of: self.model.coordinator.lastDroppedFrames) { _, newValue in
-            guard newValue > 0, self.pendingAlert == nil else { return }
+        .onChange(of: self.model.coordinator.lastDegradedWarning) { _, newValue in
+            guard newValue, self.pendingAlert == nil else { return }
             self.pendingAlert = self.resolvedAlert()
         }
         .alert(item: self.$pendingAlert) { alert in
@@ -134,8 +137,8 @@ struct MainView: View {
     private func resolvedAlert() -> PostStopAlert? {
         PostStopAlert.resolve(
             writeError: self.model.coordinator.lastWriteError,
-            degraded: self.model.coordinator.lastDegradedWarning,
-            droppedFrames: self.model.coordinator.lastDroppedFrames
+            droppedFrames: self.model.coordinator.lastDroppedFrames,
+            threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold
         )
     }
 
@@ -151,9 +154,9 @@ struct MainView: View {
                 message: Text(reason),
                 dismissButton: .default(Text("ОК")) {
                     self.model.coordinator.acknowledgeWriteError()
-                    // Chain to the next pending alert (degradedWarning if lastDroppedFrames > 0,
+                    // Chain to the next pending alert (degradedWarning if drops >= threshold,
                     // nil otherwise). Without this, onChange never re-fires for an unchanged
-                    // lastDroppedFrames, so the degraded-warning alert would be lost.
+                    // lastDegradedWarning, so the degraded-warning alert would be lost.
                     self.pendingAlert = self.resolvedAlert()
                 }
             )
@@ -164,8 +167,8 @@ struct MainView: View {
                 message: Text(alert.message),
                 dismissButton: .default(Text("ОК")) {
                     self.model.coordinator.acknowledgeDegradedWarning()
-                    // resolvedAlert() returns nil here (lastDegradedWarning is false after acknowledge);
-                    // explicit assignment keeps the dismiss path symmetrical with writeError.
+                    // resolvedAlert() returns nil here (lastDroppedFrames resets below threshold after
+                    // acknowledge); explicit assignment keeps the dismiss path symmetrical with writeError.
                     self.pendingAlert = self.resolvedAlert()
                 }
             )
@@ -202,18 +205,32 @@ struct MainView: View {
     // MARK: - Main content
 
     var mainContent: some View {
-        ScrollView {
-            VStack(spacing: Metrics.sectionSpacing) {
-                self.screenSection
-                self.cameraSection
-                self.microphoneSection
-                Spacer(minLength: Metrics.footerBottomPad)
-                self.recordButton
-                self.recordFooter
+        // Sticky-footer layout: sections scroll freely; the primary CTA stays pinned at the bottom
+        // so it is always visible regardless of Dynamic Type size (issue #136).
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(spacing: Metrics.sectionSpacing) {
+                    self.screenSection
+                    self.cameraSection
+                    self.microphoneSection
+                }
+                .padding(.horizontal, Metrics.outerPaddingH)
+                .padding(.vertical, Metrics.outerPaddingV)
             }
-            .padding(.horizontal, Metrics.outerPaddingH)
-            .padding(.vertical, Metrics.outerPaddingV)
+            self.stickyFooter
         }
+    }
+
+    /// The sticky footer: record button + optional reason/error text.
+    ///
+    /// Lives outside the `ScrollView` so the primary CTA is visible at any Dynamic Type size.
+    private var stickyFooter: some View {
+        VStack(spacing: Metrics.footerBottomPad) {
+            self.recordButton
+            self.recordFooter
+        }
+        .padding(.horizontal, Metrics.outerPaddingH)
+        .padding(.bottom, Metrics.outerPaddingV)
     }
 
     // MARK: - Record footer (reason / error)
@@ -243,7 +260,7 @@ struct MainView: View {
         } label: {
             self.recordButtonLabel
                 .frame(maxWidth: .infinity)
-                .frame(height: Metrics.recordButtonHeight)
+                .frame(minHeight: Metrics.recordButtonHeight)
         }
         .buttonStyle(.borderedProminent)
         .tint(.red)
@@ -330,67 +347,5 @@ struct CameraPreviewRepresentable: NSViewRepresentable {
     func updateNSView(_ nsView: CameraPreviewView, context: Context) {
         // No-op: CameraPreviewView wires the layer in init.
         // Caller must use .id() to force recreation when sessionHandle changes.
-    }
-}
-
-// MARK: - PostStopAlert
-
-/// Which post-stop alert `MainView` presents after a recording ends.
-///
-/// `writeError` carries the localized reason for the message body.
-/// `degradedWarning` carries the session's encoder-backpressure drop count so the alert can
-/// display "Пропущено N кадров — возможны рывки." (AC-9).
-///
-/// Priority ordering is enforced by `resolve(writeError:droppedFrames:)`: write-error
-/// supersedes degraded-warning because a failed write means the file was not saved (higher severity).
-enum PostStopAlert: Identifiable {
-    case writeError(reason: String)
-    /// Post-stop warning shown when the session's encoder-backpressure drop count exceeds zero.
-    ///
-    /// `droppedFrames` is `RecordingCoordinator.lastDroppedFrames` — frozen at stop time,
-    /// reset to 0 in `acknowledgeDegradedWarning()` and on every `start()`.
-    case degradedWarning(droppedFrames: Int)
-
-    var id: String {
-        switch self {
-        case .writeError: "writeError"
-        case .degradedWarning: "degradedWarning"
-        }
-    }
-
-    /// Returns the highest-priority alert given the coordinator state, or `nil` when no alert is due.
-    ///
-    /// Priority: `.writeError` > `.degradedWarning` > `nil`.
-    /// Both flags can be simultaneously true when the writer fails under heavy backpressure;
-    /// only the higher-severity alert is shown to avoid competing presentation slots.
-    ///
-    /// - Parameters:
-    ///   - writeError:    Human-readable write-failure reason, or `nil` when the file was saved.
-    ///   - degraded:      `RecordingCoordinator.lastDegradedWarning` — `true` when the live HUD
-    ///                    pill flashed `.degraded` at least once (the one-way latch from
-    ///                    `DropMonitor`). Drives the gate, not the raw `droppedFrames` count.
-    ///   - droppedFrames: `RecordingCoordinator.lastDroppedFrames` at call time — used for message
-    ///                    pluralization only; does NOT gate the alert.
-    nonisolated static func resolve(writeError: String?, degraded: Bool, droppedFrames: Int) -> Self? {
-        if let reason = writeError {
-            return .writeError(reason: reason)
-        }
-        if degraded {
-            return .degradedWarning(droppedFrames: droppedFrames)
-        }
-        return nil
-    }
-
-    /// Localized message for the `.degradedWarning` alert body (AC-9).
-    ///
-    /// Examples:
-    /// - `degradedWarning(droppedFrames: 1).message`  → "Пропущен 1 кадр — возможны рывки."
-    /// - `degradedWarning(droppedFrames: 2).message`  → "Пропущено 2 кадра — возможны рывки."
-    /// - `degradedWarning(droppedFrames: 5).message`  → "Пропущено 5 кадров — возможны рывки."
-    nonisolated var message: String {
-        guard case let .degradedWarning(count) = self else { return "" }
-        let verb = RussianPluralForm.select(count: count, one: "Пропущен", few: "Пропущено", many: "Пропущено")
-        let noun = RussianPluralForm.select(count: count, one: "кадр", few: "кадра", many: "кадров")
-        return "\(verb) \(count) \(noun) — возможны рывки."
     }
 }

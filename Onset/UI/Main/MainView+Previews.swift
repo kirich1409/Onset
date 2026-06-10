@@ -170,6 +170,30 @@ import SwiftUI
         return MainView(model: model) {}
     }
 
+    #Preview("Large font — Dynamic Type accessibility5 (issue #136)") {
+        let display = Display(
+            displayID: 1,
+            name: "Встроенный дисплей",
+            pixelWidth: 1920,
+            pixelHeight: 1080,
+            refreshHz: 60
+        )
+        let camera = CameraDevice(uniqueID: "camera-1", formats: [
+            CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30, maxFps: 60),
+        ])
+        let mic = MicrophoneDevice(uniqueID: "mic-1")
+        let model = makePreviewModel(
+            screen: .authorized,
+            camera: .authorized,
+            microphone: .authorized,
+            displays: [display],
+            cameras: [camera],
+            microphones: [mic]
+        )
+        return MainView(model: model) {}
+            .dynamicTypeSize(.accessibility5)
+    }
+
     #Preview("Camera toggle off — picker and preview hidden") {
         let display = Display(
             displayID: 1,

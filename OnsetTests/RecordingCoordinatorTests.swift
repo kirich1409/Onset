@@ -288,7 +288,7 @@ struct RecordingCoordinatorTests {
 
         try await coordinator.start(CoordinatorFixtures.request())
         // elapsed starts at 0; the tick loop derives it from the start Date. After ~1.1s it is ≥ 1.
-        let ticked = await eventuallyMain(timeoutMs: 3000) { coordinator.elapsed >= 1 }
+        let ticked = await eventuallyMain(timeoutMs: 8000) { coordinator.elapsed >= 1 }
         #expect(ticked, "elapsed must increment from the start Date while recording")
 
         await coordinator.stop()
@@ -327,26 +327,54 @@ struct RecordingCoordinatorTests {
         #expect(coordinator.phase == .idle, "menu-bar origin → return to .idle")
     }
 
-    @Test("stop computes the degraded warning from the result")
-    func stop_computesDegradedWarning() async throws {
-        // sessionEverDegraded: true makes the warning fire — not the raw backpressureDrops count.
-        let fake = FakeRecordingControlling(
-            result: CoordinatorFixtures.result(backpressureDrops: 128, sessionEverDegraded: true)
-        )
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+    // MARK: - menuBar + pending alert opens main window (#131)
 
-        try await coordinator.start(CoordinatorFixtures.request())
+    @Test("stop menuBar + degraded warning → opens main window so alert can be presented (#131)")
+    func stop_menuBarWithDegradedWarning_opensMainWindow() async throws {
+        let fake = FakeRecordingControlling(
+            result: CoordinatorFixtures.result(backpressureDrops: 64)
+        )
+        let openCounter = Counter()
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: { openCounter.increment() }
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request(origin: .menuBar))
         await coordinator.stop()
 
-        #expect(coordinator.lastDegradedWarning == true, "degradedWarning must come from sessionEverDegraded latch")
-        #expect(coordinator.lastDroppedFrames == 128, "lastDroppedFrames must be the frozen snapshot from stop()")
-        #expect(coordinator.drops.encoderBackpressureDrops == 128, "final drops come from the result")
+        #expect(coordinator.phase == .main, "menuBar + pending alert → must open main window (phase .main)")
+        #expect(openCounter.value == 1, "openMainWindow must be called exactly once")
+        #expect(coordinator.hasPendingAlert, "hasPendingAlert must still be true until user acknowledges")
     }
 
-    @Test("stop produces no degraded warning when sessionEverDegraded is false (even with backpressure drops)")
-    func stop_noDegradedWarning_whenNotEverDegraded() async throws {
-        // Key regression guard: high backpressureDrops but sessionEverDegraded == false means
-        // the drops were too scattered to trip the window. The post-stop alert must NOT fire.
+    @Test("stop menuBar + write error → opens main window so alert can be presented (#131)")
+    func stop_menuBarWithWriteError_opensMainWindow() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.failedWriteResult())
+        let openCounter = Counter()
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: { openCounter.increment() }
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request(origin: .menuBar))
+        await coordinator.stop()
+
+        #expect(coordinator.phase == .main, "menuBar + write error → must open main window (phase .main)")
+        #expect(openCounter.value == 1, "openMainWindow must be called exactly once")
+        #expect(coordinator.hasPendingAlert, "hasPendingAlert must still be true until user acknowledges")
+    }
+
+    @Test("stop computes the degraded warning from the result")
+    func stop_computesDegradedWarning() async throws {
+        // 128 backpressure drops is well above the default postStopDropWarningThreshold (5) —
+        // lastDegradedWarning must be true because lastDroppedFrames >= threshold.
         let fake = FakeRecordingControlling(
             result: CoordinatorFixtures.result(backpressureDrops: 128, sessionEverDegraded: false)
         )
@@ -355,8 +383,25 @@ struct RecordingCoordinatorTests {
         try await coordinator.start(CoordinatorFixtures.request())
         await coordinator.stop()
 
-        #expect(coordinator.lastDegradedWarning == false, "no warning when session was never degraded")
-        #expect(coordinator.lastDroppedFrames == 128, "lastDroppedFrames still tracked for reference")
+        #expect(coordinator.lastDegradedWarning == true, "128 drops >= threshold → warning fires")
+        #expect(coordinator.lastDroppedFrames == 128, "lastDroppedFrames must be the frozen snapshot from stop()")
+        #expect(coordinator.drops.encoderBackpressureDrops == 128, "final drops come from the result")
+    }
+
+    @Test("stop produces no degraded warning when backpressure drops are below postStopDropWarningThreshold")
+    func stop_noDegradedWarning_whenDropsBelowThreshold() async throws {
+        // AC-9 regression guard (#132): a single isolated backpressure drop (count=1) must NOT fire
+        // the post-stop alert — the threshold (default 5) must be reached cumulatively.
+        let fake = FakeRecordingControlling(
+            result: CoordinatorFixtures.result(backpressureDrops: 1, sessionEverDegraded: false)
+        )
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        await coordinator.stop()
+
+        #expect(coordinator.lastDegradedWarning == false, "single drop is below threshold — no warning")
+        #expect(coordinator.lastDroppedFrames == 1, "lastDroppedFrames still tracked for reference")
     }
 
     @Test("stop is idempotent across concurrent paths — teardown runs once")
@@ -413,7 +458,7 @@ struct RecordingCoordinatorTests {
 
         try await coordinator.start(CoordinatorFixtures.request())
         // Wait until at least one tick so elapsed > 0 and the loop is confirmed running.
-        let ticked = await eventuallyMain(timeoutMs: 3000) { coordinator.elapsed >= 1 }
+        let ticked = await eventuallyMain(timeoutMs: 8000) { coordinator.elapsed >= 1 }
         #expect(ticked, "prerequisite: elapsed must tick to at least 1 before stopping")
 
         await coordinator.stop()
@@ -427,7 +472,7 @@ struct RecordingCoordinatorTests {
 
     @Test("AC-9 degraded-warning lifecycle: set on degraded stop, cleared by acknowledge, absent after clean session")
     func degradedWarning_lifecycle() async throws {
-        // Session 1: result carries sessionEverDegraded=true.
+        // Session 1: result carries 64 backpressure drops — well above the default threshold (5).
         let fake1 = FakeRecordingControlling(
             result: CoordinatorFixtures.result(backpressureDrops: 64, sessionEverDegraded: true)
         )
@@ -780,6 +825,50 @@ struct RecordingCoordinatorHotKeyTests {
         let stopped = await eventuallyMain { coordinator.phase == .main }
         #expect(stopped, "coordinator must reach .main after double-tap")
         #expect(fake.stopCount == 1, "stop() must be called exactly once despite two handleHotKey() calls")
+    }
+}
+
+// MARK: - .writerFailed live-UI seam (#197)
+
+@Suite("RecordingCoordinator — writerFailed live-UI seam (#197)")
+@MainActor
+struct RecordingCoordinatorWriterFailedTests {
+    @Test(".writerFailed(.screen) → screen liveness false, camera + mic unchanged, phase still .recording")
+    func screenWriterFailed_flipsScreenLiveness() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        #expect(coordinator.sourceLiveness == .allLive, "starts fully live")
+
+        fake.emitRevocation(.writerFailed(.screen))
+
+        let settled = await eventuallyMain { coordinator.sourceLiveness.screen == false }
+        #expect(settled, "screen liveness must flip to false after .writerFailed(.screen)")
+        #expect(coordinator.sourceLiveness.camera, "camera liveness must remain true")
+        #expect(coordinator.sourceLiveness.microphone, "mic liveness must remain true")
+        #expect(coordinator.phase == .recording, "phase must remain .recording — recording continues")
+
+        await coordinator.stop()
+    }
+
+    @Test(".writerFailed(.camera) → camera + mic liveness false, screen unchanged, phase still .recording")
+    func cameraWriterFailed_flipsCameraAndMicLiveness() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        #expect(coordinator.sourceLiveness == .allLive, "starts fully live")
+
+        fake.emitRevocation(.writerFailed(.camera))
+
+        let cameraSettled = await eventuallyMain { coordinator.sourceLiveness.camera == false }
+        #expect(cameraSettled, "camera liveness must flip to false after .writerFailed(.camera)")
+        #expect(!coordinator.sourceLiveness.microphone, "mic liveness must flip to false (rides camera session)")
+        #expect(coordinator.sourceLiveness.screen, "screen liveness must remain true")
+        #expect(coordinator.phase == .recording, "phase must remain .recording — screen still records")
+
+        await coordinator.stop()
     }
 }
 

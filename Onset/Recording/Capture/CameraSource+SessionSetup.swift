@@ -75,6 +75,13 @@ extension CameraSource {
             cameraSourceLogger.error("Camera device not found for configured uniqueID")
             throw RecordingError.captureSetupFailed(CameraSourceError.deviceNotFound)
         }
+        // Backstop for the selection→start race: discovery already filters suspended
+        // devices, but the lid can close after the picker was populated. A suspended
+        // camera starts a session that delivers zero frames — refuse instead.
+        guard !device.isSuspended else {
+            cameraSourceLogger.error("Camera device is suspended — refusing capture setup")
+            throw RecordingError.captureSetupFailed(CameraSourceError.deviceSuspended)
+        }
         let input = try self.makeCameraInput(device)
         guard session.canAddInput(input) else {
             cameraSourceLogger.error("Cannot add camera input to session")

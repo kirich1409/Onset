@@ -78,6 +78,10 @@ struct OnsetApp: App {
     /// real recording if the key is pressed during a test session).
     @State private var hotKeyMonitor = GlobalHotKeyMonitor()
 
+    /// Coordinator for the diagnostic export flow (#164): collect OS logs → NSSavePanel → reveal.
+    /// Shared by `MenuBarMenu`; created once at app-init time (lightweight, no I/O at init).
+    @State private var diagnosticsCoordinator = DiagnosticsSaveCoordinator()
+
     var body: some Scene {
         Window("Onset", id: WindowID.main) {
             // Under XCTest the window is empty (no RootView, no onboarding flow, no
@@ -126,7 +130,7 @@ struct OnsetApp: App {
         // Menu bar item (#38). Full 3-state label and context menu.
         // Suppressed under XCTest so test hosts do not accumulate competing status items.
         MenuBarExtra(isInserted: .constant(!isRunningUnderXCTest)) {
-            MenuBarMenu(coordinator: self.coordinator)
+            MenuBarMenu(coordinator: self.coordinator, diagnosticsCoordinator: self.diagnosticsCoordinator)
         } label: {
             MenuBarLabel(coordinator: self.coordinator)
         }

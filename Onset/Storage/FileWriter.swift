@@ -83,6 +83,14 @@ actor FileWriter {
     /// `appendVideo`/`appendAudio` short-circuit them and keep the failure logged exactly once.
     private var isFaulted = false
 
+    /// Whole-GOP drop window flag — set on the first not-ready sample, cleared only when a ready
+    /// keyframe arrives so only complete GOPs are ever discarded (#150).
+    ///
+    /// Invariant: `true` means every incoming delta frame must be dropped regardless of whether
+    /// `isReadyForMoreMediaData` has since returned `true`. A delta appended after a missing
+    /// predecessor re-tears the same GOP corruption the flag exists to prevent.
+    private var droppingUntilKeyframe = false
+
     // MARK: - Diagnostics (#105)
 
     /// Source time passed to `startSession(atSourceTime:)` — captured for first-append logging (#105).
@@ -269,34 +277,71 @@ actor FileWriter {
     /// the timeline origin, so NO timestamp conversion is applied here. Adding a conversion
     /// would double-subtract and push samples before the session start (PTS landmine).
     ///
-    /// If the input is not ready (disk/writer backpressure), the sample is dropped and a
-    /// `DropEvent(.encoderBackpressureDrops)` is emitted on `drops`.
+    /// ### Keyframe-aware whole-GOP drop (#150)
+    /// When `isReadyForMoreMediaData` is `false`, the actor enters a `droppingUntilKeyframe`
+    /// window and drops every subsequent frame — including delta frames that arrive while the
+    /// input is ready again — until a *ready* keyframe closes the window. This ensures only
+    /// complete GOPs are ever absent from the file. Appending a delta after a missing
+    /// predecessor re-tears the same corruption the window exists to prevent.
     ///
-    /// ### Drop tradeoff
-    /// Dropping a compressed HEVC sample tears the GOP — the decoder glitches until the next
-    /// keyframe, but the file remains valid and playable.
-    /// `expectsMediaDataInRealTime = true` means "drop, don't block" (AC-10 / AC-4 both hold:
-    /// the file is valid/playable; the decoder may show a brief artifact after the drop).
+    /// Each dropped frame emits a `DropEvent(.encoderBackpressureDrops, source: .writer)` so
+    /// `DropMonitor` drives the `Degraded` signal and per-source summary exactly as before.
     ///
     /// - Parameter sample: An `EncodedSample` produced by `VideoEncoder`.
-    func appendVideo(_ sample: EncodedSample) {
+    func appendVideo(_ sample: EncodedSample) { // swiftlint:disable:this function_body_length
         // Post-fault short-circuit: prevents a hard failure from masquerading as backpressure
         // and keeps the error logged once (see `isFaulted`).
         guard !self.isFaulted else { return }
 
         let nowSeconds = CMTimeGetSeconds(PipelineClock.currentHostTime())
-        guard self.videoSeam.isReadyForMoreMediaData else {
-            // Writer/disk backpressure — distinct from encoder backpressure (which originates
-            // in VideoEncoder before the sample is compressed). Both map to
-            // .encoderBackpressureDrops in the spec's three-counter model because the spec
-            // does not distinguish writer-side from encoder-side drops at the DropMonitor
-            // level; the log message disambiguates for diagnostics (AC-4 / spec §163).
-            // Per-frame backpressure detail is stripped from release at .debug; DropMonitor owns
-            // the aggregate .warning/Degraded signal, and the DropEvent already carries the data.
+        let ready = self.videoSeam.isReadyForMoreMediaData
+
+        // Determine whether this sample must be dropped to maintain whole-GOP invariant (#150).
+        // A sample must be dropped when:
+        //   (a) the input is not ready (backpressure — opens the window), OR
+        //   (b) the window is already open and this is not a ready keyframe that would close it.
+        // A ready keyframe closes the window (D=1, R=1, K=1); a ready delta while the window
+        // is open is still dropped (D=1, R=1, K=0) — appending it would re-tear the GOP.
+        // Whether the drop is the window opening (first not-ready sample) or a continuation
+        // (delta or not-ready inside an already-open window). Used only for the log message.
+        let isWindowOpening: Bool
+        let mustDrop: Bool
+        if self.droppingUntilKeyframe {
+            if ready, sample.isKeyframe {
+                // Ready keyframe closes the window — fall through to append below.
+                self.droppingUntilKeyframe = false
+                mustDrop = false
+                isWindowOpening = false
+            } else {
+                // Not-ready OR a delta inside the window: keep dropping.
+                mustDrop = true
+                isWindowOpening = false
+            }
+        } else if !ready {
+            // First not-ready sample: open the window.
+            self.droppingUntilKeyframe = true
+            mustDrop = true
+            isWindowOpening = true
+        } else {
+            mustDrop = false
+            isWindowOpening = false
+        }
+
+        if mustDrop {
+            // Writer/disk backpressure or GOP-window continuation drop. Both map to
+            // .encoderBackpressureDrops with source .writer — DropMonitor routes them into the
+            // degraded-state window and per-source diagnostic breakdown identically to the
+            // previous behaviour. The log message distinguishes the two cases (AC-4 / spec §163).
             self.aggregator.openEpisode(nowSeconds: nowSeconds)
-            self.logger.debug(
-                "FileWriter video input not ready (backpressure) — dropping sample (writer/disk)"
-            )
+            if isWindowOpening {
+                self.logger.debug(
+                    "FileWriter video input not ready (backpressure) — opening GOP-drop window (writer/disk)"
+                )
+            } else {
+                self.logger.debug(
+                    "FileWriter video GOP-drop window active — dropping frame until next ready keyframe"
+                )
+            }
             self.dropsContinuation.yield(
                 DropEvent(
                     reason: .encoderBackpressureDrops,
@@ -548,6 +593,14 @@ actor FileWriter {
     /// Whether a hard writer failure has been recorded (an `append()` returned `false`).
     var isFaultedForTesting: Bool {
         self.isFaulted
+    }
+
+    /// Whether the keyframe-aware whole-GOP drop window is currently open (#150).
+    ///
+    /// `true` means the next append will only proceed for a ready keyframe; all other frames
+    /// are dropped. Used by tests to verify the window opens and closes at the correct boundaries.
+    var droppingUntilKeyframeForTesting: Bool {
+        self.droppingUntilKeyframe
     }
 
     /// AAC output settings used by the audio input.
