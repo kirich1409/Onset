@@ -6,9 +6,9 @@ import os
 /// `nonisolated` static lets are not available directly inside `@Observable` classes
 /// without `@ObservationIgnored`.
 private enum MainViewModelDeviceConstants {
-    /// Debounce before reloading after a device-change event. A lid close fires a burst
-    /// of KVO + notification events; combined with the stream's `.bufferingNewest(1)`
-    /// policy this bounds a burst to at most two cheap, idempotent reloads.
+    // Debounce before reloading after a device-change event. A lid close fires a burst
+    // of KVO + notification events; combined with the stream's `.bufferingNewest(1)`
+    // policy this bounds a burst to at most two cheap, idempotent reloads.
     // swiftlint:disable:next no_magic_numbers
     static let deviceChangeDebounce: Duration = .milliseconds(300)
 }

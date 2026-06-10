@@ -198,3 +198,5 @@ private func eventuallyMainActor(timeoutMs: Int = 8000, _ condition: () -> Bool)
     }
     return condition()
 }
+
+// swiftlint:enable no_magic_numbers
