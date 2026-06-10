@@ -175,6 +175,10 @@ actor RecordingSession {
         self.encoderFactory = encoderFactory
         self.sourceFactory = sourceFactory
 
+        // Capture the session-start timestamp once. Both URL providers below close over this
+        // value so screen and camera files always share an identical timestamp segment (#198).
+        let startDate = Date()
+
         // UI state stream + its continuation, created here so a subscriber can iterate before
         // start() builds the DropMonitor whose transitions are forwarded into this continuation.
         let (stateStream, stateContinuation) = AsyncStream.makeStream(of: RecordingState.self)
@@ -191,8 +195,10 @@ actor RecordingSession {
         self.probe = probe ?? { CapabilityProbe.probe(display: display, cameraFormat: cameraFormat, config: config) }
 
         // Default live writer factory: place both files in the configured output directory.
+        // Both kinds close over `startDate` — not a fresh Date() per call — so the pair of files
+        // for one session is guaranteed to share the same timestamp component (#198).
         self.writerFactory = writerFactory ?? LiveWriterFactory(configuration: config) { kind in
-            RecordingSession.defaultOutputURL(for: kind, config: config)
+            RecordingSession.defaultOutputURL(for: kind, config: config, date: startDate)
         }
     }
 
@@ -328,6 +334,11 @@ actor RecordingSession {
                 // the write-failure alert without having to press Stop (#105 fail-fast).
                 // `stop()` is idempotent via its memoised `stopTask`.
                 _ = await self?.stop()
+            },
+            onWriterFaulted: { [weak self] kind in
+                // One writer faulted while the other pipeline is still live — stop the faulted
+                // pipeline and flip its liveness in the recording window (#197 live UI seam).
+                await self?.handleWriterFault(kind)
             }
         )
         self.stage = stage
@@ -541,28 +552,49 @@ actor RecordingSession {
         case .displayDisconnected:
             self.logger.notice("AC-12: display disconnected — finalising screen pipeline; camera continues")
             await self.stopAndFinalizePipeline(.screen)
-            self.notifyRevocation(of: .screen)
+            self.notifyRevocation(.sourceRevoked(.screen))
 
         case .cameraDisconnected:
             self.logger.notice("AC-12: camera disconnected — finalising camera; screen continues, screen audio ends")
             await self.stopAndFinalizePipeline(.camera)
-            self.notifyRevocation(of: .camera)
+            self.notifyRevocation(.sourceRevoked(.camera))
 
         case let .sourceInterrupted(reason):
             self.logger.warning("Source interrupted (\(String(describing: kind))): \(reason) — continuing")
         }
     }
 
-    /// Yields the AC-12 revocation notification (#39 UI seam) AFTER `stopAndFinalizePipeline` has
-    /// niled the finalised pipeline's slot: `.sourceRevoked(kind)`, then `.allVideoSourcesLost` when
-    /// no video pipeline remains. Called only on the AC-12 finalize arms — does NOT alter the
-    /// finalize behaviour itself (Epic-3-verified), only notifies the single-consumer coordinator.
-    private func notifyRevocation(of kind: RecordingPipelineKind) {
-        self.revocationContinuation.yield(.sourceRevoked(kind))
+    /// Yields a revocation notification on `sourceRevocationStream`, then — when no video pipeline
+    /// remains — yields `.allVideoSourcesLost`.
+    ///
+    /// Used by both the AC-12 graceful-revoke path (`.sourceRevoked`) and the writer-fault live-UI
+    /// path (`.writerFailed`). Centralising the "last pipeline gone" check here avoids duplicating
+    /// the `allVideoSourcesLost` logic across call sites.
+    ///
+    /// Must be called AFTER `stopAndFinalizePipeline` / `takePipeline` so that
+    /// `screenPipeline` / `cameraPipeline` accurately reflect which pipelines remain.
+    private func notifyRevocation(_ revocation: RecordingRevocation) {
+        self.revocationContinuation.yield(revocation)
         if self.screenPipeline == nil, self.cameraPipeline == nil {
-            self.logger.notice("AC-12: last video pipeline finalised — signalling allVideoSourcesLost")
+            self.logger.notice("Last video pipeline finalised — signalling allVideoSourcesLost")
             self.revocationContinuation.yield(.allVideoSourcesLost)
         }
+    }
+
+    /// Handles a single-writer hard fault mid-recording (#197 live UI seam).
+    ///
+    /// Stops and finalises the faulted pipeline (so we stop burning CPU on a dead writer), then
+    /// yields `.writerFailed(kind)` on `sourceRevocationStream` so the `RecordingCoordinator`
+    /// immediately flips the corresponding source's liveness to `false`.
+    ///
+    /// The all-faulted path (`onAllWritersFaulted` → `stop()`) is unchanged — this method is only
+    /// reached when the OTHER pipeline is still live.
+    private func handleWriterFault(_ kind: RecordingPipelineKind) async {
+        self.logger.notice(
+            "Writer fault on \(String(describing: kind), privacy: .public) pipeline — stopping faulted pipeline (#197)"
+        )
+        await self.stopAndFinalizePipeline(kind)
+        self.notifyRevocation(.writerFailed(kind))
     }
 
     /// Stops one pipeline's source + encoder in the load-bearing order, joins its routing tasks,
@@ -747,21 +779,25 @@ actor RecordingSession {
     // MARK: - Default output URL
 
     /// Builds the default output URL for a pipeline under the configured output directory.
+    ///
+    /// Delegates to `RecordingOutput.uniqueOutputURL` for spec-compliant naming (§135) and
+    /// collision avoidance. The `date` parameter is the session-start timestamp shared by
+    /// both pipelines in the same session so screen and camera files carry identical timestamps.
     private static func defaultOutputURL(
         for kind: RecordingPipelineKind,
-        config: RecordingConfiguration
+        config: RecordingConfiguration,
+        date: Date
     )
     -> URL {
-        let suffix = switch kind {
-        case .screen:
-            "screen"
-
-        case .camera:
-            "camera"
+        let fileKind: RecordingFileKind = switch kind {
+        case .screen: .screen
+        case .camera: .camera
         }
-        let timestamp = Int(Date().timeIntervalSince1970)
-        return config.outputDirectory
-            .appending(path: "Onset-\(timestamp)-\(suffix).mp4")
+        return RecordingOutput.uniqueOutputURL(
+            in: config.outputDirectory,
+            timestamp: date,
+            kind: fileKind
+        )
     }
 }
 

@@ -81,6 +81,9 @@ struct MainView: View {
         .frame(width: WindowDefaults.width, height: WindowDefaults.height)
         .task {
             await self.model.loadDevices()
+            // Parks here until the view disappears: SwiftUI cancels the task, which
+            // terminates the device-change stream and tears down its observer.
+            await self.model.observeDeviceChanges()
         }
         // Post-stop alerts: surface on re-appear or on async flag changes.
         // `.onAppear` covers the case where the flag is already set when the main window

@@ -1497,6 +1497,177 @@ struct RecordingSessionLiveTests {
     }
 }
 
+// MARK: - Single writer fault → live UI seam (#197)
+
+@Suite("RecordingSession — single writer fault live-UI seam (#197)")
+struct RecordingSessionSingleWriterFaultTests {
+    // MARK: .writerFailed emitted on revocation stream
+
+    @Test("screen writer fault → yields .writerFailed(.screen) on sourceRevocationStream")
+    func screenWriterFault_yieldsWriterFailedScreen() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        // Subscribe before start so no event is missed.
+        let received: Task<RecordingRevocation?, Never> = Task {
+            for await revocation in session.sourceRevocationStream {
+                return revocation
+            }
+            return nil
+        }
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.bothWritersCreated }
+
+        // Fault only the screen writer — the camera writer is still live.
+        writers.screenWriter.simulateFault()
+
+        let revocation = await received.value
+        #expect(revocation == .writerFailed(.screen), "screen writer fault must yield .writerFailed(.screen)")
+
+        _ = await session.stop()
+    }
+
+    @Test("camera writer fault → yields .writerFailed(.camera) on sourceRevocationStream")
+    func cameraWriterFault_yieldsWriterFailedCamera() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        let received: Task<RecordingRevocation?, Never> = Task {
+            for await revocation in session.sourceRevocationStream {
+                return revocation
+            }
+            return nil
+        }
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.bothWritersCreated }
+
+        writers.cameraWriter.simulateFault()
+
+        let revocation = await received.value
+        #expect(revocation == .writerFailed(.camera), "camera writer fault must yield .writerFailed(.camera)")
+
+        _ = await session.stop()
+    }
+
+    // MARK: Last pipeline gone → .allVideoSourcesLost follows .writerFailed
+
+    // When screen writer faults (partial — camera still live), `handleWriterFault` sets
+    // screenPipeline = nil. If the camera source then disconnects, the subsequent
+    // notifyRevocation(.sourceRevoked(.camera)) sees both pipelines nil and emits
+    // .allVideoSourcesLost. This test exercises that combined path.
+
+    @Test("screen writer fault then camera disconnect → .writerFailed(.screen) then .allVideoSourcesLost")
+    func screenWriterFaultThenCameraDisconnect_yieldsAllVideoSourcesLost() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        let allRevocations: Task<[RecordingRevocation], Never> = Task {
+            var collected: [RecordingRevocation] = []
+            for await revocation in session.sourceRevocationStream {
+                collected.append(revocation)
+            }
+            return collected
+        }
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.bothWritersCreated }
+
+        // Step 1: fault the screen writer — partial fault, camera still live.
+        writers.screenWriter.simulateFault()
+        _ = await eventually { writers.screenWriter.finishCalled }
+
+        // Step 2: camera source disconnects — this is now the last pipeline.
+        sources.cameraSource.emitEvent(.cameraDisconnected)
+        _ = await eventually { writers.cameraWriter.finishCalled }
+
+        _ = await session.stop()
+
+        let revocations = await allRevocations.value
+        #expect(revocations.contains(.writerFailed(.screen)), "must contain .writerFailed(.screen)")
+        #expect(
+            revocations.contains(.allVideoSourcesLost),
+            ".allVideoSourcesLost must follow when the last remaining pipeline also ends"
+        )
+        #expect(revocations.last == .allVideoSourcesLost, ".allVideoSourcesLost must be the last event")
+    }
+
+    // MARK: Faulted pipeline's file result is .failed
+
+    @Test("screen writer fault → screen FinishResult is .failed in RecordingResult")
+    func screenWriterFault_screenFinishResultIsFailed() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.bothWritersCreated }
+
+        // Flip the screen writer's result to .failed before simulating the fault so that
+        // finalizePipeline returns .failed (the fault observer calls finish() after markFinished).
+        writers.screenWriter.finishResult = .failed(
+            url: URL(fileURLWithPath: "/tmp/onset-session-fake-screen.mp4"),
+            error: SessionTestError.failed(-1)
+        )
+        writers.screenWriter.simulateFault()
+
+        // Wait for the fault to be processed (screen pipeline stopped + finalised).
+        _ = await eventually { writers.screenWriter.finishCalled }
+
+        // Stop the session and inspect the result.
+        let result = await session.stop()
+        // The faulted screen file is surfaced as a write failure.
+        #expect(result.hasWriteFailure, "RecordingResult.hasWriteFailure must be true after a writer fault")
+        #expect(result.screen?.failureError != nil, "screen FinishResult must carry the write error")
+        // Camera writer completed successfully — no failure on the camera side.
+        #expect(result.camera?.failureError == nil, "camera FinishResult must not carry an error")
+    }
+
+    // MARK: No deadlock — test completes
+
+    @Test("single writer fault does not deadlock — test completes within timeout")
+    func singleWriterFault_noDeadlock() async throws {
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
+
+        try await session.start(permissions: SessionFixtures.fullPermissions())
+        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
+        _ = await eventually { writers.bothWritersCreated }
+
+        writers.screenWriter.simulateFault()
+
+        // If there were a deadlock, eventually would time out and this test would fail.
+        let faultProcessed = await eventually { writers.screenWriter.finishCalled }
+        #expect(faultProcessed, "screen pipeline must be finalised after its writer faults (no deadlock)")
+
+        _ = await session.stop()
+    }
+}
+
 // MARK: - Fail-fast on writer fault (AC-13 / #105)
 
 @Suite("RecordingSession — fail-fast on writer fault")
@@ -1530,6 +1701,166 @@ struct RecordingSessionFaultTests {
             sources.screenSource.stopCalled && sources.cameraSource.stopCalled
         }
         #expect(stopped, "session must stop all sources when all writers fault")
+    }
+}
+
+// MARK: - L5 production file-naming regression (#198)
+
+/// Returns `true` when the #198 production naming regression test should run.
+///
+/// Gated on `ONSET_RUN_L5_CAPTURE=1` — same env var as the existing L5 recording suite.
+/// The Onset-L5 test plan sets this automatically; see root `CLAUDE.md` § Testing.
+private func l5NamingEnabled() -> Bool {
+    ProcessInfo.processInfo.environment["ONSET_RUN_L5_CAPTURE"] == "1"
+}
+
+/// L5 regression test for #198: verifies that production file naming (via `RecordingSession`
+/// default factories, i.e. no injected `writerFactory`) produces spec §135-compliant names
+/// sharing an identical session timestamp for both files.
+///
+/// ## Why this test exists
+/// The existing `RecordingSessionLiveTests` inject a custom `writerFactory` that writes
+/// `l5-*.mp4` to a temp dir, bypassing `RecordingOutput.uniqueOutputURL` entirely.
+/// This suite exercises the production code path: no injected factory → `LiveWriterFactory`
+/// → `RecordingSession.defaultOutputURL` → `RecordingOutput.uniqueOutputURL` → `~/Movies/Onset/`.
+///
+/// ## Cleanup
+/// Created files are deleted from `~/Movies/Onset/` in a `defer` block unless
+/// `ONSET_L5_KEEP_OUTPUT=1` is set, so the user's recordings directory is not polluted.
+@Suite(
+    "RecordingSession — L5 production naming regression (#198)",
+    .serialized,
+    .timeLimit(.minutes(3))
+)
+struct RecordingSessionProductionNamingTests {
+    @Test(
+        "production session writes two spec §135 files with identical timestamps (#198)",
+        .enabled(if: l5NamingEnabled())
+    )
+    func liveProductionRecording_namesFilesPerSpec135() async throws {
+        let namingLogger = Logger(
+            subsystem: "dev.androidbroadcast.Onset",
+            category: "RecordingSessionNamingL5"
+        )
+
+        // Resolve real hardware — same discovery pattern as RecordingSessionLiveTests.
+        let displays = try await DeviceDiscovery.displays(screenAuthorized: true)
+        let display = try #require(displays.first, "no display available — L5 requires a real screen")
+        let cameras = DeviceDiscovery.cameras(cameraAuthorized: true)
+        let camera: CameraDevice = if let nameFilter = l5CameraName() {
+            try #require(
+                pickCamera(from: cameras, nameFilter: nameFilter),
+                "no camera matching '\(nameFilter)' — set ONSET_L5_CAMERA_NAME or leave it unset"
+            )
+        } else {
+            try #require(cameras.first, "no camera available — L5 requires the MX Brio")
+        }
+        let format = try CameraFormatSelector.pickBestFormat(from: camera.formats, minFps: 30)
+        let mic = DeviceDiscovery.microphones(microphoneAuthorized: true).first
+
+        namingLogger.notice(
+            "L5_NAMING_START w=\(format.pixelWidth) h=\(format.pixelHeight)"
+        )
+
+        let config = RecordingConfiguration.mvpDefault
+        let plan = ResolvedRecordingPlan(
+            displayID: display.displayID,
+            screenWidth: display.pixelWidth.isMultiple(of: 2) ? display.pixelWidth : display.pixelWidth - 1,
+            screenHeight: display.pixelHeight.isMultiple(of: 2) ? display.pixelHeight : display.pixelHeight - 1,
+            screenFps: config.maxScreenFps,
+            cameraPlan: ResolvedCameraPlan(
+                width: Int(format.pixelWidth),
+                height: Int(format.pixelHeight),
+                fps: Int(format.maxFps)
+            )
+        )
+
+        // Production-default session — NO injected writerFactory/encoderFactory/sourceFactory.
+        // This exercises the live naming path: init picks up LiveWriterFactory with
+        // RecordingSession.defaultOutputURL → RecordingOutput.uniqueOutputURL → ~/Movies/Onset/.
+        let session = RecordingSession(
+            plan: plan,
+            display: display,
+            cameraDevice: camera,
+            cameraFormat: format,
+            micDevice: mic,
+            config: config
+        )
+
+        // All permissions granted.
+        try await session.start(permissions: EffectivePermissions(
+            screenAvailable: true,
+            cameraAvailable: true,
+            microphoneAvailable: mic != nil
+        ))
+        try await Task.sleep(for: .seconds(3))
+        let result = await session.stop()
+
+        // Collect the two output URLs before any assertions so cleanup always runs.
+        let urls = result.outputURLs
+
+        // Defer cleanup: remove the created files from ~/Movies/Onset/ unless ONSET_L5_KEEP_OUTPUT=1.
+        defer {
+            if l5KeepOutput() {
+                for url in urls {
+                    namingLogger.info("L5_NAMING_KEEP path=\(url.path(percentEncoded: false))")
+                }
+            } else {
+                for url in urls {
+                    let path = url.path(percentEncoded: false)
+                    do {
+                        try FileManager.default.removeItem(at: url)
+                        namingLogger.notice("L5_NAMING_CLEANUP removed=\(path)")
+                    } catch {
+                        namingLogger.error("L5_NAMING_CLEANUP failed path=\(path) error=\(error)")
+                    }
+                }
+            }
+        }
+
+        namingLogger.notice("L5_NAMING_END files=\(urls.count)")
+        for url in urls {
+            namingLogger.notice("L5_NAMING_FILE name=\(url.lastPathComponent)")
+        }
+
+        // Assert exactly two files were produced (screen + camera).
+        let names = urls.map(\.lastPathComponent)
+        #expect(urls.count == 2, "expected 2 output files (screen + camera), got \(urls.count): \(names)")
+
+        // Spec §135 pattern: "Onset YYYY-MM-DD HH.mm.ss — Screen.mp4" / "… — Camera.mp4"
+        let spec135 = /^Onset \d{4}-\d{2}-\d{2} \d{2}\.\d{2}\.\d{2} — (Screen|Camera)\.mp4$/
+        for url in urls {
+            let name = url.lastPathComponent
+            #expect(
+                name.wholeMatch(of: spec135) != nil,
+                "file name does not match spec §135 pattern: '\(name)'"
+            )
+        }
+
+        // Both files must share the identical YYYY-MM-DD HH.mm.ss segment (#198 fix).
+        // Extract the 19-character timestamp substring from each name:
+        // "Onset " (6) + "YYYY-MM-DD HH.mm.ss" (19) = chars 6..<25.
+        let timestamps = urls.map { url -> Substring in
+            let name = url.lastPathComponent
+            guard name.count >= 25 else { return "" }
+            let start = name.index(name.startIndex, offsetBy: 6)
+            let end = name.index(name.startIndex, offsetBy: 25)
+            return name[start..<end]
+        }
+        #expect(
+            timestamps.count == 2 && timestamps[0] == timestamps[1],
+            "screen and camera files must share the same session timestamp (#198): \(urls.map(\.lastPathComponent))"
+        )
+
+        // Both files must exist on disk and be non-empty.
+        let fileManager = FileManager.default
+        for url in urls {
+            let path = url.path(percentEncoded: false)
+            #expect(fileManager.fileExists(atPath: path), "file must exist on disk: \(url.lastPathComponent)")
+            let attrs = try? fileManager.attributesOfItem(atPath: path)
+            let size = (attrs?[.size] as? Int) ?? 0
+            #expect(size > 0, "file must be non-empty: \(url.lastPathComponent) size=\(size)")
+        }
     }
 }
 
