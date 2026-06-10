@@ -36,6 +36,9 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
     nonisolated let sourceRevocationStream: AsyncStream<RecordingRevocation>
     private let revocationContinuation: AsyncStream<RecordingRevocation>.Continuation
 
+    nonisolated let captureActiveStream: AsyncStream<Void>
+    private let captureActiveContinuation: AsyncStream<Void>.Continuation
+
     private(set) var startCalled = false
     private(set) var stopCalled = false
     private(set) var startCount = 0
@@ -43,6 +46,9 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
 
     /// When set, `start()` throws this (AC-6 / AC-11 path).
     var startError: (any Error)?
+
+    /// When `true`, `captureActiveStream` is never yielded — simulates consent denied / timeout.
+    var simulateCaptureNeverActivates = false
 
     /// The health snapshot returned by `currentDrops()` while recording.
     var liveDrops = DropHealthSnapshot(
@@ -62,21 +68,33 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
         let (revocationStream, revocationContinuation) = AsyncStream.makeStream(of: RecordingRevocation.self)
         self.sourceRevocationStream = revocationStream
         self.revocationContinuation = revocationContinuation
+        let (captureActiveStream, captureActiveContinuation) = AsyncStream.makeStream(of: Void.self)
+        self.captureActiveStream = captureActiveStream
+        self.captureActiveContinuation = captureActiveContinuation
     }
 
     func start(permissions: EffectivePermissions) async throws {
         self.startCalled = true
         self.startCount += 1
         if let startError { throw startError }
+        // Default behaviour: immediately signal that capture is active, mirroring a live session
+        // where consent is pre-granted and the first frame arrives quickly. Tests that want to
+        // control the timing call emitCaptureActive() / finishCaptureActiveWithoutActivation()
+        // manually and must set simulateCaptureNeverActivates = true to suppress the auto-emit.
+        if !self.simulateCaptureNeverActivates {
+            self.captureActiveContinuation.yield(())
+            self.captureActiveContinuation.finish()
+        }
     }
 
     func stop() async -> RecordingResult {
         self.stopCalled = true
         self.stopCount += 1
-        // The live session finishes both streams on stop; mirror that so the coordinator's
+        // The live session finishes all streams on stop; mirror that so the coordinator's
         // subscription loops end deterministically.
         self.stateContinuation.finish()
         self.revocationContinuation.finish()
+        self.captureActiveContinuation.finish()
         return self.result
     }
 
@@ -92,6 +110,18 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
     /// Test hook: push a revocation event into the stream (the coordinator is the sole consumer).
     func emitRevocation(_ revocation: RecordingRevocation) {
         self.revocationContinuation.yield(revocation)
+    }
+
+    /// Test hook: signal capture activation (first real screen frame arrived).
+    func emitCaptureActive() {
+        self.captureActiveContinuation.yield(())
+        self.captureActiveContinuation.finish()
+    }
+
+    /// Test hook: finish captureActiveStream WITHOUT yielding — simulates consent denied or
+    /// stream terminal-stop arriving before any real frame.
+    func finishCaptureActiveWithoutActivation() {
+        self.captureActiveContinuation.finish()
     }
 }
 
@@ -869,6 +899,105 @@ struct RecordingCoordinatorWriterFailedTests {
         #expect(coordinator.phase == .recording, "phase must remain .recording — screen still records")
 
         await coordinator.stop()
+    }
+}
+
+// MARK: - Screen consent ordering fix (#171)
+
+/// Tests for the fix that gates recording UI on the first real screen frame.
+///
+/// On macOS 26 `SCStream.startCapture()` returns before the user grants consent. The coordinator
+/// must NOT transition to `.recording`, start the elapsed timer, or open the recording window until
+/// the first real screen frame arrives (`captureActiveStream` yields). These tests exercise:
+///
+/// 1. Phase stays pre-recording until activation signal arrives.
+/// 2. Consent denied / stream terminal-stop → clean revert, `.captureConsentDenied` thrown.
+///
+/// Each test controls the activation timing manually by setting
+/// `fake.simulateCaptureNeverActivates = true` and calling `emitCaptureActive()` or
+/// `finishCaptureActiveWithoutActivation()` at the right moment.
+@Suite("RecordingCoordinator — screen consent ordering (#171)")
+@MainActor
+struct RecordingCoordinatorConsentOrderingTests {
+    @Test("start does not transition to .recording until captureActiveStream yields")
+    func start_doesNotTransitionToRecording_beforeFirstFrame() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        // Suppress auto-emit so we control exactly when activation fires.
+        fake.simulateCaptureNeverActivates = true
+
+        var openedRecording = false
+        var dismissedMain = false
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        coordinator.bindWindowActions(
+            openRecordingWindow: { openedRecording = true },
+            dismissMainWindow: { dismissedMain = true },
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+
+        // Launch start() but do NOT await it yet — activation has not fired.
+        let startTask = Task { try await coordinator.start(CoordinatorFixtures.request()) }
+
+        // Give the task a chance to run up to the activation wait.
+        try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+
+        // Phase must still be pre-recording and UI must not have opened.
+        #expect(coordinator.phase != .recording, "phase must not flip to .recording before first frame (#171)")
+        #expect(coordinator.elapsed == 0, "elapsed must be 0 before first frame (#171)")
+        #expect(!openedRecording, "recording window must not open before first frame (#171)")
+        #expect(!dismissedMain, "main window must not dismiss before first frame (#171)")
+
+        // Now signal activation — coordinator must transition.
+        fake.emitCaptureActive()
+
+        try await startTask.value
+
+        #expect(coordinator.phase == .recording, "phase must flip to .recording after first frame")
+        #expect(openedRecording, "recording window must open after first frame")
+        #expect(dismissedMain, "main window must dismiss after first frame")
+
+        await coordinator.stop()
+    }
+
+    @Test("start reverts to pre-recording state when captureActiveStream finishes without a frame")
+    func start_revertsToPreRecording_onDenyOrTerminalStop() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        fake.simulateCaptureNeverActivates = true
+
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        coordinator.enterMain() // establish pre-recording phase = .main
+
+        var openedRecording = false
+        coordinator.bindWindowActions(
+            openRecordingWindow: { openedRecording = true },
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+
+        // Launch start() — it will wait for activation.
+        let startTask = Task {
+            try await coordinator.start(CoordinatorFixtures.request())
+        }
+
+        // Give the task a chance to enter the activation wait.
+        try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+
+        // Simulate consent denied: stream finishes without yielding.
+        fake.finishCaptureActiveWithoutActivation()
+
+        // start() must throw .captureConsentDenied.
+        var threwConsentDenied = false
+        do {
+            try await startTask.value
+        } catch let error as RecordingError {
+            if case .captureConsentDenied = error { threwConsentDenied = true }
+        }
+
+        #expect(threwConsentDenied, "start() must throw .captureConsentDenied when stream ends without activation")
+        #expect(coordinator.phase == .main, "phase must revert to pre-recording state after deny")
+        #expect(!openedRecording, "recording window must NOT have opened")
+        #expect(coordinator.elapsed == 0, "elapsed must be 0 — timer must not have started")
     }
 }
 

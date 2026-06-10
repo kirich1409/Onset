@@ -90,6 +90,20 @@ nonisolated enum RecordingError: Error {
     /// surface the path so the user can recover any usable footage (AC-10 crash recovery
     /// intent: `movieFragmentInterval` limits data loss, but the writer may still fail).
     case writerFailed(any Error)
+
+    /// Screen capture did not activate within the allowed window.
+    ///
+    /// On macOS 26 `SCStream.startCapture()` returns before the user responds to the
+    /// screen-recording consent dialog. The coordinator waits for the first real screen
+    /// frame as the activation signal. This error is thrown when:
+    ///
+    /// - the consent dialog is dismissed / denied (the stream emits a terminal stop
+    ///   event and `captureActiveStream` finishes without yielding), or
+    /// - no frame arrives within the bounded timeout (~30 s).
+    ///
+    /// Recording is automatically reverted to the pre-recording state before this error
+    /// propagates to the UI.
+    case captureConsentDenied
 }
 
 extension RecordingError: Equatable {
@@ -103,7 +117,8 @@ extension RecordingError: Equatable {
         case (.noHardwareEncoder, .noHardwareEncoder),
              (.budgetExceeded, .budgetExceeded),
              (.noVideoSource, .noVideoSource),
-             (.noSuitableCameraFormat, .noSuitableCameraFormat):
+             (.noSuitableCameraFormat, .noSuitableCameraFormat),
+             (.captureConsentDenied, .captureConsentDenied):
             true
 
         case let (.captureSetupFailed(lErr), .captureSetupFailed(rErr)),

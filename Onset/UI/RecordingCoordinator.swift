@@ -338,10 +338,21 @@ final class RecordingCoordinator {
 
     // MARK: - Start (AC-3)
 
-    /// Starts a recording for the given request. On success: hides the main window, opens the
-    /// recording window, transitions to `.recording`, and spins the SOLE state subscription plus the
-    /// elapsed-timer / drops-poll loop. On failure: rethrows the `RecordingError` for the caller's
-    /// UI to surface (AC-6 / AC-11) and stays in the current phase.
+    /// Starts a recording for the given request.
+    ///
+    /// On success: hides the main window, opens the recording window, transitions to `.recording`,
+    /// and spins the SOLE state subscription plus the elapsed-timer / drops-poll loop.
+    /// On failure: rethrows the `RecordingError` for the caller's UI to surface (AC-6 / AC-11)
+    /// and stays in the current phase.
+    ///
+    /// ### Screen-capture consent gate (#171)
+    /// On macOS 26 `SCStream.startCapture()` returns **before** the user grants consent. The
+    /// coordinator therefore waits for `session.captureActiveStream` to yield before flipping to
+    /// `.recording` and opening the recording window. The stream yields on the first real screen
+    /// frame (consent granted). If the stream finishes without yielding (consent denied, terminal
+    /// stop, or timeout), the session is stopped and `.captureConsentDenied` is thrown so the caller
+    /// can surface a suitable message. The elapsed timer starts at first-frame time, not at the
+    /// point `session.start()` returns.
     ///
     /// Phase 0 has no Record button; this is exercised by tests via the injected factory.
     func start(_ request: RecordingRequest) async throws {
@@ -360,10 +371,40 @@ final class RecordingCoordinator {
             throw error
         }
 
-        // Started: adopt the session and reset live state.
+        // Store the session now so stop() can reach it if the user stops during the consent wait.
         self.session = session
+        // Pre-populate checklist and origin so the recording window (if ever shown) has correct data.
         self.origin = request.origin
         self.checklist = request.checklist
+
+        // Wait for the first real screen frame — this is when consent is actually granted (#171).
+        // 30-second safety net: macOS may never fire a terminal stop on silent consent denial, so we
+        // bound the wait. The value is a UX constant (30 s is the typical system-dialog timeout).
+        let captureActivated = await self.awaitCaptureActivation(
+            session: session,
+            timeoutSeconds: 30 // swiftlint:disable:this no_magic_numbers
+        )
+
+        guard captureActivated else {
+            // Consent was denied or the timeout elapsed — clean up the in-progress session.
+            coordinatorLogger.notice("Capture did not activate (consent denied or timeout) — reverting (#171)")
+            _ = await session.stop()
+            self.session = nil
+            throw RecordingError.captureConsentDenied
+        }
+
+        // Capture is live: adopt live state and open the recording window.
+        self.activateRecording(session: session, origin: request.origin)
+        coordinatorLogger.info("Recording started — origin=\(String(describing: request.origin))")
+    }
+
+    /// Flips all observable state to "recording" and starts subscriptions + window choreography.
+    ///
+    /// Called exactly once per `start()` success path, after `captureActiveStream` yields (#171).
+    /// `startedAt` is set HERE so the elapsed timer counts from the first real screen frame, not
+    /// from when `SCStream.startCapture()` returned.
+    private func activateRecording(session: any RecordingControlling, origin: RecordingOrigin) {
+        // startedAt is set at activation (first real frame), not at session.start() (#171).
         self.startedAt = Date()
         self.elapsed = 0
         self.recordingState = .normal
@@ -385,7 +426,42 @@ final class RecordingCoordinator {
         // Window choreography (AC-3): hide main, open recording.
         self.dismissMainWindow()
         self.openRecordingWindow()
-        coordinatorLogger.info("Recording started — origin=\(String(describing: request.origin))")
+    }
+
+    /// Awaits the first element from `session.captureActiveStream` with a bounded timeout.
+    ///
+    /// Returns `true` when the stream yields (capture is live), `false` when the stream finishes
+    /// without yielding (consent denied or terminal stop) or the timeout elapses.
+    ///
+    /// Implemented as a racing `withTaskGroup` — the stream-consumer child and the timeout child
+    /// race; the first result wins and the group is cancelled. This avoids any stored handle and is
+    /// fully structured. `nonisolated` is not needed here because the coordinator is `@MainActor`
+    /// and both children cross isolation via actor hops inside `Task`, not via `Task.detached`.
+    private func awaitCaptureActivation(
+        session: any RecordingControlling,
+        timeoutSeconds: Double
+    ) async
+    -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            // Child 1: wait for the activation signal.
+            group.addTask {
+                var activated = false
+                for await _ in session.captureActiveStream {
+                    activated = true
+                    break // single-consumer: we only need the first element
+                }
+                return activated
+            }
+            // Child 2: bounded timeout.
+            group.addTask {
+                try? await Task.sleep(for: .seconds(timeoutSeconds))
+                return false // timed out
+            }
+            // The first child to finish wins; cancel the remaining child.
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
     }
 
     /// The SOLE subscription to the session's single-consumer state stream. Re-publishes each

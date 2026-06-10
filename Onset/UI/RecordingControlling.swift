@@ -28,6 +28,22 @@ nonisolated protocol RecordingControlling: Sendable {
     /// declaration. Finishes on `stop()`.
     nonisolated var sourceRevocationStream: AsyncStream<RecordingRevocation> { get }
 
+    /// Screen-capture activation signal (#171).
+    ///
+    /// On macOS 26 `SCStream.startCapture()` returns **before** the user responds to the consent
+    /// dialog, so `start()` returning is not a reliable "recording is live" signal. The recording
+    /// UI must NOT appear and the elapsed timer must NOT start until the FIRST real screen frame
+    /// actually arrives from ScreenCaptureKit — that is when consent has been granted and capture
+    /// is genuinely live.
+    ///
+    /// This stream yields exactly ONE `Void` element when the first real screen frame is delivered,
+    /// then finishes immediately. If the session ends before any frame arrives (consent denied,
+    /// terminal stop, or timeout), the stream finishes WITHOUT yielding — the coordinator treats
+    /// an empty finish as activation failure and reverts to the pre-recording state.
+    ///
+    /// **Single-consumer.** The coordinator is the ONLY iterator.
+    nonisolated var captureActiveStream: AsyncStream<Void> { get }
+
     /// Starts the session. Throws `RecordingError` on the AC-6 / AC-11 blocking paths. Never throws
     /// `.budgetExceeded` — the session self-adopts the reduced profile (research §3.1).
     func start(permissions: EffectivePermissions) async throws
