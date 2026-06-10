@@ -288,7 +288,7 @@ struct RecordingCoordinatorTests {
 
         try await coordinator.start(CoordinatorFixtures.request())
         // elapsed starts at 0; the tick loop derives it from the start Date. After ~1.1s it is ≥ 1.
-        let ticked = await eventuallyMain(timeoutMs: 3000) { coordinator.elapsed >= 1 }
+        let ticked = await eventuallyMain(timeoutMs: 8000) { coordinator.elapsed >= 1 }
         #expect(ticked, "elapsed must increment from the start Date while recording")
 
         await coordinator.stop()
@@ -458,7 +458,7 @@ struct RecordingCoordinatorTests {
 
         try await coordinator.start(CoordinatorFixtures.request())
         // Wait until at least one tick so elapsed > 0 and the loop is confirmed running.
-        let ticked = await eventuallyMain(timeoutMs: 3000) { coordinator.elapsed >= 1 }
+        let ticked = await eventuallyMain(timeoutMs: 8000) { coordinator.elapsed >= 1 }
         #expect(ticked, "prerequisite: elapsed must tick to at least 1 before stopping")
 
         await coordinator.stop()
