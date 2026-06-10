@@ -52,68 +52,132 @@ struct SessionOutputInitTests {
 struct RecordingResultTests {
     private let screenURL = URL(filePath: "/tmp/screen.mp4")
     private let cameraURL = URL(filePath: "/tmp/camera.mp4")
-    private let zeroDrops = DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0)
+    private let zeroDrops = DropHealthSnapshot(
+        counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
+        sessionEverDegraded: false,
+        dominantCause: .notDegraded
+    )
 
     // MARK: .empty
 
     @Test(".empty carries drops and has nil screen/camera")
     func empty_dropsAndNilProjections() {
         let result = RecordingResult.empty(self.zeroDrops)
-        #expect(result.drops == self.zeroDrops)
+        #expect(result.drops == self.zeroDrops.counters)
         #expect(result.screen == nil)
         #expect(result.camera == nil)
         #expect(result.outputURLs.isEmpty)
-        #expect(result.degradedWarning == false)
+        #expect(result.degradedWarning(threshold: 5) == false)
         #expect(result.hasWriteFailure == false)
         #expect(result.writeFailureReason == nil)
     }
 
     // MARK: .completed — drops passthrough
 
-    @Test(".completed carries drops from the associated DropCounters")
+    @Test(".completed carries drops from the associated DropHealthSnapshot")
     func completed_dropsPassthrough() {
-        let drops = DropCounters(encoderBackpressureDrops: 5, captureDrops: 2, cfrNormalizationDrops: 1)
-        let result = RecordingResult.completed(.screenOnly(.completed(url: self.screenURL)), drops)
-        #expect(result.drops == drops)
+        let health = DropHealthSnapshot(
+            counters: DropCounters(encoderBackpressureDrops: 5, captureDrops: 2, cfrNormalizationDrops: 1),
+            sessionEverDegraded: false,
+            dominantCause: .notDegraded
+        )
+        let result = RecordingResult.completed(.screenOnly(.completed(url: self.screenURL)), health)
+        #expect(result.drops == health.counters)
     }
 
-    // MARK: degradedWarning
+    // MARK: degradedWarning — threshold boundary (AC-9 #132)
 
-    @Test("degradedWarning is false when encoderBackpressureDrops is 0")
+    // The post-stop warning fires when cumulative encoderBackpressureDrops >= threshold (AC-9).
+    // This is deliberately separate from the live AC-8 sliding-window which uses strict >.
+
+    @Test("degradedWarning is false when encoderBackpressureDrops is 0 (any threshold)")
     func degradedWarning_falseWhenNoBackpressure() {
         let result = RecordingResult.completed(
             .screenOnly(.completed(url: self.screenURL)),
-            DropCounters(encoderBackpressureDrops: 0, captureDrops: 10, cfrNormalizationDrops: 5)
+            DropHealthSnapshot(
+                counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 10, cfrNormalizationDrops: 5),
+                sessionEverDegraded: false,
+                dominantCause: .notDegraded
+            )
         )
-        #expect(result.degradedWarning == false)
+        #expect(result.degradedWarning(threshold: 5) == false)
     }
 
-    @Test("degradedWarning is true when encoderBackpressureDrops > 0")
-    func degradedWarning_trueWhenBackpressureDrops() {
+    @Test("degradedWarning is false when drops are below threshold")
+    func degradedWarning_falseWhenBelowThreshold() {
+        // threshold=5: 4 drops must not trigger the alert
         let result = RecordingResult.completed(
             .screenOnly(.completed(url: self.screenURL)),
-            DropCounters(encoderBackpressureDrops: 1, captureDrops: 0, cfrNormalizationDrops: 0)
+            DropHealthSnapshot(
+                counters: DropCounters(encoderBackpressureDrops: 4, captureDrops: 0, cfrNormalizationDrops: 0),
+                sessionEverDegraded: false,
+                dominantCause: .notDegraded
+            )
         )
-        #expect(result.degradedWarning == true)
+        #expect(result.degradedWarning(threshold: 5) == false)
+    }
+
+    @Test("degradedWarning is true at exactly the threshold (>= is inclusive)")
+    func degradedWarning_trueAtThreshold() {
+        // threshold=5: exactly 5 drops must trigger the alert
+        let result = RecordingResult.completed(
+            .screenOnly(.completed(url: self.screenURL)),
+            DropHealthSnapshot(
+                counters: DropCounters(encoderBackpressureDrops: 5, captureDrops: 0, cfrNormalizationDrops: 0),
+                sessionEverDegraded: false,
+                dominantCause: .notDegraded
+            )
+        )
+        #expect(result.degradedWarning(threshold: 5) == true)
+    }
+
+    @Test("degradedWarning is true when drops exceed threshold")
+    func degradedWarning_trueWhenAboveThreshold() {
+        // threshold=5: 10 drops must trigger the alert
+        let result = RecordingResult.completed(
+            .screenOnly(.completed(url: self.screenURL)),
+            DropHealthSnapshot(
+                counters: DropCounters(encoderBackpressureDrops: 10, captureDrops: 0, cfrNormalizationDrops: 0),
+                sessionEverDegraded: false,
+                dominantCause: .notDegraded
+            )
+        )
+        #expect(result.degradedWarning(threshold: 5) == true)
+    }
+
+    @Test("degradedWarning ignores captureDrops and cfrNormalizationDrops")
+    func degradedWarning_ignoresNonBackpressureDrops() {
+        // Only encoderBackpressureDrops count; high capture/CFR drops must not trigger the alert.
+        let result = RecordingResult.completed(
+            .screenOnly(.completed(url: self.screenURL)),
+            DropHealthSnapshot(
+                counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 100, cfrNormalizationDrops: 50),
+                sessionEverDegraded: false,
+                dominantCause: .notDegraded
+            )
+        )
+        #expect(result.degradedWarning(threshold: 5) == false)
     }
 
     @Test("degradedWarning is false for .empty with zero drops (stop-before-start no-op path)")
     func degradedWarning_falseForEmpty_zeroDrops() {
         // In the stop-before-start no-op specifically, drops are all-zero because nothing
         // ran; the instant-stop path carries real drops — see empty_carriesRealCaptureDrops.
-        let result = RecordingResult.empty(
-            DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0)
-        )
-        #expect(result.degradedWarning == false)
+        let result = RecordingResult.empty(self.zeroDrops)
+        #expect(result.degradedWarning(threshold: 5) == false)
     }
 
-    @Test(".empty is a transparent DropCounters carrier — non-zero captureDrops pass through")
+    @Test(".empty is a transparent DropHealthSnapshot carrier — non-zero captureDrops pass through")
     func empty_carriesRealCaptureDrops() {
         // The instant-stop path (session ran, no writer produced output) forwards the
         // real DropMonitor snapshot, which can include capture drops that occurred
         // before the first sample reached DualFileOutputStage.
         let result = RecordingResult.empty(
-            DropCounters(encoderBackpressureDrops: 0, captureDrops: 5, cfrNormalizationDrops: 0)
+            DropHealthSnapshot(
+                counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 5, cfrNormalizationDrops: 0),
+                sessionEverDegraded: false,
+                dominantCause: .notDegraded
+            )
         )
         #expect(result.drops.captureDrops == 5)
     }
@@ -145,6 +209,32 @@ struct RecordingResultTests {
         #expect(result.screen?.url == self.screenURL)
         #expect(result.camera?.url == self.cameraURL)
         #expect(result.outputURLs == [self.screenURL, self.cameraURL])
+    }
+
+    // MARK: sessionEverDegraded / dominantCause projections
+
+    @Test("sessionEverDegraded and dominantCause project correctly from .completed")
+    func completed_healthProjections() {
+        let result = RecordingResult.completed(
+            .screenOnly(.completed(url: self.screenURL)),
+            DropHealthSnapshot(
+                counters: DropCounters(encoderBackpressureDrops: 10, captureDrops: 0, cfrNormalizationDrops: 0),
+                sessionEverDegraded: true,
+                dominantCause: .writer
+            )
+        )
+        #expect(result.sessionEverDegraded == true)
+        #expect(result.dominantCause == .writer)
+    }
+
+    @Test("sessionEverDegraded is false and dominantCause is .notDegraded for never-degraded session")
+    func completed_healthProjections_neverDegraded() {
+        let result = RecordingResult.completed(
+            .screenOnly(.completed(url: self.screenURL)),
+            self.zeroDrops
+        )
+        #expect(result.sessionEverDegraded == false)
+        #expect(result.dominantCause == .notDegraded)
     }
 
     // MARK: write failure

@@ -58,6 +58,14 @@ final class MainViewModel {
     @ObservationIgnored
     let discoverMicrophones: (Bool) -> [MicrophoneDevice]
 
+    /// Closure seam for the device-change event stream — injectable for tests.
+    ///
+    /// The live default builds a `DeviceAvailabilityObserver` whose lifetime is tied to
+    /// the returned stream: its `onTermination` tears the observer down when the consuming
+    /// task is cancelled (main window disappears). See `observeDeviceChanges()`.
+    @ObservationIgnored
+    let makeDeviceChangeStream: @MainActor () -> AsyncStream<DeviceChangeEvent>
+
     /// Factory seam for `CameraSource` — injectable for tests to avoid hardware calls.
     ///
     /// The default closure builds a `.preview`-role source (no data output, no telemetry);
@@ -323,7 +331,8 @@ final class MainViewModel {
 
     // MARK: - Private helpers
 
-    /// Selects the first available camera when none is currently selected.
+    /// Selects the first available camera when none is currently selected, or when the
+    /// current selection no longer matches any device in `cameras` (stale id after hot-unplug).
     ///
     /// Shared by the cold-start device load (`loadCamerasAndMicrophones`) and the camera
     /// toggle re-enable path (`cameraEnabled.didSet`) so the default-selection rule lives in
@@ -331,12 +340,20 @@ final class MainViewModel {
     ///
     /// Not `private` so `MainViewModel+Devices.swift` can call it from the same type.
     ///
-    /// The auto-selected camera is intentionally NOT persisted: this method only runs from
-    /// the `.noSavedSelection` branch under the `isApplyingPersistedSelection` guard, so
-    /// `selectedCameraID.didSet` skips the save. This avoids a false "disconnected" notice
-    /// if the default camera disappears before the user ever explicitly chose one.
+    /// Persistence depends on the entry point:
+    /// - `.noSavedSelection` branch (cold-start, under `isApplyingPersistedSelection`):
+    ///   `selectedCameraID.didSet` skips the save, so the auto-selection is NOT persisted.
+    ///   This avoids a false "disconnected" notice if the default camera disappears before
+    ///   the user ever explicitly chose one.
+    /// - `cameraEnabled.didSet` re-enable path (`isApplyingPersistedSelection` is `false`):
+    ///   `selectedCameraID.didSet` runs normally and calls `persistCameraSelection()`, so
+    ///   the healed selection IS persisted.
     func selectFirstCameraIfNeeded() {
-        if self.selectedCameraID == nil, let first = self.cameras.first {
+        // Heal a stale id (non-nil but device no longer present) as well as the nil case.
+        if let id = self.selectedCameraID, self.cameras.contains(where: { $0.uniqueID == id }) {
+            return
+        }
+        if let first = self.cameras.first {
             self.selectedCameraID = first.uniqueID
         }
     }
@@ -355,6 +372,9 @@ final class MainViewModel {
         discoverMicrophones: @escaping (Bool) -> [MicrophoneDevice] = { authorized in
             DeviceDiscovery.microphones(microphoneAuthorized: authorized)
         },
+        makeDeviceChangeStream: @escaping @MainActor () -> AsyncStream<DeviceChangeEvent> = {
+            DeviceAvailabilityObserver().events()
+        },
         makeCameraSource: @escaping (
             CameraDevice, CameraFormat, MicrophoneDevice?, RecordingConfiguration
         )
@@ -370,6 +390,7 @@ final class MainViewModel {
         self.discoverDisplays = discoverDisplays
         self.discoverCameras = discoverCameras
         self.discoverMicrophones = discoverMicrophones
+        self.makeDeviceChangeStream = makeDeviceChangeStream
         self.makeCameraSource = makeCameraSource
         self.makeStore = makeStore
     }

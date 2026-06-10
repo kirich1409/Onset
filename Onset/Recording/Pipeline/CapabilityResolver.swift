@@ -37,6 +37,9 @@ nonisolated enum CapabilityResolver {
     // MARK: - Constants (spec §"CapabilityProbe и pre-flight бюджет", AC-5)
 
     /// Maximum screen width the default recording profile targets (≤4K60).
+    ///
+    /// The ≤4K clamp is edge-protection against hypothetical 5K/6K displays — it is NOT the
+    /// MVP target scenario. MVP targets 4K displays; 5K/6K are guarded but not a launch target.
     private static let maxScreenWidth4K = 3840
 
     /// Maximum screen height the default recording profile targets (≤4K60).

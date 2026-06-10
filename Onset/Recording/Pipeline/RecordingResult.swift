@@ -49,8 +49,8 @@ nonisolated enum SessionOutput {
 /// The terminal outcome of a recording session, returned by `RecordingSession.stop()` (AC-9).
 ///
 /// ### Cases
-/// - `.completed(SessionOutput, DropCounters)` — at least one pipeline produced a file.
-/// - `.empty(DropCounters)` — stop fired before any sample reached a writer; no files were created.
+/// - `.completed(SessionOutput, DropHealthSnapshot)` — at least one pipeline produced a file.
+/// - `.empty(DropHealthSnapshot)` — stop fired before any sample reached a writer; no files were created.
 ///
 /// ### Independence of writers (AC-9)
 /// The two writers finalise in parallel (`async let`); one writer ending in `.failed` does NOT
@@ -64,20 +64,43 @@ nonisolated enum SessionOutput {
 /// All members are `nonisolated` so this value type crosses the session-actor boundary as the
 /// `stop()` return without an actor hop.
 nonisolated enum RecordingResult {
-    /// At least one pipeline produced a file; carries per-pipeline outcomes and drop tallies.
-    case completed(SessionOutput, DropCounters)
-    /// No files were produced by this session. Carries a `DropCounters` snapshot as a
-    /// transparent carrier: all-zero on the stop-before-start no-op path; real (possibly
+    /// At least one pipeline produced a file; carries per-pipeline outcomes and health snapshot.
+    case completed(SessionOutput, DropHealthSnapshot)
+    /// No files were produced by this session. Carries a `DropHealthSnapshot` as a transparent
+    /// carrier: all-zero / never-degraded on the stop-before-start no-op path; real (possibly
     /// non-zero) counters on the instant-stop path (session ran, no writer produced output).
-    case empty(DropCounters)
+    case empty(DropHealthSnapshot)
 
     // MARK: - Drop counters
 
     /// Cumulative per-reason drop tallies for the whole session (from `DropMonitor.snapshot`).
     nonisolated var drops: DropCounters {
         switch self {
-        case let .completed(_, drops), let .empty(drops):
-            drops
+        case let .completed(_, health), let .empty(health):
+            health.counters
+        }
+    }
+
+    /// `true` when the live HUD pill flashed `.degraded` at least once during the session.
+    ///
+    /// Populated from `DropHealthSnapshot.sessionEverDegraded` — the one-way latch set inside
+    /// `DropMonitor.applyDegraded` on the first `.normal → .degraded` transition. This is
+    /// intentionally stricter than `drops.encoderBackpressureDrops > 0`: a handful of scattered
+    /// backpressure drops spread too thinly to cross the window threshold never trip `.degraded`
+    /// and should not trigger the post-stop warning.
+    nonisolated var sessionEverDegraded: Bool {
+        switch self {
+        case let .completed(_, health), let .empty(health):
+            health.sessionEverDegraded
+        }
+    }
+
+    /// The backpressure pipeline stage that accumulated the most drops, or `.notDegraded` if the
+    /// session was never degraded. Forwarded from `DropHealthSnapshot.dominantCause`.
+    nonisolated var dominantCause: DropCause {
+        switch self {
+        case let .completed(_, health), let .empty(health):
+            health.dominantCause
         }
     }
 
@@ -107,14 +130,19 @@ nonisolated enum RecordingResult {
         }
     }
 
-    /// `true` when the session saw enough encoder/disk backpressure drops to warrant the
-    /// "запись завершена, пропущено N кадров — возможны рывки" warning (AC-9).
+    /// `true` when the session accumulated enough cumulative encoder-backpressure drops to warrant
+    /// the "запись завершена, пропущено N кадров — возможны рывки" post-stop warning (AC-9).
     ///
-    /// Computed from `drops.encoderBackpressureDrops > 0` — only backpressure drops degrade the
-    /// experience; capture / CFR-normalization drops are tracked but do not warn (mirrors the
-    /// `RecordingState.degraded` trigger policy in `DropMonitor`).
-    nonisolated var degradedWarning: Bool {
-        self.drops.encoderBackpressureDrops > 0
+    /// Only `encoderBackpressureDrops` count — capture / CFR-normalization drops do not warn
+    /// (mirrors the `RecordingState.degraded` trigger policy in `DropMonitor`).
+    ///
+    /// Uses `>= threshold` (inclusive), matching AC-9 spec wording "N ≥ порога". This is distinct
+    /// from the live AC-8 sliding-window which uses strict `>` over a short time window — they
+    /// measure different things (rate vs session total) and deliberately use different comparisons.
+    ///
+    /// - Parameter threshold: From `RecordingConfiguration.postStopDropWarningThreshold`.
+    nonisolated func degradedWarning(threshold: Int) -> Bool {
+        self.drops.encoderBackpressureDrops >= threshold
     }
 }
 
