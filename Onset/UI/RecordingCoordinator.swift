@@ -181,6 +181,13 @@ final class RecordingCoordinator {
     /// write failure means the file was not saved cleanly. Reset on `start()` / `acknowledgeWriteError()`.
     private(set) var lastWriteError: String?
 
+    /// `true` when at least one post-stop alert is pending and has not yet been acknowledged.
+    /// Used by `stop()` to decide whether to surface the main window after a menu-bar-origin stop
+    /// (#131): a pending alert requires the window so `MainView` can present it.
+    var hasPendingAlert: Bool {
+        self.lastWriteError != nil || self.lastDegradedWarning
+    }
+
     // MARK: - Dependencies (injected)
 
     /// Builds a `RecordingControlling` for a request. Live = `RecordingSession`; tests inject a fake.
@@ -450,14 +457,13 @@ final class RecordingCoordinator {
 
     // MARK: - Stop (AC-9) — funnel for all three stop paths
 
-    // swiftlint:disable function_body_length
     /// Stops the active recording. Funnel for the three stop paths (button / hotkey / menu —
     /// AC-9). Re-entrancy-guarded so the teardown (reveal, warning, phase transition) runs exactly
     /// once even under concurrent calls: `isStopping` is flipped synchronously before the first
     /// `await`, so a second path entering during `await session.stop()` returns immediately. The
     /// underlying `RecordingSession.stop()` is itself memoized, so the double-await is harmless —
     /// the guard protects this coordinator's own teardown.
-    func stop() async {
+    func stop() async { // swiftlint:disable:this function_body_length
         guard self.phase == .recording, !self.isStopping, let session = self.session else { return }
         self.isStopping = true
 
@@ -509,7 +515,15 @@ final class RecordingCoordinator {
             self.phase = .main
 
         case .menuBar:
-            self.phase = .idle
+            // Open the main window when a post-stop alert is pending so MainView can present it
+            // (#131). Without this, the window is never mounted and MainView's .onAppear / .onChange
+            // never fire — the alert would be silently lost until the next manual window open.
+            if self.hasPendingAlert {
+                self.openMainWindow()
+                self.phase = .main
+            } else {
+                self.phase = .idle
+            }
         }
 
         self.isStopping = false
@@ -517,8 +531,6 @@ final class RecordingCoordinator {
             "Recording stopped — files=\(result.outputURLs.count) origin=\(String(describing: self.origin))"
         )
     }
-
-    // swiftlint:enable function_body_length
 
     // MARK: - Global hotkey (#67 / AC-9 third stop path)
 
