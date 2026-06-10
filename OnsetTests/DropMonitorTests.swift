@@ -819,7 +819,7 @@ struct DropMonitorCaptureBackpressureTests {
         let health = await monitor.snapshot()
         // Synthesise a RecordingResult to exercise the exact degradedWarning path.
         let result = RecordingResult.empty(health)
-        #expect(result.degradedWarning == false)
+        #expect(result.degradedWarning(threshold: self.threshold) == false)
     }
 
     // MARK: Test 4 — encoderBackpressureDrops still drives the alert
@@ -853,7 +853,7 @@ struct DropMonitorCaptureBackpressureTests {
         let health = await monitor.snapshot()
         #expect(health.sessionEverDegraded == true)
         let result = RecordingResult.empty(health)
-        #expect(result.degradedWarning == true)
+        #expect(result.degradedWarning(threshold: self.threshold) == true)
     }
 
     // MARK: Test 5 — mixed: capture overflow + encoder drops; only encoder sets latch
