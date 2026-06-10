@@ -85,9 +85,7 @@ struct MainView: View {
             // terminates the device-change stream and tears down its observer.
             await self.model.observeDeviceChanges()
         }
-        .task {
-            await self.model.subscribeToDisplayChanges()
-        }
+        .task { await self.model.subscribeToDisplayChanges() }
         // Post-stop alerts: surface on re-appear or on async flag changes.
         // `.onAppear` covers the case where the flag is already set when the main window
         // re-mounts (stop() sets the flag before opening the main window). `.onChange`
