@@ -5,7 +5,8 @@ import Foundation
 /// Identifies which output file a recorded session writes to.
 ///
 /// The suffix embedded in file names (spec §135) differentiates screen from camera
-/// recordings that share the same session timestamp.
+/// recordings. Both files in a single session share the identical session-start timestamp
+/// supplied by the caller; the kind suffix is the only differentiator.
 ///
 /// `Equatable` and `Hashable` conformances are declared inline on the primary type
 /// declaration with manual `nonisolated` witnesses. Under
@@ -68,6 +69,55 @@ nonisolated enum RecordingOutput {
         let formatted = Self.makeDateFormatter().string(from: timestamp)
         let suffix = suffix(for: kind)
         return "Onset \(formatted) \(suffix).mp4"
+    }
+
+    /// Returns a unique output `URL` inside `directory` for the given session timestamp and kind.
+    ///
+    /// The base name is built by `fileName(timestamp:kind:)` (spec §135). If the resulting path
+    /// already exists — a same-second double-start or a pre-existing file — the method appends a
+    /// ` (N)` disambiguator before the `.mp4` extension, incrementing `N` until a free slot is
+    /// found. The search is bounded: after 999 attempts it returns the candidate as-is and lets
+    /// `AVAssetWriter` surface the error, preserving the one-shot pipeline contract.
+    ///
+    /// - Parameters:
+    ///   - directory: The directory in which the file will be created (e.g. `RecordingOutput.directory()`).
+    ///   - timestamp: Session-start timestamp shared by both files of the same session (#198).
+    ///   - kind: Screen or camera.
+    /// - Returns: A file URL that does not currently exist on disk, or the un-suffixed candidate when
+    ///   the disambiguator search is exhausted.
+    nonisolated static func uniqueOutputURL(
+        in directory: URL,
+        timestamp: Date,
+        kind: RecordingFileKind
+    )
+    -> URL {
+        let baseName = self.fileName(timestamp: timestamp, kind: kind)
+        let base = URL(filePath: baseName, relativeTo: directory).path(percentEncoded: false)
+        let fileManager = FileManager()
+
+        if !fileManager.fileExists(atPath: base) {
+            return URL(filePath: base)
+        }
+
+        // Derive stem and extension via URL path manipulation — avoids NSString bridging.
+        let fileURL = URL(filePath: baseName)
+        let stem = fileURL.deletingPathExtension().lastPathComponent // "Onset YYYY-MM-DD HH.mm.ss — Screen"
+        let ext = fileURL.pathExtension // "mp4"
+
+        // Upper bound avoids an infinite loop; AVAssetWriter will report an error if we
+        // somehow exhaust the range (extremely unlikely in normal use).
+        let collisionCounterStart = 2
+        let collisionCounterMax = 999
+        for counter in collisionCounterStart...collisionCounterMax {
+            let candidate = "\(stem) (\(counter)).\(ext)"
+            let candidatePath = URL(filePath: candidate, relativeTo: directory).path(percentEncoded: false)
+            if !fileManager.fileExists(atPath: candidatePath) {
+                return URL(filePath: candidatePath)
+            }
+        }
+
+        // Safety valve: return the original URL and let AVAssetWriter handle the collision.
+        return URL(filePath: base)
     }
 
     // MARK: - Directory
