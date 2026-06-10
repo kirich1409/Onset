@@ -17,7 +17,7 @@ nonisolated private let deviceAvailabilityLogger = Logger(
 /// Carries no device identity on purpose (PII discipline — uniqueIDs and names never
 /// leave the AVFoundation layer here); the consumer re-enumerates the full device list
 /// on every event anyway.
-nonisolated enum DeviceChangeEvent: Equatable, Sendable {
+nonisolated enum DeviceChangeEvent: Equatable {
     /// `AVCaptureDevice.wasConnectedNotification` fired — a device became available.
     case connected
 
@@ -176,7 +176,8 @@ final class DeviceAvailabilityObserver {
     nonisolated private static func makeSuspensionObservations(
         devices: [AVCaptureDevice],
         continuation: AsyncStream<DeviceChangeEvent>.Continuation
-    ) -> [NSKeyValueObservation] {
+    )
+    -> [NSKeyValueObservation] {
         devices.map { device in
             device.observe(\.isSuspended, options: []) { @Sendable _, _ in
                 continuation.yield(.suspensionChanged)
