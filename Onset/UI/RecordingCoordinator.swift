@@ -154,20 +154,39 @@ final class RecordingCoordinator {
     /// stop completes.
     private(set) var lastResult: RecordingResult?
 
-    /// `true` when the most recent finished session had encoder-backpressure drops (AC-9 warning).
+    /// `true` when the most recent finished session had enough encoder-backpressure drops to
+    /// warrant the post-stop warning (AC-9). Threshold from `RecordingConfiguration`.
     /// Derived from `lastDroppedFrames` — single source of truth, no lockstep pair needed.
     var lastDegradedWarning: Bool {
-        self.lastDroppedFrames > 0
+        self.lastDroppedFrames >= RecordingConfiguration.mvpDefault.postStopDropWarningThreshold
     }
 
+    /// One-way degradation latch from the most recent finished session. `true` when the live HUD
+    /// pill flashed `.degraded` at least once. Frozen at stop time; reset in
+    /// `acknowledgeDegradedWarning()` and `start()`.
+    private(set) var lastSessionEverDegraded = false
+
     /// Encoder-backpressure drop count from the most recent finished session, frozen at stop time.
-    /// Reset to 0 in `acknowledgeDegradedWarning()` and cleared on every `start()`.
+    /// Used solely for message pluralization ("пропущено N кадров"). Not the alert gate (see
+    /// `lastDegradedWarning`). Reset to 0 in `acknowledgeDegradedWarning()` and cleared on `start()`.
     private(set) var lastDroppedFrames = 0
+
+    /// Dominant backpressure cause from the most recent finished session. Forwarded from
+    /// `DropHealthSnapshot.dominantCause`. Reset to `.notDegraded` in `acknowledgeDegradedWarning()` and
+    /// `start()`.
+    private(set) var dominantCause: DropCause = .notDegraded
 
     /// Non-nil when the most recent session had a hard write failure (e.g. disk full). Contains
     /// the human-readable reason for the error alert. Distinct from `lastDegradedWarning` — a
     /// write failure means the file was not saved cleanly. Reset on `start()` / `acknowledgeWriteError()`.
     private(set) var lastWriteError: String?
+
+    /// `true` when at least one post-stop alert is pending and has not yet been acknowledged.
+    /// Used by `stop()` to decide whether to surface the main window after a menu-bar-origin stop
+    /// (#131): a pending alert requires the window so `MainView` can present it.
+    var hasPendingAlert: Bool {
+        self.lastWriteError != nil || self.lastDegradedWarning
+    }
 
     // MARK: - Dependencies (injected)
 
@@ -304,10 +323,12 @@ final class RecordingCoordinator {
         self.phase = .main
     }
 
-    /// Clears `lastDroppedFrames` (and thereby `lastDegradedWarning`) after the user has acknowledged
-    /// the alert (AC-9). Called by `MainView` on dismiss so the state does not persist across sessions.
+    /// Clears the degradation latch and drop count after the user has acknowledged the alert (AC-9).
+    /// Called by `MainView` on dismiss so the state does not persist across sessions.
     func acknowledgeDegradedWarning() {
+        self.lastSessionEverDegraded = false
         self.lastDroppedFrames = 0
+        self.dominantCause = .notDegraded
     }
 
     /// Clears `lastWriteError` after the user has acknowledged the alert.
@@ -350,8 +371,10 @@ final class RecordingCoordinator {
         // Every source starts live; a graceful revoke (AC-12) flips the affected one(s) during the session.
         self.sourceLiveness = .allLive
         self.isStopping = false
-        // Reset per-session drop counter (drives lastDegradedWarning) — structural invariant: clean start.
+        // Reset per-session degradation state — structural invariant: clean start.
+        self.lastSessionEverDegraded = false
         self.lastDroppedFrames = 0
+        self.dominantCause = .notDegraded
         self.lastWriteError = nil
         self.phase = .recording
 
@@ -376,8 +399,9 @@ final class RecordingCoordinator {
         }
     }
 
-    /// The SOLE subscription to `session.sourceRevocationStream` (#39 / AC-12). Updates
-    /// `sourceLiveness` on each `.sourceRevoked` event, and calls `stop()` on `.allVideoSourcesLost`.
+    /// The SOLE subscription to `session.sourceRevocationStream` (#39 / AC-12 / #197). Updates
+    /// `sourceLiveness` on each `.sourceRevoked` / `.writerFailed` event, and calls `stop()` on
+    /// `.allVideoSourcesLost`.
     ///
     /// NEVER awaited in `stop()` — only cancelled and nil'd. `.allVideoSourcesLost` makes THIS task
     /// call `stop()`, so awaiting it from inside `stop()` would deadlock (a task awaiting itself).
@@ -397,6 +421,17 @@ final class RecordingCoordinator {
                     self.sourceLiveness.microphone = false
                     coordinatorLogger.notice("AC-12: camera source revoked — camera + mic liveness updated")
 
+                case .writerFailed(.screen):
+                    // Writer hard-fault: reuse the same "stopped" liveness indicator as AC-12.
+                    self.sourceLiveness.screen = false
+                    coordinatorLogger.error("#197: screen writer faulted — liveness updated")
+
+                case .writerFailed(.camera):
+                    // The microphone rides the camera AVCaptureSession: writer fault ends both.
+                    self.sourceLiveness.camera = false
+                    self.sourceLiveness.microphone = false
+                    coordinatorLogger.error("#197: camera writer faulted — camera + mic liveness updated")
+
                 case .allVideoSourcesLost:
                     coordinatorLogger.notice("AC-12: all video sources lost — stopping session")
                     await self.stop()
@@ -405,7 +440,7 @@ final class RecordingCoordinator {
         }
     }
 
-    /// One ~1 Hz loop: bumps `elapsed` from `startedAt` and polls the session's drop counters. Both
+    /// One ~1 Hz loop: bumps `elapsed` from `startedAt` and polls the session's drop health. Both
     /// readouts tick at the same cadence, so they share one task (one cancel point).
     private func startTickLoop(_ session: any RecordingControlling) {
         self.tickTask = Task { [weak self] in
@@ -414,7 +449,7 @@ final class RecordingCoordinator {
                 if let startedAt = self.startedAt {
                     self.elapsed = Int(Date().timeIntervalSince(startedAt))
                 }
-                self.drops = await session.currentDrops()
+                self.drops = await session.currentDrops().counters
                 try? await Task.sleep(for: .seconds(1))
             }
         }
@@ -428,7 +463,7 @@ final class RecordingCoordinator {
     /// `await`, so a second path entering during `await session.stop()` returns immediately. The
     /// underlying `RecordingSession.stop()` is itself memoized, so the double-await is harmless —
     /// the guard protects this coordinator's own teardown.
-    func stop() async {
+    func stop() async { // swiftlint:disable:this function_body_length
         guard self.phase == .recording, !self.isStopping, let session = self.session else { return }
         self.isStopping = true
 
@@ -451,7 +486,9 @@ final class RecordingCoordinator {
 
         self.lastResult = result
         self.drops = result.drops
+        self.lastSessionEverDegraded = result.sessionEverDegraded
         self.lastDroppedFrames = result.drops.encoderBackpressureDrops
+        self.dominantCause = result.dominantCause
         self.lastWriteError = result.writeFailureReason
         self.session = nil
         self.startedAt = nil
@@ -463,9 +500,10 @@ final class RecordingCoordinator {
             coordinatorLogger.error(
                 "Recording finished with write failure — \(writeError)"
             )
-        } else if result.degradedWarning {
+        } else if result.degradedWarning(threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold) {
             coordinatorLogger.notice(
-                "Recording finished with degraded warning — backpressureDrops=\(result.drops.encoderBackpressureDrops)"
+                // swiftlint:disable:next line_length
+                "Recording finished with degraded warning — backpressureDrops=\(result.drops.encoderBackpressureDrops) dominantCause=\(String(describing: result.dominantCause))"
             )
         }
 
@@ -477,7 +515,15 @@ final class RecordingCoordinator {
             self.phase = .main
 
         case .menuBar:
-            self.phase = .idle
+            // Open the main window when a post-stop alert is pending so MainView can present it
+            // (#131). Without this, the window is never mounted and MainView's .onAppear / .onChange
+            // never fire — the alert would be silently lost until the next manual window open.
+            if self.hasPendingAlert {
+                self.openMainWindow()
+                self.phase = .main
+            } else {
+                self.phase = .idle
+            }
         }
 
         self.isStopping = false

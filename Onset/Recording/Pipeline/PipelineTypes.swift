@@ -211,10 +211,14 @@ nonisolated struct EncodedSample: @unchecked Sendable {
 
 /// The pipeline stage responsible for a dropped frame or sample.
 ///
-/// Maps 1-to-1 with the three DropMonitor counters tracked by #35/#36:
+/// Maps to three `DropMonitor` counters (tracked by #35/#36/#100) — not one-to-one:
+/// `.captureDrop` and `.captureBackpressureDrops` both fold into the single `captureDrops`
+/// counter and do NOT drive the degraded-state window:
 /// - `captureDrop`: counted at the source (SCStream / AVCapture delivery callback).
 /// - `cfrNormalizationDrops`: counted by the CFR normalizer when duplicate frames are
 ///   emitted for hold-repeat but the downstream is already full.
+/// - `captureBackpressureDrops`: counted when the capture→encoder `AsyncStream` buffer
+///   overflows. Distinct from encoder/disk pressure — does NOT drive the degraded alert.
 /// - `encoderBackpressureDrops`: counted when an `AsyncStream` buffer overflows because
 ///   the encoder or writer is not consuming fast enough.
 nonisolated enum DropReason {
@@ -230,6 +234,14 @@ nonisolated enum DropReason {
     /// Occurs when the source tick interval fires but the downstream stream buffer is full.
     /// The normalizer still accounts for the tick so the pts sequence is contiguous.
     case cfrNormalizationDrops
+
+    /// A frame or sample was dropped because the capture→encoder `AsyncStream` buffer overflowed.
+    ///
+    /// Distinct from `.encoderBackpressureDrops` (encoder-gate / writer pressure): capture
+    /// overflow indicates the capture layer is producing faster than the encoder consumes,
+    /// NOT that the encoder or disk is overloaded. Folds into the `captureDrops` counter in
+    /// `DropMonitor` and does NOT drive the degraded-state sliding window or post-stop alert.
+    case captureBackpressureDrops
 
     /// A frame or sample was dropped because the downstream `AsyncStream` buffer overflowed.
     ///
@@ -249,6 +261,7 @@ extension DropReason: Equatable {
         switch (lhs, rhs) {
         case (.captureDrop, .captureDrop),
              (.cfrNormalizationDrops, .cfrNormalizationDrops),
+             (.captureBackpressureDrops, .captureBackpressureDrops),
              (.encoderBackpressureDrops, .encoderBackpressureDrops):
             true
 
@@ -276,10 +289,104 @@ extension DropReason: Hashable {
         case .cfrNormalizationDrops:
             hasher.combine(1)
 
+        case .captureBackpressureDrops:
+            // Ordinal tag for the third enum case; 3 is not in no_magic_numbers' exempt list.
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(3)
+
         case .encoderBackpressureDrops:
-            // Ordinal tag for the third enum case; 2 is not in no_magic_numbers' exempt list.
+            // Ordinal tag for the fourth enum case; 4 is not in no_magic_numbers' exempt list.
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(4)
+        }
+    }
+}
+
+// MARK: - DropCause
+
+/// The dominant pipeline stage that drove backpressure-degradation during a session.
+///
+/// Reported in the post-stop `DropHealthSnapshot` so the UI can surface the most actionable
+/// signal to the user. Covers only the **backpressure** path — `captureDrop` and
+/// `cfrNormalizationDrops` never trigger degraded state and therefore never produce a
+/// non-`.notDegraded` cause.
+///
+/// Tie-break order when multiple stages accumulated backpressure drops:
+///   writer > encode > captureScreen > captureCameraVideo > captureCameraAudio
+/// The first matching non-zero bucket wins. The order is deterministic and documented so
+/// tests can rely on it.
+nonisolated enum DropCause {
+    /// The session was never degraded (latch `sessionEverDegraded == false`).
+    ///
+    /// By invariant, `snapshot().dominantCause == .notDegraded` iff `sessionEverDegraded == false`.
+    /// Named `notDegraded` rather than `none` to avoid ambiguity with `Optional<T>.none`,
+    /// which the Swift compiler can conflate in type-inference contexts.
+    case notDegraded
+    /// `ScreenSource`→encoder `AsyncStream` buffer was the dominant backpressure site.
+    case captureScreen
+    /// `CameraSource` video→encoder `AsyncStream` buffer was the dominant backpressure site.
+    case captureCameraVideo
+    /// `CameraSource` audio→encoder `AsyncStream` buffer was the dominant backpressure site.
+    case captureCameraAudio
+    /// `VideoEncoder` pending-frame gate was the dominant backpressure site.
+    case encode
+    /// `FileWriter` input backpressure was the dominant site.
+    case writer
+}
+
+// Under SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor + InferIsolatedConformances, synthesised
+// Equatable and Hashable witnesses are inferred @MainActor. Manual nonisolated witnesses match
+// the pattern used by DropReason and DropSource so DropCause is usable from nonisolated code.
+// swiftformat:disable:next redundantEquatable
+extension DropCause: Equatable {
+    /// Manual `nonisolated` implementation (mirrors `DropReason`).
+    nonisolated static func == (lhs: DropCause, rhs: DropCause) -> Bool {
+        switch (lhs, rhs) {
+        case (.notDegraded, .notDegraded),
+             (.captureScreen, .captureScreen),
+             (.captureCameraVideo, .captureCameraVideo),
+             (.captureCameraAudio, .captureCameraAudio),
+             (.encode, .encode),
+             (.writer, .writer):
+            true
+
+        default:
+            false
+        }
+    }
+}
+
+extension DropCause: Hashable {
+    /// Manual `nonisolated` implementation.
+    ///
+    /// Swift auto-synthesises `Hashable` for enums with no associated values. Under
+    /// `InferIsolatedConformances`, the synthesised `hash(into:)` witness is inferred
+    /// `@MainActor`, making `DropCause` unusable from `nonisolated` contexts. Providing
+    /// an explicit manual witness with `nonisolated` overrides the synthesised form
+    /// (mirrors the identical pattern on `DropReason`).
+    nonisolated func hash(into hasher: inout Hasher) {
+        switch self {
+        case .notDegraded:
+            hasher.combine(0)
+
+        case .captureScreen:
+            hasher.combine(1)
+
+        case .captureCameraVideo:
             // swiftlint:disable:next no_magic_numbers
             hasher.combine(2)
+
+        case .captureCameraAudio:
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(3)
+
+        case .encode:
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(4)
+
+        case .writer:
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(5)
         }
     }
 }
@@ -498,13 +605,13 @@ extension SourceEvent: Equatable {
 
 // MARK: - RecordingRevocation
 
-/// A graceful-revocation notification carried on `RecordingSession.sourceRevocationStream` (AC-12 UI).
+/// A revocation notification carried on `RecordingSession.sourceRevocationStream`.
 ///
 /// `RecordingSession` already FINALISES the affected pipeline on a `.displayDisconnected` /
-/// `.cameraDisconnected` `SourceEvent` (Epic 3). This stream is the *UI seam* layered on top of that
-/// behaviour: after a pipeline is finalised, the session yields a `RecordingRevocation` so the
-/// `RecordingCoordinator` can update the per-source liveness the recording window reads — and, when
-/// the last video pipeline is gone, learn it must end the whole session.
+/// `.cameraDisconnected` `SourceEvent` (Epic 3) or on a hard writer fault (#197). This stream is the
+/// *UI seam* layered on top of that behaviour: after a pipeline is finalised, the session yields a
+/// `RecordingRevocation` so the `RecordingCoordinator` can update the per-source liveness the
+/// recording window reads — and, when the last video pipeline is gone, learn it must end the session.
 ///
 /// **Single-consumer.** Exactly ONE subscriber (the `RecordingCoordinator`) may iterate the stream —
 /// same contract as `recordingStateStream`. `AsyncStream` splits elements across iterators rather
@@ -515,9 +622,17 @@ nonisolated enum RecordingRevocation: Equatable {
     /// mic rides the camera AVCaptureSession), so the coordinator marks the mic revoked too.
     case sourceRevoked(RecordingPipelineKind)
 
+    /// One pipeline's `FileWriter` hard-faulted mid-recording (#197). The pipeline is stopped and
+    /// finalised as `.failed`; the other pipeline continues. The coordinator flips the faulted
+    /// source's liveness to `false` so the recording window shows it stopped immediately.
+    /// `.camera` additionally implies the microphone ended (same AVCaptureSession dependency as
+    /// `.sourceRevoked(.camera)`). Visually reuses the same "stopped" indicator as AC-12.
+    case writerFailed(RecordingPipelineKind)
+
     /// The LAST remaining video pipeline was just finalised — no video source is left. The
     /// coordinator must stop + finalise the session and surface the result (there is nothing left to
-    /// record). Yielded immediately after the `.sourceRevoked` for the final pipeline.
+    /// record). Yielded immediately after the `.sourceRevoked` / `.writerFailed` for the final
+    /// pipeline.
     case allVideoSourcesLost
 }
 
@@ -532,6 +647,9 @@ extension RecordingRevocation {
     nonisolated static func == (lhs: RecordingRevocation, rhs: RecordingRevocation) -> Bool {
         switch (lhs, rhs) {
         case let (.sourceRevoked(lhsKind), .sourceRevoked(rhsKind)):
+            lhsKind == rhsKind
+
+        case let (.writerFailed(lhsKind), .writerFailed(rhsKind)):
             lhsKind == rhsKind
 
         case (.allVideoSourcesLost, .allVideoSourcesLost):

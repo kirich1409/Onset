@@ -130,7 +130,7 @@
 | Сессии ≥ 20 мин без прогрессирующей деградации | pkt/s стабилен на протяжении всей записи | ручной прогон + `verify-cfr.sh` | ❌ при экстремальном контенте: 35→6 pkt/s за 5 мин (#104); стабильность при обычном контенте на ≥20 мин — ⏳ |
 | Crash-recovery (fragmented MP4) | файл играбелен после kill; `movieFragmentInterval` = 4 с | `ffprobe` после kill -9; `mvpDefault.movieFragmentInterval` = 4 с | ✅ `mvpDefault` пишет fragmented mp4 (movieFragmentInterval = 4 с) — потеря ≤4 с при crash |
 | Fail-fast фатальных фолтов | alert до стопа записи | ручная проверка | ✅ закрыто #105 (покрыто юнит-тестами) |
-| Дропы атрибутируются честно | backpressure-дропы vs gate_drop отличимы | телеметрия `category=telemetry` | ❌ конфляция источников в `.encoderBackpressureDrops` ([#100](https://github.com/kirich1409/Onset/issues/100)) |
+| Дропы атрибутируются честно | backpressure-дропы vs gate_drop отличимы; `DropCause.dominantCause` несёт доминирующий источник | телеметрия `category=telemetry`; `DropHealthSnapshot.dominantCause` в логах стопа | ✅ `DropCause` + per-source bp-тали реализованы ([#100](https://github.com/kirich1409/Onset/issues/100)); UI per-cause — post-MVP |
 | Выбор устройства сохраняется между запусками | камера/микрофон восстанавливаются | ручная проверка | ❌ не имплементировано (#109) |
 | Graceful-поведение при отсутствии/отключении внешней камеры | нет краша; UI показывает понятное состояние (нет устройства / выбрать другое); связь с #109/#113 и disconnect-обработкой | ручная проверка (отключить MX Brio во время выбора и во время записи) | ⏳ не верифицировано |
 
@@ -224,7 +224,7 @@ Baseline записи с багом (до #102): camera 2.88 fps fresh, screen 4
 | Камера 4K30 | [#177](https://github.com/kirich1409/Onset/issues/177) | 🟡 post-MVP | Недостижимо через AVFoundation на macOS; требует CMIO/IOKit-стек |
 | Камера 60fps | [#178](https://github.com/kirich1409/Onset/issues/178) | 🟡 post-MVP | Недостижимо через AVFoundation на macOS; требует CMIO/IOKit-стек |
 | VT-потолок / кросс-полосная конкуренция | [#104](https://github.com/kirich1409/Onset/issues/104) | 🔴 блокер | Screen encoder ~20–42 fps (4K); camera страдает косвенно; #112 закрыт отдельно |
-| Конфляция источников дропов | [#100](https://github.com/kirich1409/Onset/issues/100) | 🟠 важный | Backpressure-gate drops, capture drops и CFR-normalization drops суммируются в `encoderBackpressureDrops`; честная атрибуция не реализована |
+| Конфляция источников дропов | [#100](https://github.com/kirich1409/Onset/issues/100) | ✅ закрыт | `DropCause` per-source тали + `sessionEverDegraded` latch реализованы; UI per-cause — post-MVP |
 | EngineBudgetCap требует калибровки | [#97](https://github.com/kirich1409/Onset/issues/97) / [#98](https://github.com/kirich1409/Onset/issues/98) | 🟡 | `EngineBudgetCap` (995M px/s) — плейсхолдер; `CapabilityResolver` молча применяет downscale без user-visible сигнала |
 | Персистенция выбора устройств | [#109](https://github.com/kirich1409/Onset/issues/109) | 🟡 | Камера и микрофон сбрасываются на значения по умолчанию при каждом перезапуске |
 

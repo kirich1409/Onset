@@ -95,6 +95,7 @@ struct ScreenStreamConfigurationBuilderTests {
             movieFragmentInterval: self.config.movieFragmentInterval,
             degradedBackpressureThreshold: self.config.degradedBackpressureThreshold,
             degradedWindowSeconds: self.config.degradedWindowSeconds,
+            postStopDropWarningThreshold: self.config.postStopDropWarningThreshold,
             budgetCap: self.config.budgetCap,
             outputDirectory: self.config.outputDirectory
         )
@@ -128,6 +129,7 @@ struct ScreenStreamConfigurationBuilderTests {
             movieFragmentInterval: self.config.movieFragmentInterval,
             degradedBackpressureThreshold: self.config.degradedBackpressureThreshold,
             degradedWindowSeconds: self.config.degradedWindowSeconds,
+            postStopDropWarningThreshold: self.config.postStopDropWarningThreshold,
             budgetCap: self.config.budgetCap,
             outputDirectory: self.config.outputDirectory
         )

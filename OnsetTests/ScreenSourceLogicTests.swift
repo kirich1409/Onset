@@ -162,14 +162,14 @@ struct BackpressureDropEventTests {
         return buf
     }
 
-    @Test(".dropped yield result produces a DropEvent")
+    @Test(".dropped yield result produces a DropEvent with .captureBackpressureDrops")
     func droppedYield_producesDropEvent() throws {
         let result = backpressureDropEvent(for: makeDroppedResult(), pts: pts)
         let drop = try #require(result)
         // Use pattern-match for DropReason: Equatable conformance is @MainActor-inferred
         // under InferIsolatedConformances; guard case avoids the conformance entirely.
-        guard case .encoderBackpressureDrops = drop.reason else {
-            Issue.record("Expected .encoderBackpressureDrops, got \(drop.reason)")
+        guard case .captureBackpressureDrops = drop.reason else {
+            Issue.record("Expected .captureBackpressureDrops, got \(drop.reason)")
             return
         }
         #expect(drop.count == 1)

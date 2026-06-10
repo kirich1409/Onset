@@ -58,7 +58,7 @@ nonisolated func backpressureDropEvent(
 )
 -> DropEvent? {
     guard case .dropped = yieldResult else { return nil }
-    return DropEvent(reason: .encoderBackpressureDrops, source: .captureScreen, count: 1, detectedAt: pts)
+    return DropEvent(reason: .captureBackpressureDrops, source: .captureScreen, count: 1, detectedAt: pts)
 }
 
 /// Returns `true` when `frameHostTime >= sessionStart`.
@@ -193,9 +193,10 @@ actor ScreenSource: VideoFrameSource {
         self.captureState = .starting
 
         let sessionStart = anchor.anchorTime
-        let onTerminalStop: @Sendable (any Error) async -> Void = { [weak self] error in
-            await self?.handleTerminalStop(error: error)
-        }
+        let onTerminalStop: @Sendable (any Error)
+            async -> Void = { [weak self] error in
+                await self?.handleTerminalStop(error: error)
+            }
 
         let scDisplay: SCDisplay
         do {
@@ -206,13 +207,16 @@ actor ScreenSource: VideoFrameSource {
         }
 
         let shim = self.makeShim(sessionStart: sessionStart, onTerminalStop: onTerminalStop)
+        let captureStarted: Bool
         do {
-            try await self.startSCStream(display: scDisplay, shim: shim)
+            captureStarted = try await self.startSCStream(display: scDisplay, shim: shim)
         } catch {
             self.captureState = .idle
             throw error
         }
-        self.startCaptureTelemetryTask()
+        if captureStarted {
+            self.startCaptureTelemetryTask()
+        }
     }
 
     private func discoverDisplay() async throws -> SCDisplay {
@@ -250,7 +254,10 @@ actor ScreenSource: VideoFrameSource {
         )
     }
 
-    private func startSCStream(display: SCDisplay, shim: StreamOutputShim) async throws {
+    /// Returns `true` when capture reached the `.running` state, `false` when the
+    /// stop()-during-startup abort path was taken (stop() raced and already ran).
+    /// Callers must gate any post-start work (e.g. telemetry) on the return value.
+    private func startSCStream(display: SCDisplay, shim: StreamOutputShim) async throws -> Bool {
         let streamConfig = ScreenStreamConfigurationBuilder.makeConfiguration(plan: self.plan, config: self.config)
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let scStream = SCStream(filter: filter, configuration: streamConfig, delegate: shim)
@@ -266,8 +273,18 @@ actor ScreenSource: VideoFrameSource {
             screenSourceLogger.error("startCapture failed: \(error)")
             throw RecordingError.captureSetupFailed(error)
         }
+        // Close the stop()-during-.starting race: if stop() ran while startCapture()
+        // was suspended, captureState is now .stopped and streams are already finished.
+        // Continuing would overwrite .stopped with .running, creating a zombie SCStream
+        // that captures forever (screen-recording indicator stuck, resource leak).
+        guard case .starting = self.captureState else {
+            try? await scStream.stopCapture()
+            screenSourceLogger.info("Capture aborted — stop() called during startup")
+            return false
+        }
         self.captureState = .running(stream: scStream, shim: shim)
         screenSourceLogger.info("Capture started — fps: \(self.plan.screenFps)")
+        return true
     }
 
     /// Handles a terminal stop from the shim (SCStreamDelegate path).

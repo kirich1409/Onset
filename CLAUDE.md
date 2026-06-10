@@ -3,10 +3,37 @@
 macOS screen/camera recording app (menu bar + windows). Swift 6, strict concurrency
 `complete`, default actor isolation `MainActor`, warnings-as-errors
 (`Config/Strict.xcconfig` + pbxproj) — any warning fails the build.
-Deployment target: macOS 26.4. Single scheme: `Onset`.
+macOS 26+ only (deployment target 26.4, Apple Silicon): use current APIs freely,
+never add availability checks or fallbacks for older macOS. Single scheme: `Onset`.
 
 Critical product requirements, in priority order: **stability**, **performance**,
 **scalable architecture**. Weigh every design decision against these three.
+
+## Autonomy
+
+The app is developed entirely by agents (overview spec, principle 15): own the
+full cycle — analysis → design → implementation → local verification →
+merge-ready PR. Never pause mid-task to ask "should I continue?".
+
+- Interrupt the user ONLY for what an agent physically cannot do: Apple Developer /
+  App Store Connect credentials, one-time TCC grants, physical hardware access.
+  Launching the app, clicking through its UI, taking screenshots — do yourself.
+- UI verification loop, no human: build → launch .app → drive it (Peekaboo CLI if
+  installed, else `osascript` + System Events) → `screencapture` → compare against
+  expectation → fix → repeat. Screen Recording/Accessibility TCC are pre-granted to
+  the agent host; on a TCC error stop and report — never run `tccutil` to self-heal.
+- Merge-ready = local gates green: `scripts/preflight.sh` (mirrors CI pr-gate) +
+  docs updated in the same PR + L5 on reference hardware (MX Brio) when the change
+  touches recording/devices — build + unit alone do not close L5.
+- The cycle usually closes only on the target Mac. Cloud Claude sessions and GitHub
+  CI have no macOS toolchain, screen, or camera: they cannot run `preflight.sh`, the
+  UI loop, or L5 — and so cannot finish such a task. From there: open the PR, state
+  in its body which gates remain and where they run, leave it unmerged and the issue
+  out of Done until a session on the target hardware verifies. Merge from cloud only
+  when no remaining gate needs macOS (docs/CI-config-only changes).
+- When gates pass: mark PR ready + `gh pr merge --auto --squash`, no per-PR
+  confirmation (personal repo). Evidence over assertions in the PR body: Swift
+  Testing summary line, lint result, screenshot for UI changes — not "it works".
 
 ## Language
 
@@ -16,13 +43,15 @@ Critical product requirements, in priority order: **stability**, **performance**
 ## Commands
 
 ```bash
-# Build (local — do NOT pipe to a formatter: none installed locally; CI pipes to
-# xcbeautify, which is pre-installed on the macos-26 runner)
+# Pre-push gate (lint + privacy manifest + build + unit, mirrors CI pr-gate)
+scripts/preflight.sh
+
+# Build (pipe to xcbeautify if installed — token-cheap output; plain otherwise)
 xcodebuild build -scheme Onset -destination 'platform=macOS' -configuration Debug \
   ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
 
-# Unit tests (Swift Testing; runs L2 only — L5 suites are env-gated, see Testing)
-# CODE_SIGNING_ALLOWED=NO is fine for build/unit tests; never for L5 (see Testing)
+# Unit tests (Swift Testing, L2 only — L5 env-gated, see Testing;
+# CODE_SIGNING_ALLOWED=NO is fine here, never for L5)
 xcodebuild test -scheme Onset -destination 'platform=macOS' -configuration Debug \
   ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
 
@@ -39,9 +68,8 @@ Artifact checks (CI `artifact-checks` job):
   <Onset.app>` — need the BUILT .app: entitlements are injected at signing;
   no-network invariant = binary must not link network frameworks.
 - `scripts/verify-cfr.sh screen.mp4 camera.mp4 60 30` — CFR cadence from real packet
-  timestamps (ffprobe metadata r_frame_rate/nb_frames lies). Slow: ~1 min per 10 min
-  of video; the fresh-content check needs MOTION in frame — a static scene fails
-  falsely.
+  timestamps (ffprobe metadata lies). Slow: ~1 min per 10 min of video; the
+  fresh-content check needs MOTION in frame — a static scene fails falsely.
 
 ## Testing
 
@@ -56,19 +84,16 @@ Artifact checks (CI `artifact-checks` job):
 - L5 requires a SIGNED build — drop `CODE_SIGNING_ALLOWED=NO` for build-for-testing;
   an unsigned test host writes a sticky TCC deny for screen capture (recovery:
   `tccutil reset ScreenCapture` + manual re-grant).
-- BEFORE any L5 run: check stale test hosts with `pgrep -la Onset`; if any, ask the
-  user to run `pkill -9 Onset` (agents may not kill processes). One `xcodebuild test`
-  at a time — hardware tests fight over the camera and hang, spawning extra instances.
-- Reference hardware for L5: Logitech MX Brio
-  (see `docs/quality/production-quality-bar.md`).
+- BEFORE any L5 run: check stale test hosts with `pgrep -la Onset`; kill them with
+  `pkill -9 Onset` (exactly this name, never broader). One `xcodebuild test` at a
+  time — hardware tests fight over the camera and hang, spawning extra instances.
+- Reference hardware for L5: Logitech MX Brio (`docs/quality/production-quality-bar.md`).
 - Recordings land in `~/Movies/Onset/` — L5 outputs for verify-cfr/ffprobe live there.
 - Test-writing conventions (fakes, naming, suites): `OnsetTests/CLAUDE.md`.
-- Coverage is on by default in `Onset.xctestplan`, scoped to the `Onset` target (not the
-  test bundle); `Onset-L5.xctestplan` gathers none. Inspect locally: add
-  `-resultBundlePath /tmp/R.xcresult` to `xcodebuild test`, then
-  `scripts/coverage-summary.sh /tmp/R.xcresult` (prints test + coverage tables; CI writes
-  them to the job summary and uploads the `.xcresult`). Report-only — gate via
-  `ONSET_COVERAGE_MIN` (off by default).
+- Coverage on by default in `Onset.xctestplan`, scoped to target `Onset` (not the test
+  bundle); the L5 plan gathers none. Inspect: add `-resultBundlePath /tmp/R.xcresult`
+  to `xcodebuild test`, then `scripts/coverage-summary.sh /tmp/R.xcresult` (CI posts
+  the same to the job summary). Report-only — gate via `ONSET_COVERAGE_MIN` (off).
 - OnsetUITests target exists but is not wired into the Onset scheme's Test action.
 
 ## Project structure
@@ -76,7 +101,7 @@ Artifact checks (CI `artifact-checks` job):
 | Dir | Purpose | Key types |
 |---|---|---|
 | `Onset/OnsetApp.swift` | Entry: two fixed-size `Window` scenes + `MenuBarExtra`, hotkey ⌘⌥⌃R | `OnsetApp` |
-| `Onset/Recording/Capture/` | Frame/sample acquisition into AsyncStreams | `VideoFrameSource`/`AudioSampleSource` (protocols), `CameraSource`, `ScreenSource`, `DeviceDiscovery` |
+| `Onset/Recording/Capture/` | Frame/sample acquisition into AsyncStreams | `VideoFrameSource`/`AudioSampleSource` (protocols), `CameraSource`, `ScreenSource`, `DeviceDiscovery`, `DeviceAvailabilityObserver` |
 | `Onset/Recording/Pipeline/` | Session orchestration, two-file output, capability preflight | `RecordingSession`, `DualFileOutputStage`, `CapabilityProbe`/`CapabilityResolver`, `DropMonitor`, `PipelineTypes.swift` |
 | `Onset/Encode/` | HW HEVC encoding + CFR normalization | `VideoEncoder`, `CFRNormalizer` (pure), `EncoderConfigBuilder`, `LiveCompressionSession` |
 | `Onset/Permissions/` | TCC statuses, startup routing, relaunch | `PermissionsService`, `PermissionsProviding`, `EffectivePermissions` (pure), `AppRouter` (pure) |
@@ -126,19 +151,15 @@ Full type-level map (Russian): `docs/architecture.md`.
   `Backlog` → `Ready` → `In progress` (work started / draft PR) →
   `In review` (PR ready) → `Done` (merged).
 - On creation set: relationships (Parent issue / sub-issues, "blocked by #N"),
-  `Priority` (P0–P2), `Size` (XS–XL), `Estimate`. Size + Priority drive the executing
-  agent's model: XS/S → sonnet (haiku for mechanical chores), M → sonnet,
-  L/XL or architectural work → opus planning + sonnet implementation;
-  P0 bumps one tier up.
+  `Priority` (P0–P2), `Size` (XS–XL), `Estimate`. Size + Priority drive the agent's
+  model: XS/S/M → sonnet (haiku for mechanical chores), L/XL or architectural work →
+  opus planning + sonnet implementation; P0 bumps one tier up.
 
 ## Source of truth
 
-- Specs: `docs/specs/` (product overview, recording MVP, permissions/onboarding,
-  devops/CI).
-- Quality bar: `docs/quality/production-quality-bar.md`.
+- Specs: `docs/specs/`. Quality bar: `docs/quality/production-quality-bar.md`.
 - Design references: `docs/design-ref/`.
-- Framework/tool documentation links: `docs/architecture.md`, раздел «Ссылки на
-  документацию».
+- Framework/tool doc links: `docs/architecture.md`, раздел «Ссылки на документацию».
 
 ## Code style
 
@@ -149,18 +170,12 @@ Full type-level map (Russian): `docs/architecture.md`.
 
 ## Workflow
 
-- Work autonomously: draft→ready promotion and native auto-merge
-  (`gh pr merge --auto --squash`) without per-PR confirmation (personal repo).
-- Merge-readiness requires verification on reference hardware (MX Brio) whenever the
-  change touches recording/devices and it makes sense — build + unit tests do not
-  close L5.
 - Docs describe `main`: update affected `docs/` in the same PR that changes behavior.
-- **Verify the Apple API against Apple docs before coding it.** Framework behavior drifts
-  across macOS versions and differs from iOS — training data misleads. Confirm the symbol's
-  actual macOS semantics, not just that it exists: a search may surface a similarly- or
-  identically-named symbol that behaves differently on macOS than on iOS. Check via the
-  `apple-docs` MCP (primary), the macOS SDK headers, or developer.apple.com before writing
-  the call; trust the doc/MCP platform line over a hand-read header annotation.
+- **Verify the Apple API against Apple docs before coding it.** Framework behavior
+  drifts across macOS versions and differs from iOS — training data misleads; a search
+  may surface an identically-named symbol that behaves differently on macOS. Check the
+  symbol's actual macOS semantics via the `apple-docs` MCP (primary), macOS SDK headers,
+  or developer.apple.com; trust the doc/MCP platform line over a hand-read header.
 - After completing a task, fold non-obvious learnings into CLAUDE.md
   (`/claude-md-management:revise-claude-md`). Maintenance = add AND delete: a rule
   Claude already follows without being told gets removed; keep this file ≤200 lines.
@@ -180,6 +195,5 @@ Full type-level map (Russian): `docs/architecture.md`.
 - `AVCaptureDevice.authorizationStatus` is cached in-process (macOS 26.x): a TCC
   revoke is visible only after app restart. Platform behavior, NOT a bug — don't
   investigate it as one.
-- `com/` at repo root is a JVM artifact of Claude tooling; `.codex/` is the Xcode MCP
-  bridge config — ignore both, never analyze as product code.
-- `swarm-report/` is gitignored orchestration state, not part of the product.
+- Not product code, never analyze: `com/` (JVM artifact of Claude tooling), `.codex/`
+  (Xcode MCP bridge config), `swarm-report/` (gitignored orchestration state).
