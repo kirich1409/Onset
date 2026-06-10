@@ -276,7 +276,8 @@ private func makeStage(
     factory: FakeWriterFactory,
     expected: Set<RecordingPipelineKind>,
     includeAudio: Bool,
-    onAllWritersFaulted: @escaping @Sendable () async -> Void = {}
+    onAllWritersFaulted: @escaping @Sendable () async -> Void = {},
+    onWriterFaulted: @escaping @Sendable (RecordingPipelineKind) async -> Void = { _ in }
 )
     -> DualFileOutputStage
 { // swiftlint:disable:this opening_brace
@@ -286,7 +287,8 @@ private func makeStage(
         includeAudio: includeAudio,
         writerFactory: factory,
         onWriterCreated: { _ in },
-        onAllWritersFaulted: onAllWritersFaulted
+        onAllWritersFaulted: onAllWritersFaulted,
+        onWriterFaulted: onWriterFaulted
     )
 }
 
@@ -671,6 +673,100 @@ struct DualFileOutputStageFaultTests {
         try await Task.sleep(nanoseconds: 50_000_000)
 
         #expect(!box.value, "graceful finishAll must not trigger the fault callback")
+    }
+}
+
+// MARK: - Partial-fault live-UI seam (#197)
+
+@Suite("DualFileOutputStage — partial-fault live-UI seam (#197)")
+struct DualFileOutputStagePartialFaultTests {
+    // MARK: One writer faults → onWriterFaulted fires, onAllWritersFaulted does NOT
+
+    @Test("one of two writers faults → onWriterFaulted(kind) fires, onAllWritersFaulted does NOT")
+    func oneWriterFaults_onWriterFaultedFires_allWritersFaultedDoesNot() async throws {
+        let factory = FakeWriterFactory()
+        let allBox = FlagBox()
+        let kindBox = OSAllocatedUnfairLock<RecordingPipelineKind?>(initialState: nil)
+
+        let stage = makeStage(
+            factory: factory,
+            expected: [.screen, .camera],
+            includeAudio: false,
+            onAllWritersFaulted: { allBox.set() },
+            onWriterFaulted: { kind in kindBox.withLock { $0 = kind } }
+        )
+
+        // Create both writers.
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .camera), from: .camera)
+
+        // Fault only the screen writer.
+        factory.screenWriter.simulateFault()
+
+        // onWriterFaulted must fire with .screen.
+        let firedKind = await eventually { kindBox.withLock { $0 } != nil }
+        #expect(firedKind, "onWriterFaulted must fire when one of two writers faults")
+        #expect(kindBox.withLock { $0 } == .screen, "onWriterFaulted must receive the faulted kind")
+
+        // onAllWritersFaulted must NOT fire — the camera writer is still live.
+        try await Task.sleep(nanoseconds: 50_000_000)
+        #expect(!allBox.value, "onAllWritersFaulted must NOT fire when only one writer has faulted")
+    }
+
+    @Test("camera writer faults → onWriterFaulted(.camera) fires")
+    func cameraWriterFaults_onWriterFaultedFiresWithCamera() async throws {
+        let factory = FakeWriterFactory()
+        let kindBox = OSAllocatedUnfairLock<RecordingPipelineKind?>(initialState: nil)
+
+        let stage = makeStage(
+            factory: factory,
+            expected: [.screen, .camera],
+            includeAudio: false,
+            onWriterFaulted: { kind in kindBox.withLock { $0 = kind } } // swiftlint:disable:this trailing_closure
+        )
+
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .camera), from: .camera)
+
+        factory.cameraWriter.simulateFault()
+
+        let fired = await eventually { kindBox.withLock { $0 } != nil }
+        #expect(fired, "onWriterFaulted must fire when the camera writer faults")
+        #expect(kindBox.withLock { $0 } == .camera)
+    }
+
+    // MARK: Both writers fault → onAllWritersFaulted fires (unchanged), onWriterFaulted NOT called
+
+    @Test("both writers fault → onAllWritersFaulted fires, onWriterFaulted NOT called a second time")
+    func bothWritersFault_onAllWritersFaultedFires_onWriterFaultedNotCalledSecondTime() async throws {
+        let factory = FakeWriterFactory()
+        let allBox = FlagBox()
+        // Count how many times onWriterFaulted fires — must be at most once (for screen),
+        // because the second fault takes the all-faulted branch and calls onAllWritersFaulted.
+        let partialCount = OSAllocatedUnfairLock(initialState: 0)
+
+        let stage = makeStage(
+            factory: factory,
+            expected: [.screen, .camera],
+            includeAudio: false,
+            onAllWritersFaulted: { allBox.set() },
+            onWriterFaulted: { _ in partialCount.withLock { $0 += 1 } }
+        )
+
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .camera), from: .camera)
+
+        // Fault screen first (partial), then camera (all-faulted).
+        factory.screenWriter.simulateFault()
+        // Wait for the partial callback before triggering the second fault, so the two
+        // recordFault calls are serialised and we test the correct branch each time.
+        _ = await eventually { partialCount.withLock { $0 } >= 1 }
+        factory.cameraWriter.simulateFault()
+
+        let allFired = await eventually { allBox.value }
+        #expect(allFired, "onAllWritersFaulted must fire after both writers fault")
+        // onWriterFaulted fires once (screen); the second fault goes to onAllWritersFaulted.
+        #expect(partialCount.withLock { $0 } == 1, "onWriterFaulted must fire exactly once (for the partial fault)")
     }
 }
 

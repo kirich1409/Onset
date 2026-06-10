@@ -393,8 +393,9 @@ final class RecordingCoordinator {
         }
     }
 
-    /// The SOLE subscription to `session.sourceRevocationStream` (#39 / AC-12). Updates
-    /// `sourceLiveness` on each `.sourceRevoked` event, and calls `stop()` on `.allVideoSourcesLost`.
+    /// The SOLE subscription to `session.sourceRevocationStream` (#39 / AC-12 / #197). Updates
+    /// `sourceLiveness` on each `.sourceRevoked` / `.writerFailed` event, and calls `stop()` on
+    /// `.allVideoSourcesLost`.
     ///
     /// NEVER awaited in `stop()` — only cancelled and nil'd. `.allVideoSourcesLost` makes THIS task
     /// call `stop()`, so awaiting it from inside `stop()` would deadlock (a task awaiting itself).
@@ -413,6 +414,17 @@ final class RecordingCoordinator {
                     self.sourceLiveness.camera = false
                     self.sourceLiveness.microphone = false
                     coordinatorLogger.notice("AC-12: camera source revoked — camera + mic liveness updated")
+
+                case .writerFailed(.screen):
+                    // Writer hard-fault: reuse the same "stopped" liveness indicator as AC-12.
+                    self.sourceLiveness.screen = false
+                    coordinatorLogger.error("#197: screen writer faulted — liveness updated")
+
+                case .writerFailed(.camera):
+                    // The microphone rides the camera AVCaptureSession: writer fault ends both.
+                    self.sourceLiveness.camera = false
+                    self.sourceLiveness.microphone = false
+                    coordinatorLogger.error("#197: camera writer faulted — camera + mic liveness updated")
 
                 case .allVideoSourcesLost:
                     coordinatorLogger.notice("AC-12: all video sources lost — stopping session")

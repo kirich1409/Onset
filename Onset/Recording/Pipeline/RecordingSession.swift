@@ -334,6 +334,11 @@ actor RecordingSession {
                 // the write-failure alert without having to press Stop (#105 fail-fast).
                 // `stop()` is idempotent via its memoised `stopTask`.
                 _ = await self?.stop()
+            },
+            onWriterFaulted: { [weak self] kind in
+                // One writer faulted while the other pipeline is still live — stop the faulted
+                // pipeline and flip its liveness in the recording window (#197 live UI seam).
+                await self?.handleWriterFault(kind)
             }
         )
         self.stage = stage
@@ -547,28 +552,49 @@ actor RecordingSession {
         case .displayDisconnected:
             self.logger.notice("AC-12: display disconnected — finalising screen pipeline; camera continues")
             await self.stopAndFinalizePipeline(.screen)
-            self.notifyRevocation(of: .screen)
+            self.notifyRevocation(.sourceRevoked(.screen))
 
         case .cameraDisconnected:
             self.logger.notice("AC-12: camera disconnected — finalising camera; screen continues, screen audio ends")
             await self.stopAndFinalizePipeline(.camera)
-            self.notifyRevocation(of: .camera)
+            self.notifyRevocation(.sourceRevoked(.camera))
 
         case let .sourceInterrupted(reason):
             self.logger.warning("Source interrupted (\(String(describing: kind))): \(reason) — continuing")
         }
     }
 
-    /// Yields the AC-12 revocation notification (#39 UI seam) AFTER `stopAndFinalizePipeline` has
-    /// niled the finalised pipeline's slot: `.sourceRevoked(kind)`, then `.allVideoSourcesLost` when
-    /// no video pipeline remains. Called only on the AC-12 finalize arms — does NOT alter the
-    /// finalize behaviour itself (Epic-3-verified), only notifies the single-consumer coordinator.
-    private func notifyRevocation(of kind: RecordingPipelineKind) {
-        self.revocationContinuation.yield(.sourceRevoked(kind))
+    /// Yields a revocation notification on `sourceRevocationStream`, then — when no video pipeline
+    /// remains — yields `.allVideoSourcesLost`.
+    ///
+    /// Used by both the AC-12 graceful-revoke path (`.sourceRevoked`) and the writer-fault live-UI
+    /// path (`.writerFailed`). Centralising the "last pipeline gone" check here avoids duplicating
+    /// the `allVideoSourcesLost` logic across call sites.
+    ///
+    /// Must be called AFTER `stopAndFinalizePipeline` / `takePipeline` so that
+    /// `screenPipeline` / `cameraPipeline` accurately reflect which pipelines remain.
+    private func notifyRevocation(_ revocation: RecordingRevocation) {
+        self.revocationContinuation.yield(revocation)
         if self.screenPipeline == nil, self.cameraPipeline == nil {
-            self.logger.notice("AC-12: last video pipeline finalised — signalling allVideoSourcesLost")
+            self.logger.notice("Last video pipeline finalised — signalling allVideoSourcesLost")
             self.revocationContinuation.yield(.allVideoSourcesLost)
         }
+    }
+
+    /// Handles a single-writer hard fault mid-recording (#197 live UI seam).
+    ///
+    /// Stops and finalises the faulted pipeline (so we stop burning CPU on a dead writer), then
+    /// yields `.writerFailed(kind)` on `sourceRevocationStream` so the `RecordingCoordinator`
+    /// immediately flips the corresponding source's liveness to `false`.
+    ///
+    /// The all-faulted path (`onAllWritersFaulted` → `stop()`) is unchanged — this method is only
+    /// reached when the OTHER pipeline is still live.
+    private func handleWriterFault(_ kind: RecordingPipelineKind) async {
+        self.logger.notice(
+            "Writer fault on \(String(describing: kind), privacy: .public) pipeline — stopping faulted pipeline (#197)"
+        )
+        await self.stopAndFinalizePipeline(kind)
+        self.notifyRevocation(.writerFailed(kind))
     }
 
     /// Stops one pipeline's source + encoder in the load-bearing order, joins its routing tasks,

@@ -783,6 +783,50 @@ struct RecordingCoordinatorHotKeyTests {
     }
 }
 
+// MARK: - .writerFailed live-UI seam (#197)
+
+@Suite("RecordingCoordinator — writerFailed live-UI seam (#197)")
+@MainActor
+struct RecordingCoordinatorWriterFailedTests {
+    @Test(".writerFailed(.screen) → screen liveness false, camera + mic unchanged, phase still .recording")
+    func screenWriterFailed_flipsScreenLiveness() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        #expect(coordinator.sourceLiveness == .allLive, "starts fully live")
+
+        fake.emitRevocation(.writerFailed(.screen))
+
+        let settled = await eventuallyMain { coordinator.sourceLiveness.screen == false }
+        #expect(settled, "screen liveness must flip to false after .writerFailed(.screen)")
+        #expect(coordinator.sourceLiveness.camera, "camera liveness must remain true")
+        #expect(coordinator.sourceLiveness.microphone, "mic liveness must remain true")
+        #expect(coordinator.phase == .recording, "phase must remain .recording — recording continues")
+
+        await coordinator.stop()
+    }
+
+    @Test(".writerFailed(.camera) → camera + mic liveness false, screen unchanged, phase still .recording")
+    func cameraWriterFailed_flipsCameraAndMicLiveness() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        #expect(coordinator.sourceLiveness == .allLive, "starts fully live")
+
+        fake.emitRevocation(.writerFailed(.camera))
+
+        let cameraSettled = await eventuallyMain { coordinator.sourceLiveness.camera == false }
+        #expect(cameraSettled, "camera liveness must flip to false after .writerFailed(.camera)")
+        #expect(!coordinator.sourceLiveness.microphone, "mic liveness must flip to false (rides camera session)")
+        #expect(coordinator.sourceLiveness.screen, "screen liveness must remain true")
+        #expect(coordinator.phase == .recording, "phase must remain .recording — screen still records")
+
+        await coordinator.stop()
+    }
+}
+
 // swiftlint:enable no_magic_numbers
 // swiftlint:enable trailing_closure
 // swiftlint:enable type_body_length
