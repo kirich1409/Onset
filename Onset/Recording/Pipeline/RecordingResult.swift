@@ -130,14 +130,19 @@ nonisolated enum RecordingResult {
         }
     }
 
-    /// `true` when the live HUD pill actually flashed `.degraded` during the session (AC-9).
+    /// `true` when the session accumulated enough cumulative encoder-backpressure drops to warrant
+    /// the "запись завершена, пропущено N кадров — возможны рывки" post-stop warning (AC-9).
     ///
-    /// Delegates to `sessionEverDegraded` — the one-way latch from `DropMonitor`. This is
-    /// intentionally stricter than the old `drops.encoderBackpressureDrops > 0` check: a
-    /// session whose scattered backpressure drops never exceeded the sliding-window threshold
-    /// did not make the pill flash and should not trigger the post-stop warning.
-    nonisolated var degradedWarning: Bool {
-        self.sessionEverDegraded
+    /// Only `encoderBackpressureDrops` count — capture / CFR-normalization drops do not warn
+    /// (mirrors the `RecordingState.degraded` trigger policy in `DropMonitor`).
+    ///
+    /// Uses `>= threshold` (inclusive), matching AC-9 spec wording "N ≥ порога". This is distinct
+    /// from the live AC-8 sliding-window which uses strict `>` over a short time window — they
+    /// measure different things (rate vs session total) and deliberately use different comparisons.
+    ///
+    /// - Parameter threshold: From `RecordingConfiguration.postStopDropWarningThreshold`.
+    nonisolated func degradedWarning(threshold: Int) -> Bool {
+        self.drops.encoderBackpressureDrops >= threshold
     }
 }
 

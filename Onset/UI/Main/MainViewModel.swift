@@ -58,6 +58,14 @@ final class MainViewModel {
     @ObservationIgnored
     let discoverMicrophones: (Bool) -> [MicrophoneDevice]
 
+    /// Closure seam for the device-change event stream — injectable for tests.
+    ///
+    /// The live default builds a `DeviceAvailabilityObserver` whose lifetime is tied to
+    /// the returned stream: its `onTermination` tears the observer down when the consuming
+    /// task is cancelled (main window disappears). See `observeDeviceChanges()`.
+    @ObservationIgnored
+    let makeDeviceChangeStream: @MainActor () -> AsyncStream<DeviceChangeEvent>
+
     /// Factory seam for `CameraSource` — injectable for tests to avoid hardware calls.
     ///
     /// The default closure builds a `.preview`-role source (no data output, no telemetry);
@@ -364,6 +372,9 @@ final class MainViewModel {
         discoverMicrophones: @escaping (Bool) -> [MicrophoneDevice] = { authorized in
             DeviceDiscovery.microphones(microphoneAuthorized: authorized)
         },
+        makeDeviceChangeStream: @escaping @MainActor () -> AsyncStream<DeviceChangeEvent> = {
+            DeviceAvailabilityObserver().events()
+        },
         makeCameraSource: @escaping (
             CameraDevice, CameraFormat, MicrophoneDevice?, RecordingConfiguration
         )
@@ -379,6 +390,7 @@ final class MainViewModel {
         self.discoverDisplays = discoverDisplays
         self.discoverCameras = discoverCameras
         self.discoverMicrophones = discoverMicrophones
+        self.makeDeviceChangeStream = makeDeviceChangeStream
         self.makeCameraSource = makeCameraSource
         self.makeStore = makeStore
     }

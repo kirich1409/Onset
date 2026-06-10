@@ -81,6 +81,9 @@ struct MainView: View {
         .frame(width: WindowDefaults.width, height: WindowDefaults.height)
         .task {
             await self.model.loadDevices()
+            // Parks here until the view disappears: SwiftUI cancels the task, which
+            // terminates the device-change stream and tears down its observer.
+            await self.model.observeDeviceChanges()
         }
         // Post-stop alerts: surface on re-appear or on async flag changes.
         // `.onAppear` covers the case where the flag is already set when the main window
@@ -115,8 +118,8 @@ struct MainView: View {
                 self.pendingAlert = alert
             }
         }
-        .onChange(of: self.model.coordinator.lastDroppedFrames) { _, newValue in
-            guard newValue > 0, self.pendingAlert == nil else { return }
+        .onChange(of: self.model.coordinator.lastDegradedWarning) { _, newValue in
+            guard newValue, self.pendingAlert == nil else { return }
             self.pendingAlert = self.resolvedAlert()
         }
         .alert(item: self.$pendingAlert) { alert in
@@ -131,8 +134,8 @@ struct MainView: View {
     private func resolvedAlert() -> PostStopAlert? {
         PostStopAlert.resolve(
             writeError: self.model.coordinator.lastWriteError,
-            degraded: self.model.coordinator.lastDegradedWarning,
-            droppedFrames: self.model.coordinator.lastDroppedFrames
+            droppedFrames: self.model.coordinator.lastDroppedFrames,
+            threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold
         )
     }
 
@@ -148,9 +151,9 @@ struct MainView: View {
                 message: Text(reason),
                 dismissButton: .default(Text("ОК")) {
                     self.model.coordinator.acknowledgeWriteError()
-                    // Chain to the next pending alert (degradedWarning if lastDroppedFrames > 0,
+                    // Chain to the next pending alert (degradedWarning if drops >= threshold,
                     // nil otherwise). Without this, onChange never re-fires for an unchanged
-                    // lastDroppedFrames, so the degraded-warning alert would be lost.
+                    // lastDegradedWarning, so the degraded-warning alert would be lost.
                     self.pendingAlert = self.resolvedAlert()
                 }
             )
@@ -161,8 +164,8 @@ struct MainView: View {
                 message: Text(alert.message),
                 dismissButton: .default(Text("ОК")) {
                     self.model.coordinator.acknowledgeDegradedWarning()
-                    // resolvedAlert() returns nil here (lastDegradedWarning is false after acknowledge);
-                    // explicit assignment keeps the dismiss path symmetrical with writeError.
+                    // resolvedAlert() returns nil here (lastDroppedFrames resets below threshold after
+                    // acknowledge); explicit assignment keeps the dismiss path symmetrical with writeError.
                     self.pendingAlert = self.resolvedAlert()
                 }
             )
@@ -338,11 +341,11 @@ struct CameraPreviewRepresentable: NSViewRepresentable {
 /// `degradedWarning` carries the session's encoder-backpressure drop count so the alert can
 /// display "Пропущено N кадров — возможны рывки." (AC-9).
 ///
-/// Priority ordering is enforced by `resolve(writeError:droppedFrames:)`: write-error
+/// Priority ordering is enforced by `resolve(writeError:droppedFrames:threshold:)`: write-error
 /// supersedes degraded-warning because a failed write means the file was not saved (higher severity).
 enum PostStopAlert: Identifiable {
     case writeError(reason: String)
-    /// Post-stop warning shown when the session's encoder-backpressure drop count exceeds zero.
+    /// Post-stop warning shown when encoder-backpressure drops reach `postStopDropWarningThreshold`.
     ///
     /// `droppedFrames` is `RecordingCoordinator.lastDroppedFrames` — frozen at stop time,
     /// reset to 0 in `acknowledgeDegradedWarning()` and on every `start()`.
@@ -363,16 +366,14 @@ enum PostStopAlert: Identifiable {
     ///
     /// - Parameters:
     ///   - writeError:    Human-readable write-failure reason, or `nil` when the file was saved.
-    ///   - degraded:      `RecordingCoordinator.lastDegradedWarning` — `true` when the live HUD
-    ///                    pill flashed `.degraded` at least once (the one-way latch from
-    ///                    `DropMonitor`). Drives the gate, not the raw `droppedFrames` count.
-    ///   - droppedFrames: `RecordingCoordinator.lastDroppedFrames` at call time — used for message
-    ///                    pluralization only; does NOT gate the alert.
-    nonisolated static func resolve(writeError: String?, degraded: Bool, droppedFrames: Int) -> Self? {
+    ///   - droppedFrames: `RecordingCoordinator.lastDroppedFrames` at call time — frozen at stop.
+    ///   - threshold:     Minimum cumulative encoder-backpressure drop count that triggers the alert
+    ///                    (`RecordingConfiguration.postStopDropWarningThreshold`). Inclusive: `>=`.
+    nonisolated static func resolve(writeError: String?, droppedFrames: Int, threshold: Int) -> Self? {
         if let reason = writeError {
             return .writeError(reason: reason)
         }
-        if degraded {
+        if droppedFrames >= threshold {
             return .degradedWarning(droppedFrames: droppedFrames)
         }
         return nil

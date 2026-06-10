@@ -154,12 +154,11 @@ final class RecordingCoordinator {
     /// stop completes.
     private(set) var lastResult: RecordingResult?
 
-    /// `true` when the most recent finished session had the live HUD pill flash `.degraded` at
-    /// least once (AC-9 warning). Derived from `lastSessionEverDegraded` — the one-way latch from
-    /// `DropMonitor`, which is stricter than `lastDroppedFrames > 0`: scattered backpressure drops
-    /// that never crossed the sliding-window threshold do not trigger the post-stop warning.
+    /// `true` when the most recent finished session had enough encoder-backpressure drops to
+    /// warrant the post-stop warning (AC-9). Threshold from `RecordingConfiguration`.
+    /// Derived from `lastDroppedFrames` — single source of truth, no lockstep pair needed.
     var lastDegradedWarning: Bool {
-        self.lastSessionEverDegraded
+        self.lastDroppedFrames >= RecordingConfiguration.mvpDefault.postStopDropWarningThreshold
     }
 
     /// One-way degradation latch from the most recent finished session. `true` when the live HUD
@@ -181,6 +180,13 @@ final class RecordingCoordinator {
     /// the human-readable reason for the error alert. Distinct from `lastDegradedWarning` — a
     /// write failure means the file was not saved cleanly. Reset on `start()` / `acknowledgeWriteError()`.
     private(set) var lastWriteError: String?
+
+    /// `true` when at least one post-stop alert is pending and has not yet been acknowledged.
+    /// Used by `stop()` to decide whether to surface the main window after a menu-bar-origin stop
+    /// (#131): a pending alert requires the window so `MainView` can present it.
+    var hasPendingAlert: Bool {
+        self.lastWriteError != nil || self.lastDegradedWarning
+    }
 
     // MARK: - Dependencies (injected)
 
@@ -393,8 +399,9 @@ final class RecordingCoordinator {
         }
     }
 
-    /// The SOLE subscription to `session.sourceRevocationStream` (#39 / AC-12). Updates
-    /// `sourceLiveness` on each `.sourceRevoked` event, and calls `stop()` on `.allVideoSourcesLost`.
+    /// The SOLE subscription to `session.sourceRevocationStream` (#39 / AC-12 / #197). Updates
+    /// `sourceLiveness` on each `.sourceRevoked` / `.writerFailed` event, and calls `stop()` on
+    /// `.allVideoSourcesLost`.
     ///
     /// NEVER awaited in `stop()` — only cancelled and nil'd. `.allVideoSourcesLost` makes THIS task
     /// call `stop()`, so awaiting it from inside `stop()` would deadlock (a task awaiting itself).
@@ -413,6 +420,17 @@ final class RecordingCoordinator {
                     self.sourceLiveness.camera = false
                     self.sourceLiveness.microphone = false
                     coordinatorLogger.notice("AC-12: camera source revoked — camera + mic liveness updated")
+
+                case .writerFailed(.screen):
+                    // Writer hard-fault: reuse the same "stopped" liveness indicator as AC-12.
+                    self.sourceLiveness.screen = false
+                    coordinatorLogger.error("#197: screen writer faulted — liveness updated")
+
+                case .writerFailed(.camera):
+                    // The microphone rides the camera AVCaptureSession: writer fault ends both.
+                    self.sourceLiveness.camera = false
+                    self.sourceLiveness.microphone = false
+                    coordinatorLogger.error("#197: camera writer faulted — camera + mic liveness updated")
 
                 case .allVideoSourcesLost:
                     coordinatorLogger.notice("AC-12: all video sources lost — stopping session")
@@ -439,14 +457,13 @@ final class RecordingCoordinator {
 
     // MARK: - Stop (AC-9) — funnel for all three stop paths
 
-    // swiftlint:disable function_body_length
     /// Stops the active recording. Funnel for the three stop paths (button / hotkey / menu —
     /// AC-9). Re-entrancy-guarded so the teardown (reveal, warning, phase transition) runs exactly
     /// once even under concurrent calls: `isStopping` is flipped synchronously before the first
     /// `await`, so a second path entering during `await session.stop()` returns immediately. The
     /// underlying `RecordingSession.stop()` is itself memoized, so the double-await is harmless —
     /// the guard protects this coordinator's own teardown.
-    func stop() async {
+    func stop() async { // swiftlint:disable:this function_body_length
         guard self.phase == .recording, !self.isStopping, let session = self.session else { return }
         self.isStopping = true
 
@@ -483,7 +500,7 @@ final class RecordingCoordinator {
             coordinatorLogger.error(
                 "Recording finished with write failure — \(writeError)"
             )
-        } else if result.sessionEverDegraded {
+        } else if result.degradedWarning(threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold) {
             coordinatorLogger.notice(
                 // swiftlint:disable:next line_length
                 "Recording finished with degraded warning — backpressureDrops=\(result.drops.encoderBackpressureDrops) dominantCause=\(String(describing: result.dominantCause))"
@@ -498,7 +515,15 @@ final class RecordingCoordinator {
             self.phase = .main
 
         case .menuBar:
-            self.phase = .idle
+            // Open the main window when a post-stop alert is pending so MainView can present it
+            // (#131). Without this, the window is never mounted and MainView's .onAppear / .onChange
+            // never fire — the alert would be silently lost until the next manual window open.
+            if self.hasPendingAlert {
+                self.openMainWindow()
+                self.phase = .main
+            } else {
+                self.phase = .idle
+            }
         }
 
         self.isStopping = false
@@ -506,8 +531,6 @@ final class RecordingCoordinator {
             "Recording stopped — files=\(result.outputURLs.count) origin=\(String(describing: self.origin))"
         )
     }
-
-    // swiftlint:enable function_body_length
 
     // MARK: - Global hotkey (#67 / AC-9 third stop path)
 
