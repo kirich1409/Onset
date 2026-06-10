@@ -1,3 +1,5 @@
+// swiftlint:disable file_length
+import AppKit
 import AVFoundation
 import os
 import SwiftUI
@@ -81,6 +83,13 @@ final class MainViewModel {
     /// `withScopedDefaults`.
     @ObservationIgnored
     let makeStore: () -> any DeviceSelectionPersisting
+
+    /// Closure seam for display-configuration-change events — injectable for tests.
+    ///
+    /// Live default yields `Void` on each `NSApplication.didChangeScreenParametersNotification`.
+    /// Tests inject a stream driven by `AsyncStream.makeStream` for deterministic reloads.
+    @ObservationIgnored
+    let screenChangeEvents: () -> AsyncStream<Void>
 
     /// Test seam: when non-nil, replaces `coordinator.start(_:)` in `startRecording`.
     ///
@@ -383,6 +392,20 @@ final class MainViewModel {
             },
         makeStore: @escaping () -> any DeviceSelectionPersisting = {
             UserDefaultsDeviceSelectionStore()
+        },
+        screenChangeEvents: @escaping () -> AsyncStream<Void> = {
+            // Bridges didChangeScreenParametersNotification as a Void signal.
+            // Async-sequence form avoids a non-Sendable observer token in @Sendable closure.
+            AsyncStream { continuation in
+                let task = Task {
+                    let center = NotificationCenter.default
+                    let name = NSApplication.didChangeScreenParametersNotification
+                    for await _ in center.notifications(named: name) {
+                        continuation.yield()
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
         }
     ) {
         self.permissions = permissions
@@ -393,5 +416,6 @@ final class MainViewModel {
         self.makeDeviceChangeStream = makeDeviceChangeStream
         self.makeCameraSource = makeCameraSource
         self.makeStore = makeStore
+        self.screenChangeEvents = screenChangeEvents
     }
 }
