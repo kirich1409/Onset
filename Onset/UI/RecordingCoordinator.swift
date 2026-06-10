@@ -227,7 +227,7 @@ final class RecordingCoordinator {
 
     /// The active session, retained for the duration of a recording.
     @ObservationIgnored
-    private var session: (any RecordingControlling)?
+    private(set) var session: (any RecordingControlling)?
 
     /// The recording's origin, used to decide the post-stop phase.
     @ObservationIgnored
@@ -235,7 +235,7 @@ final class RecordingCoordinator {
 
     /// The recording's start instant, used to derive `elapsed`.
     @ObservationIgnored
-    private var startedAt: Date?
+    private(set) var startedAt: Date?
 
     /// The SOLE subscription to `session.recordingStateStream`.
     @ObservationIgnored
@@ -266,10 +266,27 @@ final class RecordingCoordinator {
     @ObservationIgnored
     private var isStopping = false
 
+    /// The task running `awaitCaptureActivation`. Stored so `stop()` / `handleHotKey()` can
+    /// cancel the activation wait when the user aborts during the consent wait (#3 fix).
+    @ObservationIgnored
+    private var activationTask: Task<Bool, Never>?
+
+    /// Set to `true` by `cancelActivation()` before cancelling `activationTask` so `start()`
+    /// can distinguish a user-initiated cancel from a genuine denial / timeout.
+    @ObservationIgnored
+    private var activationCancelledByUser = false
+
+    /// Seconds to wait for `captureActiveStream` to yield. Defaults to 30 s (production UX constant).
+    /// Injectable for unit tests so the timeout path can be exercised without real wall-clock delay.
+    @ObservationIgnored
+    private let activationTimeoutSeconds: Double
+
     // MARK: - Init
 
     /// - Parameters:
     ///   - sessionFactory: Builds the session for a request (live = `RecordingSession`).
+    ///   - activationTimeoutSeconds: Seconds to bound the first-frame wait (default: 30 s).
+    ///     Pass a small value in unit tests to exercise the timeout path without wall-clock delay.
     ///   - revealInFinder: Reveals files (defaults to the live `NSWorkspace` call).
     ///
     /// Window actions default to no-ops and are installed later via `bindWindowActions(...)` from
@@ -285,12 +302,14 @@ final class RecordingCoordinator {
                 config: .mvpDefault
             )
         },
+        activationTimeoutSeconds: Double = 30,
         revealInFinder: @escaping ([URL]) -> Void = { urls in
             guard !urls.isEmpty else { return }
             NSWorkspace.shared.activateFileViewerSelecting(urls)
         }
     ) {
         self.sessionFactory = sessionFactory
+        self.activationTimeoutSeconds = activationTimeoutSeconds
         self.openRecordingWindow = {}
         self.dismissMainWindow = {}
         self.dismissRecordingWindow = {}
@@ -338,18 +357,36 @@ final class RecordingCoordinator {
 
     // MARK: - Start (AC-3)
 
-    /// Starts a recording for the given request. On success: hides the main window, opens the
-    /// recording window, transitions to `.recording`, and spins the SOLE state subscription plus the
-    /// elapsed-timer / drops-poll loop. On failure: rethrows the `RecordingError` for the caller's
-    /// UI to surface (AC-6 / AC-11) and stays in the current phase.
+    /// Starts a recording for the given request.
+    ///
+    /// On success: hides the main window, opens the recording window, transitions to `.recording`,
+    /// and spins the SOLE state subscription plus the elapsed-timer / drops-poll loop.
+    /// On failure: rethrows the `RecordingError` for the caller's UI to surface (AC-6 / AC-11)
+    /// and stays in the current phase.
+    ///
+    /// ### Screen-capture consent gate (#171)
+    /// On macOS 26 `SCStream.startCapture()` returns **before** the user grants consent. The
+    /// coordinator therefore waits for `session.captureActiveStream` to yield before flipping to
+    /// `.recording` and opening the recording window. The stream yields on the first real screen
+    /// frame (consent granted). If the stream finishes without yielding (terminal stop) or the
+    /// bounded 30-second timeout elapses (silent denial — macOS may never fire a terminal stop),
+    /// the session is stopped and `.captureDidNotActivate` is thrown so the caller can surface a
+    /// suitable message. The elapsed timer starts at first-frame time, not at the point
+    /// `session.start()` returns.
+    ///
+    /// The wait is cancellable: calling `stop()` or `handleHotKey()` during the consent wait
+    /// unblocks activation and reverts silently (no error thrown to the caller).
     ///
     /// Phase 0 has no Record button; this is exercised by tests via the injected factory.
-    func start(_ request: RecordingRequest) async throws {
+    func start(_ request: RecordingRequest) async throws { // swiftlint:disable:this function_body_length
         guard self.phase != .recording, !self.isStarting else {
             coordinatorLogger.warning("start() ignored — already recording or starting")
             return
         }
         self.isStarting = true
+        // Reset the cancel flag immediately — before any `await` — so a stop() that races
+        // session.start() (where activationTask is still nil) cannot be wiped on resume.
+        self.activationCancelledByUser = false
         defer { self.isStarting = false }
 
         let session = self.sessionFactory(request)
@@ -360,10 +397,83 @@ final class RecordingCoordinator {
             throw error
         }
 
-        // Started: adopt the session and reset live state.
+        // Store the session now so cancelActivation() can reach it during the consent wait.
         self.session = session
+        // Pre-populate checklist and origin so the recording window (if ever shown) has correct data.
         self.origin = request.origin
         self.checklist = request.checklist
+
+        // Fix #2: if we exit before activation (error or Task cancellation), clean up the live
+        // session so a subsequent start() cannot leak or overwrite it.
+        var activated = false
+        defer {
+            // `activated` is set true only on the success path; all failure/cancellation paths leave
+            // it false. nil-out the session so no zombie session survives after start() exits.
+            if !activated {
+                self.session = nil
+            }
+        }
+
+        // Wait for the first real screen frame — this is when consent is actually granted (#171).
+        // Fix #3: the wait is cancellable: cancelActivation() can be called from stop() / handleHotKey()
+        // while isStarting is true. The activationTask is stored so those paths can cancel it.
+        let activationTask = Task {
+            await self.awaitCaptureActivation(
+                session: session,
+                timeoutSeconds: self.activationTimeoutSeconds
+            )
+        }
+        self.activationTask = activationTask
+        let captureActivated = await activationTask.value
+        self.activationTask = nil
+
+        // Check the cancel flag BEFORE the captureActivated guard so a stop() that raced the
+        // activation window (including the session.start() suspension) is never dropped.
+        // This covers two races the old placement missed:
+        //   (a) stop() after emitCaptureActive() but before start() resumes (flag set, guard would pass)
+        //   (b) stop() during session.start() suspension (activationTask nil → cancel no-op; flag set,
+        //       but old code wiped it at the top of the wait block)
+        if self.activationCancelledByUser {
+            // User pressed stop / hotkey during the consent wait — revert silently (no error).
+            coordinatorLogger.notice("Consent wait cancelled by user — reverting silently")
+            self.activationCancelledByUser = false
+            _ = await session.stop()
+            return
+        }
+        guard captureActivated else {
+            // Genuine denial or timeout: revert and throw so the UI can surface a message.
+            _ = await session.stop()
+            coordinatorLogger.notice("Capture did not activate (consent denied or timeout) — reverting (#171)")
+            throw RecordingError.captureDidNotActivate
+        }
+
+        // Capture is live: mark activated (disarms the defer cleanup), adopt live state, open recording window.
+        activated = true
+        self.activateRecording(session: session, origin: request.origin)
+        coordinatorLogger.info("Recording started — origin=\(String(describing: request.origin))")
+    }
+
+    /// Cancels an in-progress consent wait from `stop()` or `handleHotKey()`.
+    ///
+    /// Safe to call when not in the starting phase (no-op). Cancellation propagates into the
+    /// `withTaskGroup` race: both children receive cancellation, both return `false` → activation
+    /// returns `false`. The `activationCancelledByUser` flag lets `start()` revert silently
+    /// (no error thrown) rather than surfacing a `.captureDidNotActivate` alert.
+    private func cancelActivation() {
+        guard self.isStarting else { return }
+        coordinatorLogger.notice("Consent wait cancelled by user stop/hotkey")
+        self.activationCancelledByUser = true
+        self.activationTask?.cancel()
+        self.activationTask = nil
+    }
+
+    /// Flips all observable state to "recording" and starts subscriptions + window choreography.
+    ///
+    /// Called exactly once per `start()` success path, after `captureActiveStream` yields (#171).
+    /// `startedAt` is set HERE so the elapsed timer counts from the first real screen frame, not
+    /// from when `SCStream.startCapture()` returned.
+    private func activateRecording(session: any RecordingControlling, origin: RecordingOrigin) {
+        // startedAt is set at activation (first real frame), not at session.start() (#171).
         self.startedAt = Date()
         self.elapsed = 0
         self.recordingState = .normal
@@ -385,7 +495,42 @@ final class RecordingCoordinator {
         // Window choreography (AC-3): hide main, open recording.
         self.dismissMainWindow()
         self.openRecordingWindow()
-        coordinatorLogger.info("Recording started — origin=\(String(describing: request.origin))")
+    }
+
+    /// Awaits the first element from `session.captureActiveStream` with a bounded timeout.
+    ///
+    /// Returns `true` when the stream yields (capture is live), `false` when the stream finishes
+    /// without yielding (consent denied or terminal stop) or the timeout elapses.
+    ///
+    /// Implemented as a racing `withTaskGroup` — the stream-consumer child and the timeout child
+    /// race; the first result wins and the group is cancelled. This avoids any stored handle and is
+    /// fully structured. `nonisolated` is not needed here because the coordinator is `@MainActor`
+    /// and both children cross isolation via actor hops inside `Task`, not via `Task.detached`.
+    private func awaitCaptureActivation(
+        session: any RecordingControlling,
+        timeoutSeconds: Double
+    ) async
+    -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            // Child 1: wait for the activation signal.
+            group.addTask {
+                var activated = false
+                for await _ in session.captureActiveStream {
+                    activated = true
+                    break // single-consumer: we only need the first element
+                }
+                return activated
+            }
+            // Child 2: bounded timeout.
+            group.addTask {
+                try? await Task.sleep(for: .seconds(timeoutSeconds))
+                return false // timed out
+            }
+            // The first child to finish wins; cancel the remaining child.
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
     }
 
     /// The SOLE subscription to the session's single-consumer state stream. Re-publishes each
@@ -464,6 +609,12 @@ final class RecordingCoordinator {
     /// underlying `RecordingSession.stop()` is itself memoized, so the double-await is harmless —
     /// the guard protects this coordinator's own teardown.
     func stop() async { // swiftlint:disable:this function_body_length
+        // Fix #3: if the user presses stop/hotkey during the consent wait, cancel activation so
+        // start() reverts promptly and silently (no error alert).
+        if self.isStarting {
+            self.cancelActivation()
+            return
+        }
         guard self.phase == .recording, !self.isStopping, let session = self.session else { return }
         self.isStopping = true
 
@@ -545,7 +696,11 @@ final class RecordingCoordinator {
     /// (called from the Carbon callback via MainActor.assumeIsolated) while `stop()` is
     /// async. A structured Task inherits @MainActor isolation from the enclosing context.
     func handleHotKey() {
-        if self.phase == .recording {
+        if self.isStarting {
+            // Fix #3: hotkey during the consent wait cancels the activation wait silently.
+            self.cancelActivation()
+            coordinatorLogger.notice("Hotkey ⌘⌥⌃R — cancelling consent wait")
+        } else if self.phase == .recording {
             Task { await self.stop() }
             coordinatorLogger.notice("Hotkey ⌘⌥⌃R — stopping active recording")
         } else if let intent = self.menuBarRecordIntent {

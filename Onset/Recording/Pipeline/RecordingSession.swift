@@ -57,6 +57,16 @@ actor RecordingSession {
     nonisolated let recordingStateStream: AsyncStream<RecordingState>
     private let stateContinuation: AsyncStream<RecordingState>.Continuation
 
+    // MARK: - Capture-active stream (UI gate — #171)
+
+    /// Screen-capture activation signal: yields once when the first real screen frame arrives,
+    /// then finishes. See `RecordingControlling.captureActiveStream` for the full contract.
+    ///
+    /// Created at `init` so the coordinator can subscribe before `start()` is called. Finished
+    /// in BOTH `performStop()` and `teardownAfterFailedStart()` so a subscriber never hangs.
+    nonisolated let captureActiveStream: AsyncStream<Void>
+    private let captureActiveContinuation: AsyncStream<Void>.Continuation
+
     // MARK: - Revocation stream (UI surface — #39 / AC-12)
 
     /// Graceful-revocation notifications for the UI (`RecordingRevocation`).
@@ -190,6 +200,17 @@ actor RecordingSession {
         let (revocationStream, revocationContinuation) = AsyncStream.makeStream(of: RecordingRevocation.self)
         self.sourceRevocationStream = revocationStream
         self.revocationContinuation = revocationContinuation
+
+        // Capture-active stream + its continuation (#171 UI gate), created here so the coordinator
+        // can subscribe before start() is called. Yields once on first real screen frame, then
+        // finishes. Finished in both performStop() and teardownAfterFailedStart() so subscribers
+        // never hang regardless of how the session ends.
+        // Relies on the DEFAULT .unbounded buffering: a yield that fires before the coordinator
+        // subscribes is retained in the buffer. A .bufferingNewest/Oldest(1) policy would silently
+        // drop it and leave the coordinator hanging until the 30 s timeout.
+        let (captureActiveStream, captureActiveContinuation) = AsyncStream.makeStream(of: Void.self)
+        self.captureActiveStream = captureActiveStream
+        self.captureActiveContinuation = captureActiveContinuation
 
         // Default live probe: classify against the resolved display + camera format.
         self.probe = probe ?? { CapabilityProbe.probe(display: display, cameraFormat: cameraFormat, config: config) }
@@ -367,12 +388,23 @@ actor RecordingSession {
 
     /// Starts the sources, anchored to the shared anchor (frames with host-time < T0 are dropped
     /// by the sources' existing gate).
+    ///
+    /// When a screen pipeline is present, the first real screen frame triggers `captureActiveStream`
+    /// (#171 — `SCStream.startCapture()` returns before consent on macOS 26). When there is NO
+    /// screen pipeline (camera-only), the stream is yielded immediately after sources start because
+    /// there is no consent gate to wait for.
     private func startSources(anchor: HostTimeAnchor) async throws {
         if let screen = self.screenPipeline {
             try await screen.source.start(anchoredTo: anchor)
         }
         if let camera = self.cameraPipeline {
             try await camera.source.start(anchoredTo: anchor)
+        }
+        // Camera-only path: no screen pipeline means no first-frame hook will fire. Signal the
+        // coordinator immediately so the UI is not gated on a frame that will never come.
+        if self.screenPipeline == nil {
+            self.captureActiveContinuation.yield(())
+            self.captureActiveContinuation.finish()
         }
     }
 
@@ -423,7 +455,24 @@ actor RecordingSession {
         await monitor.observe(source.drops)
         await monitor.observe(encoder.drops)
 
-        let framesTask = Self.makeFramesTask(source: source, encoder: encoder)
+        // Capture the continuation (not self) in the first-frame hook so the task does not
+        // retain the session actor. Yield once + finish immediately: the coordinator only
+        // needs the "first real frame arrived" signal, extra yields are not consumed.
+        let captureActiveContinuation = self.captureActiveContinuation
+        let framesTask = Self.makeFramesTask(
+            source: source,
+            encoder: encoder,
+            onFirstFrame: {
+                captureActiveContinuation.yield(())
+                captureActiveContinuation.finish()
+            },
+            // Fix #1: when the frames stream ends without a first frame (consent denied or
+            // terminal stop), finish the continuation so awaitCaptureActivation returns
+            // promptly rather than waiting the full 30-second timeout.
+            onEndWithoutFirstFrame: {
+                captureActiveContinuation.finish()
+            }
+        )
         let routeVideoTask = Self.makeRouteVideoTask(encoder: encoder, kind: .screen, stage: stage)
 
         self.screenPipeline = Pipeline(
@@ -484,15 +533,31 @@ actor RecordingSession {
         }
     }
 
-    /// frames → `encoder.ingest`. Static so the closure captures only the two sendable actors.
+    /// frames → `encoder.ingest`. Static so the closure captures only the two sendable actors plus
+    /// the optional first-frame hook. `onFirstFrame` is called (once) when the first frame is
+    /// delivered; `nil` for the camera pipeline (consent is not required for camera).
     private static func makeFramesTask(
         source: any VideoFrameSource,
-        encoder: any EncoderControlling
+        encoder: any EncoderControlling,
+        onFirstFrame: (@Sendable () -> Void)? = nil,
+        onEndWithoutFirstFrame: (@Sendable () -> Void)? = nil
     )
     -> Task<Void, Never> {
         Task {
+            var firstFrameSeen = false
             for await frame in source.frames {
+                if !firstFrameSeen {
+                    firstFrameSeen = true
+                    onFirstFrame?()
+                }
                 await encoder.ingest(frame)
+            }
+            // If the stream ended without ever delivering a frame (consent denied / terminal stop),
+            // signal the coordinator so it can revert promptly instead of waiting for the full timeout.
+            // finish() on the captureActiveContinuation is idempotent: calling it after onFirstFrame
+            // already ran is a safe no-op (AsyncStream silently drops the extra finish).
+            if !firstFrameSeen {
+                onEndWithoutFirstFrame?()
             }
         }
     }
@@ -729,6 +794,12 @@ actor RecordingSession {
         // terminates. No task to cancel — the session yields directly from handleSourceEvent.
         self.revocationContinuation.finish()
 
+        // End the capture-active stream. If the first-frame hook already finished it (normal path:
+        // consent was granted), this is a no-op. If stop() is called before the first frame arrives
+        // (stop during consent wait), finishing here unblocks the coordinator's activation wait so it
+        // can detect the empty finish and revert cleanly (#171).
+        self.captureActiveContinuation.finish()
+
         let sessionOutput = SessionOutput(screen: finishResults[.screen], camera: finishResults[.camera])
         let result: RecordingResult = if let output = sessionOutput {
             .completed(output, healthSnapshot)
@@ -772,6 +843,8 @@ actor RecordingSession {
         self.stateContinuation.finish()
         // Finish the revocation stream too, so a subscriber's loop ends after a failed start.
         self.revocationContinuation.finish()
+        // Finish the capture-active stream so a waiting coordinator unblocks and reverts (#171).
+        self.captureActiveContinuation.finish()
         await self.dropMonitor?.stop()
         self.dropMonitor = nil
         self.stage = nil
