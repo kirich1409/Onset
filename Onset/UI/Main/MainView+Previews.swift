@@ -118,7 +118,7 @@ import SwiftUI
     /// Helper for the disconnected-camera preview state: authorized, one display, NO cameras
     /// in the current list (simulates hot-unplug), with `disconnectedCameraName` set.
     @MainActor
-    private func makeDisconnectedCameraPreviewModel() -> MainViewModel {
+    private func makeDisconnectedCameraPreviewModel(withAlternative: Bool = false) -> MainViewModel {
         let display = Display(
             displayID: 1,
             name: "Встроенный дисплей",
@@ -127,12 +127,16 @@ import SwiftUI
             refreshHz: 60
         )
         let mic = MicrophoneDevice(uniqueID: "mic-1")
-        // No cameras in the list — device has been unplugged.
+        // When `withAlternative` is true, a second camera remains in the list so the
+        // "выберите другую камеру" hint appears — useful for verifying the longer label.
+        let alternativeCamera = CameraDevice(uniqueID: "camera-alt", formats: [
+            CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30, maxFps: 60),
+        ])
         let model = makePreviewModel(
             camera: .authorized,
             microphone: .authorized,
             displays: [display],
-            cameras: [],
+            cameras: withAlternative ? [alternativeCamera] : [],
             microphones: [mic]
         )
         // Simulate the disconnected state written by loadCamerasAndMicrophones.
@@ -261,6 +265,13 @@ import SwiftUI
         // cameraEnabled=true, selectedCameraID=nil, disconnectedCameraName set.
         // The CameraUnavailableRow should appear below the picker.
         MainView(model: makeDisconnectedCameraPreviewModel()) {}
+    }
+
+    #Preview("Camera — disconnected, accessibility5 (longest row)") {
+        // Uses the "with alternative" variant so the "выберите другую камеру" suffix is shown —
+        // this produces the longest possible CameraUnavailableRow label for Dynamic Type stress-test.
+        MainView(model: makeDisconnectedCameraPreviewModel(withAlternative: true)) {}
+            .dynamicTypeSize(.accessibility5)
     }
 
     #Preview("Output folder — custom path") {

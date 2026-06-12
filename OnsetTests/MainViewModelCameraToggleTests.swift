@@ -512,8 +512,9 @@ struct MainViewModelCameraToggleTests {
     }
 
     /// Assigning a `cameraPickerSelection` whose device ID is not in `cameras` must be
-    /// ignored: the picker selection must not change and no persist call must be emitted.
-    @Test("enableCamera with unknown ID → selection unchanged, no persist")
+    /// ignored: the picker selection must not change, no persist call must be emitted, and
+    /// `disconnectedCameraName` must be set so `CameraUnavailableRow` can explain the rollback.
+    @Test("enableCamera with unknown ID → selection unchanged, no persist, disconnectedCameraName set")
     func enableCamera_unknownDeviceID_selectionUnchanged() async {
         let cam = Self.makeCamera(id: "cam-known")
         let spy = CameraSaveSpy()
@@ -538,6 +539,8 @@ struct MainViewModelCameraToggleTests {
         #expect(sut.cameraPickerSelection == selectionBeforeAttempt)
         #expect(spy.saveCameraCallCount == 0)
         #expect(spy.clearCameraCallCount == 0)
+        // The stale selection must surface a disconnected notice so the UI can explain the rollback.
+        #expect(sut.disconnectedCameraName != nil)
     }
 }
 

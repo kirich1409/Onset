@@ -273,12 +273,17 @@ final class MainViewModel {
     /// Sets `selectedCameraID` before `cameraEnabled` so `selectFirstCameraIfNeeded()` (called
     /// from `cameraEnabled.didSet`) exits early — preventing a redundant intermediate persist.
     ///
-    /// Silently ignores IDs that are no longer in `cameras` — the picker may have been rendered
-    /// before a hot-unplug event arrived; persisting a stale entry would corrupt the saved selection.
+    /// When the device ID is no longer in `cameras` (race: picker rendered before hot-unplug
+    /// event arrived), the selection is rejected and `disconnectedCameraName` is set so the UI
+    /// shows `CameraUnavailableRow`. This surfaces feedback to the user instead of silently
+    /// rolling back the picker without explanation.
     private func enableCamera(deviceID: String) {
         assert(!deviceID.isEmpty, "enableCamera called with empty deviceID")
         guard self.cameras.contains(where: { $0.uniqueID == deviceID }) else {
             mainViewModelLogger.info("Camera selection ignored — device no longer available (id=\(deviceID))")
+            // Surface the stale selection as a disconnected-device notice so the picker
+            // roll-back is explained to the user via CameraUnavailableRow.
+            self.disconnectedCameraName = self.cameraDisplayNames[deviceID] ?? "Камера"
             return
         }
         self.selectedCameraID = deviceID
