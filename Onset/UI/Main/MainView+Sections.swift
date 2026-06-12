@@ -111,8 +111,13 @@ extension MainView {
     /// Output folder selection row — issue #225.
     var outputSection: some View {
         SectionCard(title: "ВЫВОД") {
-            OutputFolderRow(folderURL: self.model.outputDirectoryURL) {
-                self.model.outputDirectoryURL = $0
+            VStack(alignment: .leading, spacing: Metrics.rowSpacing) {
+                OutputFolderRow(folderURL: self.model.outputDirectoryURL) {
+                    self.model.outputDirectoryURL = $0
+                }
+                Text("Каждая запись сохраняется в отдельную папку сессии.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -269,16 +274,26 @@ private struct OutputFolderRow: View {
 
     var body: some View {
         HStack(spacing: MainView.Metrics.accessorySpacing) {
+            // A: visible "Папка" label on the left, matching the style of other section rows
+            // (e.g. "Дисплей", "Устройство" in the reference design).
+            Text("Папка")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(width: MainView.Metrics.outputFolderLabelWidth, alignment: .leading)
             Image(systemName: "folder")
-                .frame(width: MainView.Metrics.iconColumnWidth)
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
+            // C: tooltip shows the full abbreviated path on hover.
+            // D: label names the purpose; value carries the current path — VoiceOver reads
+            //    "Папка для записи: ~/Movies/Onset" instead of the raw abbreviated string.
             Text(self.abbreviatedPath)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .accessibilityLabel("Папка: \(self.abbreviatedPath)")
+                .help(self.abbreviatedPath)
+                .accessibilityLabel("Папка для записи")
+                .accessibilityValue(self.abbreviatedPath)
             Spacer(minLength: 0)
             Button("Выбрать…") {
                 self.openPanel()
@@ -293,11 +308,18 @@ private struct OutputFolderRow: View {
     ///
     /// Replaces the home directory prefix with `~` — equivalent to `NSString.abbreviatingWithTildeInPath`
     /// but avoids bridging to the Objective-C reference type, which SwiftLint flags as `legacy_objc_type`.
+    ///
+    /// Bug fix (F): `hasPrefix(home)` incorrectly matched `/Users/foobar` when `home = /Users/foo`.
+    /// Guard requires `home + "/"` as prefix (or exact equality for `$HOME` itself) to avoid false matches.
     private var abbreviatedPath: String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let path = self.folderURL.path
-        if path.hasPrefix(home) {
-            return "~" + String(path.dropFirst(home.count))
+        if path == home {
+            return "~"
+        }
+        let homeWithSlash = home + "/"
+        if path.hasPrefix(homeWithSlash) {
+            return "~/" + String(path.dropFirst(homeWithSlash.count))
         }
         return path
     }

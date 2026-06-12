@@ -226,6 +226,13 @@ final class MainViewModel {
     /// extensions can write it.
     var recordError: String?
 
+    /// Non-nil when `validateOutputDirectory()` detected a missing or non-writable folder.
+    ///
+    /// Surfaced as a modal alert in `MainView` (output-directory errors originate in the ВЫВОД
+    /// section, which is visually distant from the Record button — a footer caption is easily missed).
+    /// Written exclusively by `MainViewModel+Record.swift`; reset at each `record()` call.
+    var outputDirectoryError: String?
+
     /// `true` while a `record()` call is in flight.
     /// Internal (not private) so `MainViewModel+Record.swift` extension can write it.
     var isStartingRecording = false

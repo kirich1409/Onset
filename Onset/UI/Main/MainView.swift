@@ -46,6 +46,9 @@ struct MainView: View {
         static let previewCornerRadius: CGFloat = 8
         static let accessorySpacing: CGFloat = 8
         static let footerBottomPad: CGFloat = 8
+        /// Width of the "Папка" label in the output-folder row — wide enough to align
+        /// with the icon column while leaving room for the path text.
+        static let outputFolderLabelWidth: CGFloat = 48
     }
 
     // MARK: - Dependencies
@@ -64,6 +67,12 @@ struct MainView: View {
     /// simultaneous `isPresented` bindings competing for the same presentation slot.
     @State
     private var pendingAlert: PostStopAlert?
+
+    /// Drives the output-directory validation alert shown when `record()` detects a
+    /// missing or non-writable output folder (issue #225). Surfaced as a modal alert
+    /// because the ВЫВОД section is visually distant from the Record button.
+    @State
+    private var outputDirAlertMessage: String?
 
     // MARK: - Body
 
@@ -126,50 +135,26 @@ struct MainView: View {
         .alert(item: self.$pendingAlert) { alert in
             self.makeAlert(for: alert)
         }
-    }
-
-    // MARK: - Alert resolution
-
-    /// Returns the highest-priority pending alert, or `nil` when no alert is due.
-    /// Write-error supersedes degraded-warning when both flags are set simultaneously.
-    private func resolvedAlert() -> PostStopAlert? {
-        PostStopAlert.resolve(
-            writeError: self.model.coordinator.lastWriteError,
-            droppedFrames: self.model.coordinator.lastDroppedFrames,
-            threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold
-        )
-    }
-
-    /// Builds the `Alert` for a given `PostStopAlert` case.
-    ///
-    /// Write-error dismiss chains to `resolvedAlert()` to surface any pending degraded-warning
-    /// that was suppressed by the higher-priority write-error (Фикс 2: потеря второго алерта).
-    private func makeAlert(for alert: PostStopAlert) -> Alert {
-        switch alert {
-        case let .writeError(reason):
-            Alert(
-                title: Text("Не удалось сохранить запись"),
-                message: Text(reason),
-                dismissButton: .default(Text("ОК")) {
-                    self.model.coordinator.acknowledgeWriteError()
-                    // Chain to the next pending alert (degradedWarning if drops >= threshold,
-                    // nil otherwise). Without this, onChange never re-fires for an unchanged
-                    // lastDegradedWarning, so the degraded-warning alert would be lost.
-                    self.pendingAlert = self.resolvedAlert()
-                }
+        // Output-directory validation alert: shown when `record()` rejects a missing or
+        // non-writable output folder. Uses the same alert presentation layer as post-stop
+        // errors to keep a single, predictable error-surfacing channel.
+        .onChange(of: self.model.outputDirectoryError) { _, newValue in
+            if let message = newValue {
+                self.outputDirAlertMessage = message
+            }
+        }
+        .alert(
+            "Папка для записи недоступна",
+            isPresented: Binding(
+                get: { self.outputDirAlertMessage != nil },
+                set: { if !$0 { self.outputDirAlertMessage = nil } }
             )
-
-        case .degradedWarning:
-            Alert(
-                title: Text("Запись завершена"),
-                message: Text(alert.message),
-                dismissButton: .default(Text("ОК")) {
-                    self.model.coordinator.acknowledgeDegradedWarning()
-                    // resolvedAlert() returns nil here (lastDroppedFrames resets below threshold after
-                    // acknowledge); explicit assignment keeps the dismiss path symmetrical with writeError.
-                    self.pendingAlert = self.resolvedAlert()
-                }
-            )
+        ) {
+            Button("ОК") { self.outputDirAlertMessage = nil }
+        } message: {
+            if let message = self.outputDirAlertMessage {
+                Text(message)
+            }
         }
     }
 
@@ -293,6 +278,53 @@ struct MainView: View {
                     .font(.caption)
                     .opacity(Metrics.recordButtonWithoutAudioOpacity)
             }
+        }
+    }
+}
+
+// MARK: - MainView — Alert resolution
+
+extension MainView {
+    /// Returns the highest-priority pending alert, or `nil` when no alert is due.
+    /// Write-error supersedes degraded-warning when both flags are set simultaneously.
+    private func resolvedAlert() -> PostStopAlert? {
+        PostStopAlert.resolve(
+            writeError: self.model.coordinator.lastWriteError,
+            droppedFrames: self.model.coordinator.lastDroppedFrames,
+            threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold
+        )
+    }
+
+    /// Builds the `Alert` for a given `PostStopAlert` case.
+    ///
+    /// Write-error dismiss chains to `resolvedAlert()` to surface any pending degraded-warning
+    /// that was suppressed by the higher-priority write-error (Фикс 2: потеря второго алерта).
+    private func makeAlert(for alert: PostStopAlert) -> Alert {
+        switch alert {
+        case let .writeError(reason):
+            Alert(
+                title: Text("Не удалось сохранить запись"),
+                message: Text(reason),
+                dismissButton: .default(Text("ОК")) {
+                    self.model.coordinator.acknowledgeWriteError()
+                    // Chain to the next pending alert (degradedWarning if drops >= threshold,
+                    // nil otherwise). Without this, onChange never re-fires for an unchanged
+                    // lastDegradedWarning, so the degraded-warning alert would be lost.
+                    self.pendingAlert = self.resolvedAlert()
+                }
+            )
+
+        case .degradedWarning:
+            Alert(
+                title: Text("Запись завершена"),
+                message: Text(alert.message),
+                dismissButton: .default(Text("ОК")) {
+                    self.model.coordinator.acknowledgeDegradedWarning()
+                    // resolvedAlert() returns nil here (lastDroppedFrames resets below threshold after
+                    // acknowledge); explicit assignment keeps the dismiss path symmetrical with writeError.
+                    self.pendingAlert = self.resolvedAlert()
+                }
+            )
         }
     }
 }

@@ -130,19 +130,28 @@ nonisolated enum RecordingOutput {
 
     /// Creates `url` as a directory if absent, with owner-only permissions (`0o700`).
     ///
+    /// Passing `attributes: [.posixPermissions: 0o700]` to `createDirectory` applies the
+    /// permission to **every intermediate directory link created in this call**, not just the
+    /// leaf. Without this, newly created parent directories receive the process's umask default
+    /// (typically `0o755`, world-readable). The separate `setAttributes` call is therefore no
+    /// longer needed and has been removed — defense-in-depth invariant: every created link is
+    /// `0o700`.
+    ///
+    /// If the directory already exists, `createDirectory` is a no-op and this function succeeds
+    /// without modifying existing permissions.
+    ///
     /// - Parameter url: The directory URL to create.
-    /// - Throws: `CocoaError` if creation or permission-setting fails.
+    /// - Throws: `CocoaError` if creation fails.
     nonisolated static func ensureDirectory(_ url: URL) throws {
         let path = url.path(percentEncoded: false)
         let fileManager = FileManager()
 
-        // Create including intermediate directories; does nothing if already exists.
-        try fileManager.createDirectory(atPath: path, withIntermediateDirectories: true, attributes: nil)
-
-        // Apply owner-only permissions: rwx------ (0o700).
-        try fileManager.setAttributes(
-            [.posixPermissions: 0o700],
-            ofItemAtPath: path
+        // 0o700 (rwx------) applied to every directory link created in this call.
+        // Intermediate directories that already exist are NOT modified.
+        try fileManager.createDirectory(
+            atPath: path,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
         )
     }
 

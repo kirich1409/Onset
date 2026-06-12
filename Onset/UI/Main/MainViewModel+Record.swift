@@ -12,6 +12,7 @@ extension MainViewModel {
         self.isStartingRecording = true
         defer { self.isStartingRecording = false }
         self.recordError = nil
+        self.outputDirectoryError = nil
 
         guard self.validateRecordGuards() else { return }
         guard self.validateOutputDirectory() else { return }
@@ -28,11 +29,11 @@ extension MainViewModel {
     }
 
     /// Validates the output directory. Returns `true` when recording may proceed,
-    /// `false` when `recordError` has been set and start must be aborted.
+    /// `false` when `outputDirectoryError` has been set and start must be aborted.
     ///
     /// A missing or non-writable base directory is a hard stop: there is no silent fallback.
-    /// Placing this check after `validateRecordGuards()` but before heavy work (display/camera
-    /// resolution) keeps the fast-path cheap and the error visible before any device contention.
+    /// Errors are surfaced as a modal alert (not a footer caption) because the ВЫВОД section
+    /// is visually distant from the Record button — see `MainView` for the alert binding.
     func validateOutputDirectory() -> Bool {
         let verdict = OutputDirectoryNaming.validateBaseDirectory(self.outputDirectoryURL)
         switch verdict {
@@ -40,12 +41,14 @@ extension MainViewModel {
             return true
 
         case .doesNotExist:
-            self.recordError = "Папка для записи не существует. Выберите другую папку."
+            self.outputDirectoryError =
+                "Папка для записи не найдена. Выберите другую папку или создайте её."
             mainViewModelLogger.error("Output directory does not exist")
             return false
 
         case .notWritable:
-            self.recordError = "Нет доступа к папке для записи. Выберите другую папку."
+            self.outputDirectoryError =
+                "Нет прав на запись в выбранную папку. Выберите другую папку."
             mainViewModelLogger.error("Output directory is not writable")
             return false
         }
