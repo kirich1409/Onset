@@ -1,4 +1,13 @@
 import Foundation
+import os
+
+// MARK: - Logger
+
+/// `nonisolated` avoids a MainActor hop under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`.
+nonisolated let recordingOutputLogger = Logger(
+    subsystem: "dev.androidbroadcast.Onset",
+    category: "RecordingOutput"
+)
 
 // MARK: - RecordingFileKind
 
@@ -76,15 +85,14 @@ nonisolated enum RecordingOutput {
     /// The base name is built by `fileName(timestamp:kind:)` (spec §135). If the resulting path
     /// already exists — a same-second double-start or a pre-existing file — the method appends a
     /// ` (N)` disambiguator before the `.mp4` extension via `uniqueSlot`, which bounds the search
-    /// at 999 attempts and returns the candidate as-is on exhaustion, letting `AVAssetWriter`
-    /// surface the error and preserving the one-shot pipeline contract.
+    /// at 999 attempts. On range exhaustion, `uniqueSlot` falls back to a UUID-derived suffix so
+    /// the returned URL is always free to use.
     ///
     /// - Parameters:
     ///   - directory: The directory in which the file will be created (e.g. `RecordingOutput.directory()`).
     ///   - timestamp: Session-start timestamp shared by both files of the same session (#198).
     ///   - kind: Screen or camera.
-    /// - Returns: A file URL that does not currently exist on disk, or the un-suffixed candidate when
-    ///   the disambiguator search is exhausted.
+    /// - Returns: A file URL that does not currently exist on disk.
     nonisolated static func uniqueOutputURL(
         in directory: URL,
         timestamp: Date,
@@ -165,7 +173,9 @@ nonisolated enum RecordingOutput {
     ///   - base: The unsuffixed candidate URL. Returned immediately if it does not exist.
     ///   - appendSuffix: Closure that builds the ` (N)`-suffixed URL for a given counter value.
     ///     Called with `n` starting at 2, up to 999.
-    /// - Returns: The first URL that does not exist on disk; `base` when the range is exhausted.
+    /// - Returns: The first URL that does not exist on disk. On exhaustion of the 2…999 range, returns
+    ///   a URL with a unique 8-character UUID prefix suffix (e.g. ` (A1B2C3D4)`) so the caller always
+    ///   receives a path that is free to create — the base URL is never returned on exhaustion.
     nonisolated static func uniqueSlot(
         base: URL,
         appendSuffix: (Int) -> URL
@@ -177,9 +187,11 @@ nonisolated enum RecordingOutput {
             return base
         }
 
-        // Upper bound avoids an infinite loop; callers surface the error on exhaustion.
+        // Upper bound avoids an infinite loop.
         let collisionCounterStart = 2
         let collisionCounterMax = 999
+        // UUID prefix length for the exhaustion fallback — 8 hex chars provide sufficient uniqueness.
+        let uuidPrefixLength = 8
         for counter in collisionCounterStart...collisionCounterMax {
             let candidate = appendSuffix(counter)
             if !fileManager.fileExists(atPath: candidate.path(percentEncoded: false)) {
@@ -187,8 +199,23 @@ nonisolated enum RecordingOutput {
             }
         }
 
-        // Safety valve: return the un-suffixed URL; the caller is responsible for the error.
-        return base
+        // Safety valve: the 2…999 range is exhausted (>998 same-second starts or pre-existing entries).
+        // Fall back to a UUID-derived suffix that is practically guaranteed unique so the caller
+        // always receives an unoccupied path and never overwrites an existing session directory.
+        let uuidSuffix = String(UUID().uuidString.prefix(uuidPrefixLength))
+        let stem = base.deletingPathExtension().lastPathComponent
+        let ext = base.pathExtension
+        let parent = base.deletingLastPathComponent()
+        let fallback: URL = if ext.isEmpty {
+            parent.appending(path: "\(stem) (\(uuidSuffix))", directoryHint: .isDirectory)
+        } else {
+            parent.appending(path: "\(stem) (\(uuidSuffix)).\(ext)", directoryHint: .notDirectory)
+        }
+        // Log only the last path component — it is the session-name segment, not a full user path.
+        recordingOutputLogger.fault(
+            "uniqueSlot range 2…999 exhausted for '\(base.lastPathComponent)'; using UUID fallback"
+        )
+        return fallback
     }
 
     // MARK: - Private helpers

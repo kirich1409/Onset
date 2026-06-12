@@ -73,8 +73,9 @@ nonisolated enum OutputDirectoryNaming {
     ///
     /// The name is built by `sessionDirectoryName(for:)`. If a directory or file with
     /// that name already exists, ` (N)` is appended (starting at 2) via
-    /// `RecordingOutput.uniqueSlot`, which bounds the search at 999 attempts and returns
-    /// the un-suffixed candidate when exhausted.
+    /// `RecordingOutput.uniqueSlot`, which bounds the search at 999 attempts. On range
+    /// exhaustion, `uniqueSlot` falls back to a UUID-derived suffix so the returned URL
+    /// is always free to use — the base candidate is never returned on exhaustion.
     ///
     /// The directory is NOT created by this method — creation is deferred to
     /// `RecordingOutput.ensureDirectory(_:)` at session start.
@@ -82,8 +83,7 @@ nonisolated enum OutputDirectoryNaming {
     /// - Parameters:
     ///   - baseDirectory: The user-selected (or default) base output directory.
     ///   - timestamp: Session-start timestamp.
-    /// - Returns: A directory URL that does not currently exist on disk, or the
-    ///   un-suffixed candidate when the search is exhausted.
+    /// - Returns: A directory URL that does not currently exist on disk.
     nonisolated static func uniqueSessionDirectory(
         in baseDirectory: URL,
         timestamp: Date
@@ -99,10 +99,13 @@ nonisolated enum OutputDirectoryNaming {
 
     // MARK: - Base directory validation
 
-    /// Checks whether `directory` exists and is writable.
+    /// Checks whether `directory` exists as a directory and is writable.
     ///
     /// Used by `MainViewModel` to gate recording start without a silent fallback.
     /// FileManager access is isolated to this pure function so tests can inject any path.
+    ///
+    /// A regular file at the given path is treated as `.doesNotExist` — the path is not
+    /// a usable output directory even though something occupies it on disk.
     ///
     /// - Parameter directory: The base output directory to validate.
     /// - Returns: An `OutputDirectoryValidation` verdict.
@@ -110,7 +113,11 @@ nonisolated enum OutputDirectoryNaming {
         let fileManager = FileManager.default
         let path = directory.path(percentEncoded: false)
 
-        guard fileManager.fileExists(atPath: path) else {
+        var isDir: ObjCBool = false
+        // `fileExists(atPath:isDirectory:)` takes an `UnsafeMutablePointer<ObjCBool>?` — the pointer
+        // is scoped to the call duration and does not escape.
+        guard unsafe fileManager.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue else {
+            // Either the path does not exist, or it exists but is a regular file — not a directory.
             return .doesNotExist
         }
 

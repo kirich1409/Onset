@@ -1241,6 +1241,85 @@ struct RecordingSessionOutputDirectoryTests {
 
         _ = await session.stop()
     }
+
+    /// `start()` must throw `RecordingError.outputDirectoryUnavailable` when the session
+    /// subdirectory cannot be created because the base output directory is read-only.
+    ///
+    /// The test sets the base directory to `chmod 0o555` (no write) so that
+    /// `RecordingOutput.ensureDirectory` fails, then restores permissions in `defer`
+    /// and removes the directory.
+    @Test("start() throws outputDirectoryUnavailable when the base directory is read-only")
+    func start_throwsOutputDirectoryUnavailable_whenBaseIsReadOnly() async throws {
+        // Create a writable base directory, then remove write permission.
+        let base = URL(filePath: NSTemporaryDirectory(), directoryHint: .isDirectory)
+            .appending(path: "OnsetTests-readonly-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer {
+            // Restore so cleanup can remove it.
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: base.path(percentEncoded: false)
+            )
+            try? FileManager.default.removeItem(at: base)
+        }
+
+        // Remove write permission on the base — ensureDirectory on a subdirectory inside will fail.
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555],
+            ofItemAtPath: base.path(percentEncoded: false)
+        )
+
+        let mvp = RecordingConfiguration.mvpDefault
+        let config = RecordingConfiguration(
+            container: mvp.container,
+            codec: mvp.codec,
+            sampleEntry: mvp.sampleEntry,
+            profileLevel: mvp.profileLevel,
+            colorPrimaries: mvp.colorPrimaries,
+            transferFunction: mvp.transferFunction,
+            yCbCrMatrix: mvp.yCbCrMatrix,
+            bitDepth: mvp.bitDepth,
+            maxScreenFps: mvp.maxScreenFps,
+            minCameraFps: mvp.minCameraFps,
+            bitrateTable: mvp.bitrateTable,
+            dataRateLimitsPeakMultiplier: mvp.dataRateLimitsPeakMultiplier,
+            keyFrameIntervalSeconds: mvp.keyFrameIntervalSeconds,
+            allowFrameReordering: mvp.allowFrameReordering,
+            pixelFormatPreference: mvp.pixelFormatPreference,
+            audioSampleRate: mvp.audioSampleRate,
+            audioChannelCount: mvp.audioChannelCount,
+            audioBitrate: mvp.audioBitrate,
+            movieFragmentInterval: mvp.movieFragmentInterval,
+            degradedBackpressureThreshold: mvp.degradedBackpressureThreshold,
+            degradedWindowSeconds: mvp.degradedWindowSeconds,
+            postStopDropWarningThreshold: mvp.postStopDropWarningThreshold,
+            budgetCap: mvp.budgetCap,
+            baseOutputDirectory: base
+        )
+
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(
+            encoders: encoders,
+            writers: writers,
+            sources: sources,
+            probe: probe.callable(),
+            config: config
+        )
+
+        do {
+            try await session.start(permissions: SessionFixtures.fullPermissions())
+            Issue.record("start() must throw when the base directory is not writable")
+        } catch let error as RecordingError {
+            guard case .outputDirectoryUnavailable = error else {
+                Issue.record("expected .outputDirectoryUnavailable, got \(error)")
+                return
+            }
+            // Expected — no assertion needed.
+        }
+    }
 }
 
 // MARK: - L5 gated integration

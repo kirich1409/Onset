@@ -205,4 +205,59 @@ struct OutputDirectoryNamingTests {
         #expect(OutputDirectoryValidation.ok != .notWritable)
         #expect(OutputDirectoryValidation.doesNotExist != .notWritable)
     }
+
+    // MARK: - uniqueSlot exhaustion — UUID fallback
+
+    /// When `appendSuffix` always returns an occupied path, `uniqueSlot` must fall back to a
+    /// UUID-suffixed URL that does not equal `base` and does not exist on disk.
+    ///
+    /// This test drives `RecordingOutput.uniqueSlot` directly, passing a closure that always
+    /// reports the candidate as occupied (by pre-creating it), so the 2…999 range is exhausted
+    /// without actually creating 998 directories.
+    @Test("uniqueSlot falls back to UUID suffix when appendSuffix always yields an occupied path")
+    func uniqueSlot_appendSuffixAlwaysOccupied_returnsUniqueURL() throws {
+        let base = try makeTemporaryBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        // Pre-create the base path so uniqueSlot enters the collision branch.
+        let occupied = base.appending(path: "slot-base", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: occupied, withIntermediateDirectories: true)
+
+        // appendSuffix: each call creates the candidate and returns it — all counters occupied.
+        let result = RecordingOutput.uniqueSlot(base: occupied) { counter in
+            let candidate = base.appending(
+                path: "slot-base (\(counter))",
+                directoryHint: .isDirectory
+            )
+            // Create so fileExists returns true for this counter.
+            try? FileManager.default.createDirectory(at: candidate, withIntermediateDirectories: true)
+            return candidate
+        }
+
+        #expect(result != occupied, "must not return the occupied base on exhaustion")
+        #expect(
+            !FileManager.default.fileExists(atPath: result.path(percentEncoded: false)),
+            "UUID fallback must not yet exist on disk"
+        )
+    }
+
+    // MARK: - Validation — file at path is treated as .doesNotExist
+
+    /// A regular file at the given path must return `.doesNotExist` — a file is not a
+    /// usable output directory even though `fileExists(atPath:)` would return `true`.
+    @Test("validateBaseDirectory returns .doesNotExist when the path is a regular file")
+    func validateBaseDirectory_regularFile_returnsDoesNotExist() throws {
+        let base = try makeTemporaryBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        // Create a regular file (not a directory) at the candidate path.
+        let filePath = base.appending(path: "onset-file-\(UUID().uuidString)")
+        FileManager.default.createFile(
+            atPath: filePath.path(percentEncoded: false),
+            contents: nil
+        )
+
+        let verdict = OutputDirectoryNaming.validateBaseDirectory(filePath)
+        #expect(verdict == .doesNotExist, "a regular file must be treated as .doesNotExist")
+    }
 }

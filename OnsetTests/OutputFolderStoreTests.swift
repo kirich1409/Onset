@@ -13,6 +13,8 @@ import Testing
 /// 4. Overwrite: saving a new URL replaces the previous one.
 /// 5. Empty-string guard: an empty string written externally returns `nil`.
 /// 6. Separate `InMemoryUserDefaults` instances are isolated from each other.
+/// 7. Round-trip with non-ASCII path (Cyrillic + spaces) preserves the path exactly.
+/// 8. Binary data stored under the key is treated as nil.
 ///
 /// Every test goes through `withScopedDefaults` — no `.plist` file is written.
 /// The suite is `@MainActor` because `UserDefaultsOutputFolderStore` methods are
@@ -123,6 +125,45 @@ struct OutputFolderStoreTests {
                 // store2 backed by a different defaults — must see nil.
                 #expect(store2.loadBaseDirectory() == nil)
             }
+        }
+    }
+
+    // MARK: - Test 7: Non-ASCII round-trip (P1)
+
+    /// A URL with a Cyrillic directory name and embedded spaces must survive a
+    /// save/load round-trip unchanged — the store records the raw path string, and
+    /// `URL(filePath:)` must reconstruct the same path without percent-encoding mangling.
+    @Test("round-trip with non-ASCII Cyrillic path preserves the path exactly")
+    func roundTrip_cyrillicPathWithSpaces_preservesPath() async {
+        let cyrillicURL = FileManager.default.temporaryDirectory
+            .appending(path: "Записи/Onset тест", directoryHint: .isDirectory)
+
+        await withScopedDefaults { defaults in
+            let store = self.makeStore(defaults: defaults)
+            store.saveBaseDirectory(cyrillicURL)
+            let loaded = store.loadBaseDirectory()
+            #expect(
+                loaded?.path(percentEncoded: false) == cyrillicURL.path(percentEncoded: false),
+                "Cyrillic path must round-trip without corruption"
+            )
+        }
+    }
+
+    // MARK: - Test 8: Binary data stored under the key returns nil (P3)
+
+    /// If binary `Data` is written under the directory key — simulating a corrupt or
+    /// migrated defaults entry — `loadBaseDirectory` must return `nil` gracefully rather
+    /// than crash or return a meaningless URL.
+    ///
+    /// `UserDefaults.string(forKey:)` returns `nil` for `Data` values (it bridges numeric
+    /// types to strings, but not binary data), so this is the reliable non-string sentinel.
+    @Test("binary data stored under the directory key is treated as nil")
+    func binaryDataUnderKey_treatedAsNil() async {
+        await withScopedDefaults { defaults in
+            // Write raw binary data — `string(forKey:)` returns nil for Data values.
+            defaults.set(Data([0xFF, 0x00, 0xAB]), forKey: OutputFolderKeys.baseDirectory)
+            let store = self.makeStore(defaults: defaults)
+            #expect(store.loadBaseDirectory() == nil, "binary data entry must be treated as no saved value")
         }
     }
 }

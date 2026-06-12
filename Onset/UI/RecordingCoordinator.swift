@@ -319,7 +319,11 @@ final class RecordingCoordinator {
             // on a directory-URL would select the folder inside its parent — `open(_:)` opens
             // the folder's contents instead.
             guard let url = urls.first else { return }
-            NSWorkspace.shared.open(url)
+            let opened = NSWorkspace.shared.open(url)
+            if !opened {
+                // Log only the folder name — not the full path — to avoid logging the user's home directory.
+                coordinatorLogger.error("NSWorkspace.open failed for '\(url.lastPathComponent)'")
+            }
         }
     ) {
         self.sessionFactory = sessionFactory

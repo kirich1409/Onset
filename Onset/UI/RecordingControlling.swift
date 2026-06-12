@@ -52,8 +52,11 @@ nonisolated protocol RecordingControlling: Sendable {
 
     /// The session-scoped output subdirectory.
     ///
-    /// Set in `init` and immutable thereafter; readable before `start()` so the coordinator
-    /// can open the folder in Finder after `stop()` without needing the result's file URLs.
+    /// The URL is valid from `init` — it is computed once at construction time and is
+    /// immutable thereafter. The **directory itself is created lazily** in `start()` via
+    /// `RecordingOutput.ensureDirectory(_:)`; before `start()` returns, the path may not
+    /// yet exist on disk.
+    ///
     /// `nonisolated` because `URL` is a value type and the property is set once at init.
     nonisolated var sessionDirectory: URL { get }
 
