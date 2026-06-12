@@ -84,6 +84,13 @@ final class MainViewModel {
     @ObservationIgnored
     let makeStore: () -> any DeviceSelectionPersisting
 
+    /// Closure seam for output-folder persistence — injectable for tests.
+    ///
+    /// The default closure builds a `UserDefaultsOutputFolderStore` backed by `.standard`.
+    /// Tests inject an `InMemoryUserDefaults`-backed store via `withScopedDefaults`.
+    @ObservationIgnored
+    let makeOutputFolderStore: () -> any OutputFolderPersisting
+
     /// Closure seam for display-configuration-change events — injectable for tests.
     ///
     /// Live default yields `Void` on each `NSApplication.didChangeScreenParametersNotification`.
@@ -161,6 +168,29 @@ final class MainViewModel {
                 store.clearMicrophone()
             }
         }
+    }
+
+    // MARK: - Output folder (#225)
+
+    /// The user-selected base output directory, or `~/Movies/Onset/` when no selection was saved.
+    ///
+    /// UI reads this to display the current path and offer "Show in Finder". The setter persists
+    /// the new path immediately via `makeOutputFolderStore`. Backed by `UserDefaults` (no sandbox,
+    /// no security-scoped bookmark needed — Onset runs as Developer ID / direct distribution).
+    var outputDirectoryURL: URL {
+        didSet {
+            self.makeOutputFolderStore().saveBaseDirectory(self.outputDirectoryURL)
+        }
+    }
+
+    /// Replaces the output folder with `url` and persists the selection.
+    ///
+    /// Called by the UI after a successful `NSOpenPanel` sheet. The path is validated at
+    /// recording start — not here — so this setter is a simple write-through.
+    ///
+    /// - Parameter url: Absolute `URL` to the directory the user chose.
+    func setOutputDirectory(_ url: URL) {
+        self.outputDirectoryURL = url
     }
 
     /// Whether the camera is enabled for recording (#77, #76).
@@ -393,6 +423,9 @@ final class MainViewModel {
         makeStore: @escaping () -> any DeviceSelectionPersisting = {
             UserDefaultsDeviceSelectionStore()
         },
+        makeOutputFolderStore: @escaping () -> any OutputFolderPersisting = {
+            UserDefaultsOutputFolderStore()
+        },
         screenChangeEvents: @escaping () -> AsyncStream<Void> = {
             // Bridges didChangeScreenParametersNotification as a Void signal.
             // Async-sequence form avoids a non-Sendable observer token in @Sendable closure.
@@ -416,6 +449,16 @@ final class MainViewModel {
         self.makeDeviceChangeStream = makeDeviceChangeStream
         self.makeCameraSource = makeCameraSource
         self.makeStore = makeStore
+        self.makeOutputFolderStore = makeOutputFolderStore
         self.screenChangeEvents = screenChangeEvents
+
+        // Restore the persisted base directory, falling back to ~/Movies/Onset/.
+        // `NSHomeDirectory()` avoids `FileManager.default.urls(for:in:)` which is
+        // `@MainActor`-isolated under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`
+        // (same workaround as `RecordingConfiguration.makeMVPDefault()`).
+        let defaultDirectory = URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory)
+            .appending(path: "Movies", directoryHint: .isDirectory)
+            .appending(path: "Onset", directoryHint: .isDirectory)
+        self.outputDirectoryURL = makeOutputFolderStore().loadBaseDirectory() ?? defaultDirectory
     }
 }

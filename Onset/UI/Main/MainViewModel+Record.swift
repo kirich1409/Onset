@@ -14,6 +14,7 @@ extension MainViewModel {
         self.recordError = nil
 
         guard self.validateRecordGuards() else { return }
+        guard self.validateOutputDirectory() else { return }
         guard let display = self.validateDisplaySelection() else { return }
 
         let resolvedCameraFormat: CameraFormat?
@@ -24,6 +25,30 @@ extension MainViewModel {
         }
 
         await self.startRecording(display: display, cameraFormat: resolvedCameraFormat)
+    }
+
+    /// Validates the output directory. Returns `true` when recording may proceed,
+    /// `false` when `recordError` has been set and start must be aborted.
+    ///
+    /// A missing or non-writable base directory is a hard stop: there is no silent fallback.
+    /// Placing this check after `validateRecordGuards()` but before heavy work (display/camera
+    /// resolution) keeps the fast-path cheap and the error visible before any device contention.
+    func validateOutputDirectory() -> Bool {
+        let verdict = OutputDirectoryNaming.validateBaseDirectory(self.outputDirectoryURL)
+        switch verdict {
+        case .ok:
+            return true
+
+        case .doesNotExist:
+            self.recordError = "Папка для записи не существует. Выберите другую папку."
+            mainViewModelLogger.error("Output directory does not exist")
+            return false
+
+        case .notWritable:
+            self.recordError = "Нет доступа к папке для записи. Выберите другую папку."
+            mainViewModelLogger.error("Output directory is not writable")
+            return false
+        }
     }
 
     /// Validates AC-2 guards. Returns `true` when recording may proceed, `false` if an error was set.
@@ -75,10 +100,12 @@ extension MainViewModel {
 
     /// Stops preview, builds the request, and calls `coordinator.start`.
     func startRecording(display: Display, cameraFormat: CameraFormat?) async {
+        // Build config with the user-selected (or default) base output directory (#225).
+        let config = RecordingConfiguration.makeMVPDefault(baseDirectory: self.outputDirectoryURL)
         let plan = CapabilityResolver.resolveStartProfile(
             display: display,
             cameraFormat: cameraFormat,
-            config: .mvpDefault
+            config: config
         )
 
         // Stop preview source before starting recording (device contention)
@@ -96,7 +123,8 @@ extension MainViewModel {
             micDevice: self.selectedMic,
             permissions: self.permissions.effectivePermissions,
             checklist: self.buildChecklist(display: display),
-            origin: .main
+            origin: .main,
+            config: config
         )
 
         do {

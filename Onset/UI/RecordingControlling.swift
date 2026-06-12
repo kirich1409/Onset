@@ -50,6 +50,13 @@ nonisolated protocol RecordingControlling: Sendable {
     /// **Single-consumer.** The coordinator is the ONLY iterator.
     nonisolated var captureActiveStream: AsyncStream<Void> { get }
 
+    /// The session-scoped output subdirectory.
+    ///
+    /// Set in `init` and immutable thereafter; readable before `start()` so the coordinator
+    /// can open the folder in Finder after `stop()` without needing the result's file URLs.
+    /// `nonisolated` because `URL` is a value type and the property is set once at init.
+    nonisolated var sessionDirectory: URL { get }
+
     /// Starts the session. Throws `RecordingError` on the AC-6 / AC-11 blocking paths. Never throws
     /// `.budgetExceeded` — the session self-adopts the reduced profile (research §3.1).
     func start(permissions: EffectivePermissions) async throws

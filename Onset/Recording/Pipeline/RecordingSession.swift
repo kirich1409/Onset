@@ -102,6 +102,18 @@ actor RecordingSession {
     private let micDevice: MicrophoneDevice?
     private let config: RecordingConfiguration
 
+    // MARK: - Session directory
+
+    /// The session-scoped subdirectory where both output files are written.
+    ///
+    /// Computed once in `init` from `config.outputDirectory` + session-start timestamp so
+    /// both pipelines share the same parent directory. Unique-collision-avoidance (` (N)` suffix)
+    /// is applied at the **directory** level here; individual file names inside are stable.
+    /// The directory is created lazily in `start()` after capability checks pass.
+    ///
+    /// `nonisolated` because `URL` is a value type and the property is set once in `init`.
+    nonisolated let sessionDirectory: URL
+
     // MARK: - Seams
 
     private let probe: @Sendable () -> ProbeResult
@@ -189,6 +201,15 @@ actor RecordingSession {
         // value so screen and camera files always share an identical timestamp segment (#198).
         let startDate = Date()
 
+        // Compute the session subdirectory from the base output directory and the start timestamp.
+        // Collision avoidance (` (N)` suffix) is applied at the directory level so both files
+        // inside the folder carry stable, unsuffixed names (#225).
+        let sessionDir = OutputDirectoryNaming.uniqueSessionDirectory(
+            in: config.outputDirectory,
+            timestamp: startDate
+        )
+        self.sessionDirectory = sessionDir
+
         // UI state stream + its continuation, created here so a subscriber can iterate before
         // start() builds the DropMonitor whose transitions are forwarded into this continuation.
         let (stateStream, stateContinuation) = AsyncStream.makeStream(of: RecordingState.self)
@@ -215,11 +236,11 @@ actor RecordingSession {
         // Default live probe: classify against the resolved display + camera format.
         self.probe = probe ?? { CapabilityProbe.probe(display: display, cameraFormat: cameraFormat, config: config) }
 
-        // Default live writer factory: place both files in the configured output directory.
-        // Both kinds close over `startDate` — not a fresh Date() per call — so the pair of files
-        // for one session is guaranteed to share the same timestamp component (#198).
+        // Default live writer factory: place both files in the session subdirectory (#225).
+        // Both kinds close over `startDate` and `sessionDir` — not a fresh Date() / new URL per
+        // call — so the pair of files for one session shares the same timestamp and parent folder.
         self.writerFactory = writerFactory ?? LiveWriterFactory(configuration: config) { kind in
-            RecordingSession.defaultOutputURL(for: kind, config: config, date: startDate)
+            RecordingSession.defaultOutputURL(for: kind, in: sessionDir, date: startDate)
         }
     }
 
@@ -257,14 +278,21 @@ actor RecordingSession {
         try self.runCapabilityPreflight() // 1. AC-6
         let startPlan = try self.resolvePlan(permissions: permissions) // 2. AC-11
 
-        // Ensure the output directory exists before any FileWriter is constructed.
+        // Create the session subdirectory before any FileWriter is constructed (#225).
         // Placed after resolvePlan so the directory is only created when recording will
         // actually proceed, and before the T0 anchor capture so filesystem I/O does not
         // perturb the timing-critical window.
+        // The directory name (not its full path) is safe to log — it contains only the
+        // session timestamp, never the user's home path (issue #188).
         do {
-            try RecordingOutput.ensureDirectory(self.config.outputDirectory)
+            try RecordingOutput.ensureDirectory(self.sessionDirectory)
+            self.logger.info(
+                "Session directory created: \(self.sessionDirectory.lastPathComponent)"
+            )
         } catch {
-            self.logger.error("Output directory unavailable: \(self.config.outputDirectory.path) — \(error)")
+            self.logger.error(
+                "Session directory unavailable: \(self.sessionDirectory.lastPathComponent) — \(error)"
+            )
             throw RecordingError.outputDirectoryUnavailable(error)
         }
 
@@ -852,14 +880,19 @@ actor RecordingSession {
 
     // MARK: - Default output URL
 
-    /// Builds the default output URL for a pipeline under the configured output directory.
+    /// Builds the default output URL for a pipeline inside the given session directory.
     ///
-    /// Delegates to `RecordingOutput.uniqueOutputURL` for spec-compliant naming (§135) and
-    /// collision avoidance. The `date` parameter is the session-start timestamp shared by
-    /// both pipelines in the same session so screen and camera files carry identical timestamps.
+    /// Delegates to `RecordingOutput.uniqueOutputURL` for spec-compliant naming (§135).
+    /// File-level collision avoidance is inherited from `uniqueOutputURL`; directory-level
+    /// collision avoidance is handled at the `sessionDirectory` level in `init` (#225).
+    ///
+    /// - Parameters:
+    ///   - kind: Which pipeline this file belongs to (selects screen vs camera suffix).
+    ///   - sessionDirectory: The session-scoped subdirectory (computed in `init`).
+    ///   - date: Session-start timestamp shared by both pipelines in the same session (#198).
     private static func defaultOutputURL(
         for kind: RecordingPipelineKind,
-        config: RecordingConfiguration,
+        in sessionDirectory: URL,
         date: Date
     )
     -> URL {
@@ -868,7 +901,7 @@ actor RecordingSession {
         case .camera: .camera
         }
         return RecordingOutput.uniqueOutputURL(
-            in: config.outputDirectory,
+            in: sessionDirectory,
             timestamp: date,
             kind: fileKind
         )

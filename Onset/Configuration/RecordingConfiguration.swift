@@ -244,22 +244,26 @@ nonisolated struct RecordingConfiguration {
 
     // MARK: - Private factory
 
-    /// Builds the canonical MVP default value.
+    /// Builds the canonical MVP default value with an optional custom base output directory.
     ///
     /// Extracted into a named `nonisolated static func` so that the function body is
     /// explicitly `nonisolated`. Under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` +
     /// `NonisolatedNonsendingByDefault`, a closure literal assigned to a `nonisolated static let`
     /// is still inferred as `@MainActor`-isolated, causing a compile error. A named function
     /// carries its `nonisolated` annotation unambiguously through the type-checker.
-    nonisolated private static func makeMVPDefault() -> Self {
+    ///
+    /// - Parameter baseDirectory: The user-selected base output directory. When `nil`,
+    ///   `~/Movies/Onset/` is used as the default.
+    nonisolated static func makeMVPDefault(baseDirectory: URL? = nil) -> Self {
         // `NSHomeDirectory()` is a plain Foundation free function with no actor isolation,
         // so it is safe to call from this `nonisolated` context.
         // `FileManager.default.urls(for:in:)` is `@MainActor`-isolated under these compiler
         // flags and therefore cannot be called here. The home-directory path is stable for
         // the lifetime of the process and does not require FileManager.
-        let outputDirectory = URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory)
+        let defaultDirectory = URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory)
             .appending(path: "Movies", directoryHint: .isDirectory)
             .appending(path: "Onset", directoryHint: .isDirectory)
+        let outputDirectory = baseDirectory ?? defaultDirectory
 
         let bitrateTable: [(key: BitrateKey, value: Int)] = [
             (key: BitrateKey(width: 3840, height: 2160, fps: 60), value: 60_000_000),
