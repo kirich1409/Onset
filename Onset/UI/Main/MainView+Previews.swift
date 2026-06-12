@@ -217,4 +217,26 @@ import SwiftUI
         model.cameraEnabled = false
         return MainView(model: model) {}
     }
+
+    #Preview("Output folder — custom path") {
+        let display = Display(
+            displayID: 1,
+            name: "Встроенный дисплей",
+            pixelWidth: 1920,
+            pixelHeight: 1080,
+            refreshHz: 60
+        )
+        let mic = MicrophoneDevice(uniqueID: "mic-1")
+        let model = makePreviewModel(
+            screen: .authorized,
+            camera: .notDetermined,
+            microphone: .authorized,
+            displays: [display],
+            microphones: [mic]
+        )
+        // Override the default output directory so the row shows a non-default path.
+        let customURL = URL(filePath: NSHomeDirectory() + "/Desktop/Recordings", directoryHint: .isDirectory)
+        model.setOutputDirectory(customURL)
+        return MainView(model: model) {}
+    }
 #endif

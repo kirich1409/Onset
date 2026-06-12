@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import SwiftUI
 
@@ -101,6 +102,17 @@ extension MainView {
                 .pickerStyle(.menu)
                 .labelsHidden()
                 .accessibilityLabel("Выберите микрофон")
+            }
+        }
+    }
+
+    // MARK: - Output section
+
+    /// Output folder selection row — issue #225.
+    var outputSection: some View {
+        SectionCard(title: "ВЫВОД") {
+            OutputFolderRow(folderURL: self.model.outputDirectoryURL) {
+                self.model.setOutputDirectory($0)
             }
         }
     }
@@ -238,5 +250,83 @@ private struct MicrophoneUnavailableRow: View {
                 .foregroundStyle(.secondary)
         }
         .accessibilityLabel("Микрофон недоступен. Запись будет вестись без звука.")
+    }
+}
+
+// MARK: - OutputFolderRow
+
+/// A single row in the output section showing the current base output directory and a «Выбрать…»
+/// button that opens `NSOpenPanel`. Issue #225.
+///
+/// Displays the path abbreviated with a tilde so long `/Users/…` paths stay readable.
+/// The `NSOpenPanel` sheet is presented as a child of the key window so it behaves as a
+/// document-modal sheet on macOS and does not block other app windows.
+private struct OutputFolderRow: View {
+    /// The currently selected base output directory.
+    let folderURL: URL
+    /// Called with the URL the user picked in `NSOpenPanel`. Never called on cancellation.
+    let onChoose: (URL) -> Void
+
+    var body: some View {
+        HStack(spacing: MainView.Metrics.accessorySpacing) {
+            Image(systemName: "folder")
+                .frame(width: MainView.Metrics.iconColumnWidth)
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            Text(self.abbreviatedPath)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .accessibilityLabel("Папка: \(self.abbreviatedPath)")
+            Spacer(minLength: 0)
+            Button("Выбрать…") {
+                self.openPanel()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .accessibilityLabel("Выбрать папку для сохранения")
+        }
+    }
+
+    /// The folder path with `$HOME` collapsed to `~` for display.
+    ///
+    /// Replaces the home directory prefix with `~` — equivalent to `NSString.abbreviatingWithTildeInPath`
+    /// but avoids bridging to the Objective-C reference type, which SwiftLint flags as `legacy_objc_type`.
+    private var abbreviatedPath: String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let path = self.folderURL.path
+        if path.hasPrefix(home) {
+            return "~" + String(path.dropFirst(home.count))
+        }
+        return path
+    }
+
+    /// Opens a directory-picker `NSOpenPanel` as a child of the key window.
+    ///
+    /// `canCreateDirectories` is `true` so the user can create a new folder inline without
+    /// leaving the dialog. `canChooseFiles` is `false` — only directories are valid targets.
+    private func openPanel() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = self.folderURL
+        panel.prompt = "Выбрать"
+        panel.message = "Выберите папку для сохранения записей"
+
+        guard let window = NSApp.keyWindow else {
+            // Fallback: run modally if there is no key window (should not happen in practice).
+            if panel.runModal() == .OK, let url = panel.url {
+                self.onChoose(url)
+            }
+            return
+        }
+
+        panel.beginSheetModal(for: window) { response in
+            if response == .OK, let url = panel.url {
+                self.onChoose(url)
+            }
+        }
     }
 }

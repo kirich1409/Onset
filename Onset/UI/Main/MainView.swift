@@ -211,6 +211,7 @@ struct MainView: View {
                     self.screenSection
                     self.cameraSection
                     self.microphoneSection
+                    self.outputSection
                 }
                 .padding(.horizontal, Metrics.outerPaddingH)
                 .padding(.vertical, Metrics.outerPaddingV)
