@@ -315,8 +315,11 @@ final class RecordingCoordinator {
         },
         activationTimeoutSeconds: Double = 30,
         revealInFinder: @escaping ([URL]) -> Void = { urls in
-            guard !urls.isEmpty else { return }
-            NSWorkspace.shared.activateFileViewerSelecting(urls)
+            // Open the session folder itself in Finder (AC-9 #225): `activateFileViewerSelecting`
+            // on a directory-URL would select the folder inside its parent — `open(_:)` opens
+            // the folder's contents instead.
+            guard let url = urls.first else { return }
+            NSWorkspace.shared.open(url)
         }
     ) {
         self.sessionFactory = sessionFactory

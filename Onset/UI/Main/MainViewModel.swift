@@ -39,6 +39,7 @@ nonisolated let mainViewModelLogger = Logger(
 /// `RecordingSession` has no screen-skip branch. Screen capture is mandatory in MVP.
 @Observable
 @MainActor
+// swiftlint:disable:next type_body_length
 final class MainViewModel {
     // MARK: - Injectable seams
 
@@ -90,6 +91,9 @@ final class MainViewModel {
     /// Tests inject an `InMemoryUserDefaults`-backed store via `withScopedDefaults`.
     @ObservationIgnored
     let makeOutputFolderStore: () -> any OutputFolderPersisting
+
+    @ObservationIgnored
+    private let outputFolderStore: any OutputFolderPersisting
 
     /// Closure seam for display-configuration-change events — injectable for tests.
     ///
@@ -179,7 +183,7 @@ final class MainViewModel {
     /// no security-scoped bookmark needed — Onset runs as Developer ID / direct distribution).
     var outputDirectoryURL: URL {
         didSet {
-            self.makeOutputFolderStore().saveBaseDirectory(self.outputDirectoryURL)
+            self.outputFolderStore.saveBaseDirectory(self.outputDirectoryURL)
         }
     }
 
@@ -452,6 +456,9 @@ final class MainViewModel {
         self.makeOutputFolderStore = makeOutputFolderStore
         self.screenChangeEvents = screenChangeEvents
 
+        // Create the store once; the same instance is reused in outputDirectoryURL.didSet.
+        self.outputFolderStore = makeOutputFolderStore()
+
         // Restore the persisted base directory, falling back to ~/Movies/Onset/.
         // `NSHomeDirectory()` avoids `FileManager.default.urls(for:in:)` which is
         // `@MainActor`-isolated under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`
@@ -459,6 +466,6 @@ final class MainViewModel {
         let defaultDirectory = URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory)
             .appending(path: "Movies", directoryHint: .isDirectory)
             .appending(path: "Onset", directoryHint: .isDirectory)
-        self.outputDirectoryURL = makeOutputFolderStore().loadBaseDirectory() ?? defaultDirectory
+        self.outputDirectoryURL = self.outputFolderStore.loadBaseDirectory() ?? defaultDirectory
     }
 }
