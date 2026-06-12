@@ -194,7 +194,7 @@ import SwiftUI
             .dynamicTypeSize(.accessibility5)
     }
 
-    #Preview("Camera toggle off — picker and preview hidden") {
+    #Preview("Camera — Выключена (picker top item selected)") {
         let display = Display(
             displayID: 1,
             name: "Встроенный дисплей",
@@ -214,7 +214,33 @@ import SwiftUI
             cameras: [camera],
             microphones: [mic]
         )
-        model.cameraEnabled = false
+        // Set picker to "Выключена" (nil selection) — no preview should appear.
+        model.cameraPickerSelection = nil
+        return MainView(model: model) {}
+    }
+
+    #Preview("Camera — device selected, preview visible") {
+        let display = Display(
+            displayID: 1,
+            name: "Встроенный дисплей",
+            pixelWidth: 1920,
+            pixelHeight: 1080,
+            refreshHz: 60
+        )
+        let camera = CameraDevice(uniqueID: "camera-1", formats: [
+            CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30, maxFps: 60),
+        ])
+        let mic = MicrophoneDevice(uniqueID: "mic-1")
+        let model = makePreviewModel(
+            screen: .authorized,
+            camera: .authorized,
+            microphone: .authorized,
+            displays: [display],
+            cameras: [camera],
+            microphones: [mic]
+        )
+        // Picker shows the device; preview placeholder would appear in a real session.
+        model.cameraPickerSelection = "camera-1"
         return MainView(model: model) {}
     }
 

@@ -19,47 +19,62 @@ extension MainView {
 
     // MARK: - Camera section
 
+    /// Camera section — device picker plus optional live preview.
+    ///
+    /// The toggle from the original design has been removed (#224): the first row is
+    /// the "Устройство" picker whose top item is "Выключена". Selecting any device
+    /// enables the camera; selecting "Выключена" disables it. The preview appears only
+    /// when a device is selected (`isCameraActive`). The denied TCC branch is preserved
+    /// via `cameraPickerOrDenied` and is always visible (no outer enable-gate).
     var cameraSection: some View {
         SectionCard(title: "КАМЕРА") {
             VStack(alignment: .leading, spacing: Metrics.rowSpacing) {
-                Toggle("Камера", isOn: self.$model.cameraEnabled)
-                    .toggleStyle(.switch)
-                    .accessibilityLabel("Камера")
-                // Gate on cameraEnabled (not isCameraActive) so the picker/denied rows
-                // remain visible when the toggle is on but no camera is available yet —
-                // that is when "Камеры не найдены" must render. isCameraActive is nil in
-                // that state, so using it here would hide the not-found row.
-                if self.model.cameraEnabled {
-                    self.cameraPickerOrDenied
-                    self.cameraPreview
-                }
+                self.cameraPickerOrDenied
+                self.cameraPreview
             }
         }
     }
 
+    /// Shows either the TCC-denied row or the device picker with an "Выключена" top item.
+    ///
+    /// Layout matches the reference design and neighbouring section rows (Дисплей, Микрофон):
+    /// a "Устройство" label on the left and the menu picker on the right. The label is
+    /// rendered as a plain `Text` inside an `HStack` so it respects the section's horizontal
+    /// rhythm without requiring a `Form` context (consistent with `OutputFolderRow`).
+    ///
+    /// The "Камеры не найдены" case is embedded inside the picker branch: when `cameras`
+    /// is empty the picker renders only the "Выключена" row, which is the correct UX
+    /// (camera is effectively off and there is nothing to enable).
     @ViewBuilder
     private var cameraPickerOrDenied: some View {
         if self.model.isCameraDenied {
             CameraDeniedRow(onReturnToOnboarding: self.onReturnToOnboarding)
-        } else if self.model.cameras.isEmpty {
-            Text("Камеры не найдены")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
         } else {
-            Picker("Камера", selection: self.$model.selectedCameraID) {
-                ForEach(self.model.cameras, id: \.uniqueID) { camera in
-                    Text(self.model.cameraLabel(for: camera))
-                        .tag(Optional(camera.uniqueID))
+            HStack {
+                Text("Устройство")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Picker("Устройство", selection: self.$model.cameraPickerSelection) {
+                    Text("Выключена").tag(String?.none)
+                    ForEach(self.model.cameras, id: \.uniqueID) { camera in
+                        Text(self.model.cameraLabel(for: camera))
+                            .tag(Optional(camera.uniqueID))
+                    }
                 }
+                .pickerStyle(.menu)
+                .labelsHidden()
             }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .accessibilityLabel("Выберите камеру")
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Устройство камеры")
         }
     }
 
     @ViewBuilder
     private var cameraPreview: some View {
+        // Show the preview only while an actual device is active; "Выключена" hides it.
+        // `isCameraActive` is true iff cameraEnabled AND selectedCameraID is non-nil,
+        // which is exactly the condition `cameraPickerSelection != nil` expresses via the VM.
         if self.model.isCameraActive {
             CameraPreviewRepresentable(sessionHandle: self.model.previewHandle)
                 .id(self.model.previewGeneration)

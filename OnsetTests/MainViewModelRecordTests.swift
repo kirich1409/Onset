@@ -49,6 +49,13 @@ struct MainViewModelRecordTests {
     /// `startBehavior` replaces `coordinator.start(_:)` so tests exercise the dispatch path
     /// without starting a real `RecordingSession`. `loadDevices()` is called so device lists
     /// and auto-selections match what the live app sees on first appear.
+    ///
+    /// Both persistence stores are backed by a per-SUT `InMemoryUserDefaults` so tests never
+    /// touch the real `~/Library/Preferences/` domain. Without this, the output-directory
+    /// tests persisted `/tmp/onset-nonexistent-…` into the shared standard defaults, which
+    /// every later `MainViewModel.init` read back — `record()` then failed its directory
+    /// validation before reaching `startBehavior`, breaking the valid-path tests and
+    /// deadlocking the re-entrancy test (it awaits a signal yielded inside `startBehavior`).
     private func makeSUT(
         screen: PermissionStatus = .authorized,
         camera: PermissionStatus = .notDetermined,
@@ -61,12 +68,15 @@ struct MainViewModelRecordTests {
         -> MainViewModel
     { // swiftlint:disable:this opening_brace
         let perms = FakePermissionsService(screen: screen, camera: camera, microphone: microphone)
+        let defaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: perms,
             coordinator: RecordingCoordinator(),
             discoverDisplays: { _ in displays },
             discoverCameras: { _ in cameras },
-            discoverMicrophones: { _ in microphones }
+            discoverMicrophones: { _ in microphones },
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) },
+            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: defaults) }
         )
         sut.startSessionOverride = startBehavior
         await sut.loadDevices()
