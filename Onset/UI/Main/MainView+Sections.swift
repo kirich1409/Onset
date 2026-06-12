@@ -45,29 +45,20 @@ extension MainView {
     ///
     /// Branch priority (top-to-bottom wins):
     /// 1. TCC denied → `CameraDeniedRow`.
-    /// 2. Disconnected notice (`disconnectedCameraName != nil`) — shown regardless of whether
-    ///    `cameras` is empty, because the user needs to see the explanation. `CameraUnavailableRow`
-    ///    appends a "выберите другую камеру" hint only when alternatives are available.
-    /// 3. No cameras found AND no disconnected notice → non-interactive "Камеры не найдены" text,
+    /// 2. Cameras available → device picker. When a disconnected notice is also present
+    ///    (`disconnectedCameraName != nil`), `CameraUnavailableRow(hasAlternatives: true)` is
+    ///    appended below the picker so the user can immediately select a replacement device.
+    /// 3. No cameras AND disconnected notice → `CameraUnavailableRow(hasAlternatives: false)`
+    ///    (no picker because there is nothing to pick from).
+    /// 4. No cameras AND no disconnected notice → non-interactive "Камеры не найдены" text,
     ///    parallel to the microphone section's empty state.
-    /// 4. Normal — device picker with "Выключена" top item.
     @ViewBuilder
     private var cameraPickerOrDenied: some View {
         if self.model.isCameraDenied {
             CameraDeniedRow(onReturnToOnboarding: self.onReturnToOnboarding)
-        } else if let name = self.model.disconnectedCameraName {
-            // Disconnected takes priority over the empty-list branch: always show the notice
-            // so the user understands why the camera they had selected is gone.
-            CameraUnavailableRow(
-                cameraName: name,
-                hasAlternatives: !self.model.cameras.isEmpty
-            )
-        } else if self.model.cameras.isEmpty {
-            Text("Камеры не найдены")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .accessibilityLabel("Камеры не найдены")
-        } else {
+        } else if !self.model.cameras.isEmpty {
+            // Picker is always shown when alternatives exist — even in the disconnected state
+            // so the user can immediately choose a replacement device.
             HStack {
                 Text("Устройство")
                     .font(.subheadline)
@@ -84,6 +75,20 @@ extension MainView {
                 .labelsHidden()
                 .accessibilityLabel("Устройство камеры")
             }
+            if let name = self.model.disconnectedCameraName {
+                // Supplementary notice below the picker: explains why the previously
+                // selected camera is no longer in the list. hasAlternatives = true because
+                // the picker above contains at least one device to switch to.
+                CameraUnavailableRow(cameraName: name, hasAlternatives: true)
+            }
+        } else if let name = self.model.disconnectedCameraName {
+            // No alternatives — only the unavailability notice, without a picker.
+            CameraUnavailableRow(cameraName: name, hasAlternatives: false)
+        } else {
+            Text("Камеры не найдены")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Камеры не найдены")
         }
     }
 

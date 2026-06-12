@@ -318,6 +318,23 @@ struct MainViewModelCameraToggleTests {
         }
     }
 
+    @Test("Setting cameraPickerSelection to nil from disconnected state clears disconnectedCameraName")
+    func setCameraPickerSelection_nil_fromDisconnected_clearsNotice() async {
+        let cam = Self.makeCamera(id: "cam-1")
+        let sut = self.makeSUT(cameras: [cam])
+        await sut.loadDevices()
+
+        // Simulate disconnected state: camera enabled but no matching device.
+        sut.cameraEnabled = true
+        sut.disconnectedCameraName = "Logitech MX Brio"
+
+        // Explicit "Выключена" selection must clear the stale notice.
+        sut.cameraPickerSelection = nil
+
+        #expect(sut.cameraEnabled == false)
+        #expect(sut.disconnectedCameraName == nil)
+    }
+
     // MARK: - cameraPickerSelection setter — select device from disabled state
 
     @Test("Setting cameraPickerSelection to a device ID from disabled state enables camera")

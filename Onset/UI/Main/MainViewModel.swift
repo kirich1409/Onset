@@ -263,7 +263,10 @@ final class MainViewModel {
             } else {
                 // nil: disable the camera. selectedCameraID is intentionally preserved
                 // so re-enabling via cameraEnabled = true restores the prior selection.
+                // Clear any stale disconnected notice — explicit "Выключена" selection
+                // removes the warning that belongs to the involuntary-disconnect flow.
                 self.cameraEnabled = false
+                self.disconnectedCameraName = nil
             }
         }
     }

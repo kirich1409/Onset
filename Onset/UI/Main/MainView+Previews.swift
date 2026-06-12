@@ -261,15 +261,21 @@ import SwiftUI
         MainView(model: makeCameraPreviewModel(pickerSelection: "camera-1")) {}
     }
 
-    #Preview("Camera — disconnected (device unplugged while enabled)") {
-        // cameraEnabled=true, selectedCameraID=nil, disconnectedCameraName set.
-        // The CameraUnavailableRow should appear below the picker.
+    #Preview("Camera — disconnected, no alternatives") {
+        // cameras=[], disconnectedCameraName set: only CameraUnavailableRow(hasAlternatives: false)
+        // is shown; no picker because there are no devices to pick from.
         MainView(model: makeDisconnectedCameraPreviewModel()) {}
     }
 
-    #Preview("Camera — disconnected, accessibility5 (longest row)") {
-        // Uses the "with alternative" variant so the "выберите другую камеру" suffix is shown —
-        // this produces the longest possible CameraUnavailableRow label for Dynamic Type stress-test.
+    #Preview("Camera — disconnected, alternative available") {
+        // cameras=[alternativeCamera], disconnectedCameraName set: picker is shown first,
+        // CameraUnavailableRow(hasAlternatives: true) appears below — user can pick immediately.
+        MainView(model: makeDisconnectedCameraPreviewModel(withAlternative: true)) {}
+    }
+
+    #Preview("Camera — disconnected, alternative available, accessibility5") {
+        // Same as above with largest Dynamic Type — stress-tests the longest CameraUnavailableRow
+        // label ("…выберите другую камеру") alongside the picker row.
         MainView(model: makeDisconnectedCameraPreviewModel(withAlternative: true)) {}
             .dynamicTypeSize(.accessibility5)
     }

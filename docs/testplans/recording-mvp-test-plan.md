@@ -198,17 +198,17 @@ platform: [desktop]
 | Platform | Apple Silicon, macOS 26.x |
 | Source | Spec §AC-9; `RecordingCoordinatorTests.swift` |
 
-#### REC-TC-33 — MainViewModel: переключатель камеры исключает камеру из записи [unit]
+#### REC-TC-33 — MainViewModel: пикер камеры исключает камеру из записи [unit]
 | | |
 |---|---|
 | Priority | P1 |
 | Type | unit |
 | AC ref | AC-2, AC-11 |
-| Preconditions | `FakePermissionsService`, `FakeRecordingControlling`; камера доступна |
-| Steps | (а) `cameraEnabled = false` → `isCameraActive == false`; `activeCamera == nil`; `resolveCameraFormat()` возвращает `nil`; `buildChecklist` не содержит строку камеры. (б) `cameraEnabled = true` при ненулевом `selectedCamera` → `isCameraActive == true`; `activeCamera != nil`. (в) `canRecord` НЕ изменяется при обоих состояниях переключателя (экран обязателен; камера опциональна). (г) Цикл off→on: `cameraEnabled = false`, затем `= true` → `selectFirstCameraIfNeeded()` вызван, `selectedCamera` восстановлен. (д) `cameraEnabled = false` не очищает `selectedCameraID` (исчезновение камеры из пикера — маскировка, не сброс). |
-| Expected Result | Отключённая камера полностью исключается из `RecordingRequest`; `canRecord` не зависит от переключателя; повторное включение восстанавливает выбор |
+| Preconditions | `FakePermissionsService`; камера доступна |
+| Steps | (а) `cameraPickerSelection = nil` («Выключена») → `isCameraActive == false`; `activeCamera == nil`; `resolveCameraFormat()` возвращает `nil`; `buildChecklist` не содержит строку камеры. (б) `cameraPickerSelection = <uniqueID>` → `isCameraActive == true`; `activeCamera != nil`. (в) `canRecord` НЕ изменяется при обоих значениях пикера (экран обязателен; камера опциональна). (г) Цикл «Выключена»→устройство: `cameraPickerSelection = nil`, затем `= <uniqueID>` → `selectedCameraID` соответствует выбранному устройству. (д) `cameraPickerSelection = nil` не очищает `selectedCameraID` (сохранение выбора для восстановления при повторном включении). (е) `cameraPickerSelection = nil` из disconnected-состояния → `disconnectedCameraName == nil` (явное выключение снимает stale-уведомление). |
+| Expected Result | Выключенная камера полностью исключается из `RecordingRequest`; `canRecord` не зависит от пикера; повторное включение восстанавливает выбор; stale-уведомление сбрасывается при явном выключении |
 | Platform | Apple Silicon, macOS 26.x |
-| Source | `MainViewModelCameraToggleTests.swift` (покрывает все sub-кейсы); `MainViewModel.swift` — `activeCamera`, `isCameraActive`, `cameraEnabled.didSet` |
+| Source | `MainViewModelCameraToggleTests.swift` (покрывает все sub-кейсы); `MainViewModel.swift` — `activeCamera`, `isCameraActive`, `cameraPickerSelection` |
 
 #### REC-TC-34 — DisplayLabelMapper: два разных формата для пикера и HUD [unit]
 | | |
