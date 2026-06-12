@@ -37,10 +37,10 @@ extension MainView {
 
     /// Shows either the TCC-denied row or the device picker with an "Выключена" top item.
     ///
-    /// Layout matches the reference design and neighbouring section rows (Дисплей, Микрофон):
-    /// a "Устройство" label on the left and the menu picker on the right. The label is
-    /// rendered as a plain `Text` inside an `HStack` so it respects the section's horizontal
-    /// rhythm without requiring a `Form` context (consistent with `OutputFolderRow`).
+    /// Layout matches the reference design: a "Устройство" label on the left and the menu
+    /// picker on the right. The label is rendered as a plain `Text` inside an `HStack` so it
+    /// respects the section's horizontal rhythm without requiring a `Form` context (consistent
+    /// with `OutputFolderRow`).
     ///
     /// The "Камеры не найдены" case is embedded inside the picker branch: when `cameras`
     /// is empty the picker renders only the "Выключена" row, which is the correct UX
@@ -71,9 +71,9 @@ extension MainView {
 
     @ViewBuilder
     private var cameraPreview: some View {
-        // Show the preview only while an actual device is active; "Выключена" hides it.
-        // `isCameraActive` is true iff cameraEnabled AND selectedCameraID is non-nil,
-        // which is exactly the condition `cameraPickerSelection != nil` expresses via the VM.
+        // Show the preview only when a device is selected; "Выключена" (nil picker) hides it.
+        // `isCameraActive` reflects whether the picker has a concrete device selected, surfaced
+        // via the VM's `isCameraActive` predicate.
         if self.model.isCameraActive {
             CameraPreviewRepresentable(sessionHandle: self.model.previewHandle)
                 .id(self.model.previewGeneration)

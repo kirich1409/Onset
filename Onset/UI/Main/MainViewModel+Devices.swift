@@ -1,3 +1,4 @@
+import AVFoundation
 import os
 
 // MARK: - Constants
@@ -103,6 +104,13 @@ extension MainViewModel {
 
         let foundCameras = self.discoverCameras(cameraAuthorized)
         self.cameras = foundCameras
+        // Build the name cache once per load so ForEach renders use O(1) dictionary lookups
+        // instead of a synchronous AVCaptureDevice(uniqueID:) call per item per render pass.
+        self.cameraDisplayNames = Dictionary(
+            uniqueKeysWithValues: foundCameras.map { camera in
+                (camera.uniqueID, AVCaptureDevice(uniqueID: camera.uniqueID)?.localizedName ?? "Камера")
+            }
+        )
 
         let foundMics = self.discoverMicrophones(micAuthorized)
         self.microphones = foundMics

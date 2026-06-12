@@ -113,6 +113,13 @@ final class MainViewModel {
     var cameras: [CameraDevice] = []
     var microphones: [MicrophoneDevice] = []
 
+    /// Cache of `uniqueID → localizedName` for camera devices, built once per `loadCamerasAndMicrophones`
+    /// call. Avoids a synchronous `AVCaptureDevice(uniqueID:)` lookup on every ForEach render pass.
+    ///
+    /// PII note: names shown in UI, never logged.
+    @ObservationIgnored
+    var cameraDisplayNames: [String: String] = [:]
+
     // MARK: - Persistence state
 
     /// When `true`, `selectedCameraID` and `selectedMicID` `didSet` observers skip
@@ -191,6 +198,10 @@ final class MainViewModel {
     /// available camera is auto-selected so the user gets a working default immediately.
     var cameraEnabled = true {
         didSet {
+            // Skip when the value did not actually change — avoids a redundant persist
+            // when `cameraPickerSelection` sets `selectedCameraID` then `cameraEnabled`
+            // in sequence and the camera was already enabled.
+            guard oldValue != self.cameraEnabled else { return }
             // Auto-select first camera when re-enabling with no prior selection.
             if self.cameraEnabled {
                 self.selectFirstCameraIfNeeded()
@@ -236,11 +247,9 @@ final class MainViewModel {
     /// `disconnectedCameraName`.
     ///
     /// ### Setter semantics
-    /// - `nil` → disables the camera (`cameraEnabled = false`). `selectedCameraID` is unchanged
-    ///   so re-enabling via `cameraEnabled = true` restores the previous device automatically.
-    /// - non-nil id → sets `selectedCameraID = id` first, then enables the camera.
-    ///   This order prevents a parasitic intermediate persist: `cameraEnabled.didSet` calls
-    ///   `selectFirstCameraIfNeeded()`, which exits early when `selectedCameraID` is already set.
+    /// - `nil` → disables the camera. `selectedCameraID` is unchanged so re-enabling restores the
+    ///   previous device automatically.
+    /// - non-nil id → enables the camera and selects the device via `enableCamera(deviceID:)`.
     ///
     /// Use `$model.cameraPickerSelection` as the `Picker` binding; tag the "Выключена" row with
     /// `String?.none` and device rows with `Optional(camera.uniqueID)`.
@@ -250,16 +259,22 @@ final class MainViewModel {
         }
         set {
             if let id = newValue {
-                // Non-nil: select the device first so selectFirstCameraIfNeeded() (called
-                // from cameraEnabled.didSet) exits early — no parasitic intermediate persist.
-                self.selectedCameraID = id
-                self.cameraEnabled = true
+                self.enableCamera(deviceID: id)
             } else {
                 // nil: disable the camera. selectedCameraID is intentionally preserved
                 // so re-enabling via cameraEnabled = true restores the prior selection.
                 self.cameraEnabled = false
             }
         }
+    }
+
+    /// Selects a specific device and ensures the camera is enabled.
+    ///
+    /// Sets `selectedCameraID` before `cameraEnabled` so `selectFirstCameraIfNeeded()` (called
+    /// from `cameraEnabled.didSet`) exits early — preventing a redundant intermediate persist.
+    private func enableCamera(deviceID: String) {
+        self.selectedCameraID = deviceID
+        self.cameraEnabled = true
     }
 
     // MARK: - Error state
@@ -386,11 +401,16 @@ final class MainViewModel {
 
     // MARK: - Device display names (resolved at UI layer via AVCaptureDevice)
 
-    /// Human-readable label for a camera device, resolved via `AVCaptureDevice(uniqueID:)`.
+    /// Human-readable label for a camera device.
+    ///
+    /// Returns the cached name built during `loadCamerasAndMicrophones`; falls back to a
+    /// live `AVCaptureDevice` lookup for devices not yet in the cache (e.g. before first load).
     ///
     /// PII note: device names are shown in UI but never logged. Log counts only.
     func cameraLabel(for device: CameraDevice) -> String {
-        AVCaptureDevice(uniqueID: device.uniqueID)?.localizedName ?? "Камера"
+        self.cameraDisplayNames[device.uniqueID]
+            ?? AVCaptureDevice(uniqueID: device.uniqueID)?.localizedName
+            ?? "Камера"
     }
 
     /// Human-readable label for a microphone device, resolved via `AVCaptureDevice(uniqueID:)`.

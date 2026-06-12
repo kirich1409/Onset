@@ -90,6 +90,33 @@ import SwiftUI
         )
     }
 
+    // swiftlint:disable no_magic_numbers
+    /// Convenience helper for camera-section previews: full permissions, one display, one camera,
+    /// one mic, with `cameraPickerSelection` pre-set to `pickerSelection`.
+    @MainActor
+    private func makeCameraPreviewModel(pickerSelection: String?) -> MainViewModel {
+        let display = Display(
+            displayID: 1,
+            name: "Встроенный дисплей",
+            pixelWidth: 1920,
+            pixelHeight: 1080,
+            refreshHz: 60
+        )
+        let camera = CameraDevice(uniqueID: "camera-1", formats: [
+            CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30, maxFps: 60),
+        ])
+        let mic = MicrophoneDevice(uniqueID: "mic-1")
+        let model = makePreviewModel(
+            displays: [display],
+            cameras: [camera],
+            microphones: [mic]
+        )
+        model.cameraPickerSelection = pickerSelection
+        return model
+    }
+
+    // swiftlint:enable no_magic_numbers
+
     #Preview("No permissions — empty state") {
         let model = makePreviewModel(
             screen: .notDetermined,
@@ -195,53 +222,13 @@ import SwiftUI
     }
 
     #Preview("Camera — Выключена (picker top item selected)") {
-        let display = Display(
-            displayID: 1,
-            name: "Встроенный дисплей",
-            pixelWidth: 1920,
-            pixelHeight: 1080,
-            refreshHz: 60
-        )
-        let camera = CameraDevice(uniqueID: "camera-1", formats: [
-            CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30, maxFps: 60),
-        ])
-        let mic = MicrophoneDevice(uniqueID: "mic-1")
-        let model = makePreviewModel(
-            screen: .authorized,
-            camera: .authorized,
-            microphone: .authorized,
-            displays: [display],
-            cameras: [camera],
-            microphones: [mic]
-        )
-        // Set picker to "Выключена" (nil selection) — no preview should appear.
-        model.cameraPickerSelection = nil
-        return MainView(model: model) {}
+        // nil selection — no live preview should appear.
+        MainView(model: makeCameraPreviewModel(pickerSelection: nil)) {}
     }
 
     #Preview("Camera — device selected, preview visible") {
-        let display = Display(
-            displayID: 1,
-            name: "Встроенный дисплей",
-            pixelWidth: 1920,
-            pixelHeight: 1080,
-            refreshHz: 60
-        )
-        let camera = CameraDevice(uniqueID: "camera-1", formats: [
-            CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30, maxFps: 60),
-        ])
-        let mic = MicrophoneDevice(uniqueID: "mic-1")
-        let model = makePreviewModel(
-            screen: .authorized,
-            camera: .authorized,
-            microphone: .authorized,
-            displays: [display],
-            cameras: [camera],
-            microphones: [mic]
-        )
-        // Picker shows the device; preview placeholder would appear in a real session.
-        model.cameraPickerSelection = "camera-1"
-        return MainView(model: model) {}
+        // device selected — preview placeholder would appear in a real session.
+        MainView(model: makeCameraPreviewModel(pickerSelection: "camera-1")) {}
     }
 
     #Preview("Output folder — custom path") {

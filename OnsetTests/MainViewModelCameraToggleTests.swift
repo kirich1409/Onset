@@ -5,15 +5,16 @@ import Testing
 // MARK: - MainViewModelCameraToggleTests
 
 // swiftlint:disable type_body_length file_length
-// Rationale: covers the full camera toggle + picker-selection surface area (#77, #76, #224);
-// splitting by topic would scatter related toggle/picker/persistence cases across files.
+// Rationale: covers the full camera selection + picker surface area (#77, #76, #224);
+// splitting by topic would scatter related picker/persistence cases across files.
 
-/// Tests for the camera toggle feature (#77, #76) and the picker-selection API (#224).
+/// Tests for the camera selection API (#224) and its internal `cameraEnabled` mechanism (#77, #76).
 ///
-/// Covers `cameraEnabled`, `cameraPickerSelection`, `activeCamera`, `isCameraActive`, and their
-/// effect on the recording request and `canRecord`. The suite is `@MainActor` because
+/// `cameraEnabled` is an internal flag driven by `cameraPickerSelection`; the UI binds exclusively
+/// to `cameraPickerSelection`. Covers `cameraPickerSelection`, `activeCamera`, `isCameraActive`,
+/// and their effect on the recording request and `canRecord`. The suite is `@MainActor` because
 /// `MainViewModel` and `FakePermissionsService` are `@MainActor`-isolated.
-@Suite("MainViewModel — camera toggle")
+@Suite("MainViewModel — camera selection")
 @MainActor
 struct MainViewModelCameraToggleTests {
     // MARK: - Helpers
@@ -79,7 +80,7 @@ struct MainViewModelCameraToggleTests {
         #expect(sut.cameraEnabled == true)
     }
 
-    // MARK: - Toggle off
+    // MARK: - Camera disabled (cameraEnabled = false internally)
 
     @Test("cameraEnabled false → isCameraActive false, activeCamera nil")
     func cameraDisabled_isCameraActiveIsFalse() async {
@@ -106,7 +107,7 @@ struct MainViewModelCameraToggleTests {
         #expect(format == nil)
     }
 
-    // MARK: - Toggle on + camera selected
+    // MARK: - Camera enabled + device selected
 
     @Test("cameraEnabled true + camera selected → isCameraActive true, activeCamera non-nil")
     func cameraEnabled_withCamera_isActive() async {
@@ -128,7 +129,7 @@ struct MainViewModelCameraToggleTests {
         #expect(format != nil)
     }
 
-    // MARK: - Toggle on with no cameras
+    // MARK: - Camera enabled with no cameras available
 
     @Test("cameraEnabled true + cameras empty → isCameraActive false (no crash)")
     func cameraEnabled_noCameras_isNotActive() async {
@@ -178,7 +179,7 @@ struct MainViewModelCameraToggleTests {
         #expect(sut.isCameraActive == true)
     }
 
-    // MARK: - buildChecklist reflects toggle
+    // MARK: - buildChecklist reflects camera active state
 
     @Test("buildChecklist omits cameraDescription when cameraEnabled is false")
     func buildChecklist_cameraDisabled_omitsCameraDesc() async {
@@ -225,7 +226,7 @@ struct MainViewModelCameraToggleTests {
         #expect(sut.isCameraActive == true)
     }
 
-    // MARK: - Toggle-off masks but does not clear selection
+    // MARK: - Disabling camera masks but does not clear selection
 
     @Test("cameraEnabled false masks activeCamera but leaves selectedCameraID unchanged")
     func cameraDisabled_masksActiveCamera_doesNotClearSelectedCameraID() async {
@@ -413,6 +414,78 @@ struct MainViewModelCameraToggleTests {
 
             #expect(sut.cameraPickerSelection == cam.uniqueID)
         }
+    }
+
+    // MARK: - Persist call count
+
+    /// Verifies that a single `cameraPickerSelection` assignment triggers exactly one
+    /// `saveCamera` call regardless of the current `cameraEnabled` state.
+    ///
+    /// Without the `guard oldValue != newValue` in `cameraEnabled.didSet`, selecting a device
+    /// while the camera is already enabled would persist twice:
+    /// once from `selectedCameraID.didSet` and once from `cameraEnabled.didSet`.
+    @Test("cameraPickerSelection set once → saveCamera called exactly once")
+    func setCameraPickerSelection_persistsExactlyOnce() async {
+        let cam = Self.makeCamera(id: "cam-persist-spy")
+        let spy = CameraSaveSpy()
+
+        let perms = FakePermissionsService(screen: .authorized, camera: .authorized, microphone: .notDetermined)
+        let sut = MainViewModel(
+            permissions: perms,
+            coordinator: RecordingCoordinator(),
+            discoverDisplays: { _ in [Self.makeDisplay()] },
+            discoverCameras: { _ in [cam] },
+            discoverMicrophones: { _ in [] },
+            makeStore: { spy }
+        )
+        await sut.loadDevices()
+        // loadDevices auto-selects and enables the first camera via the store.
+        // Reset the baseline so only picker-driven calls are counted.
+        spy.resetCount()
+
+        sut.cameraPickerSelection = cam.uniqueID
+
+        #expect(spy.saveCameraCallCount == 1)
+    }
+}
+
+// MARK: - CameraSaveSpy
+
+/// Minimal `DeviceSelectionPersisting` spy that counts `saveCamera` invocations.
+/// Delegates load/clear to an in-memory store so restore logic remains functional.
+@MainActor
+private final class CameraSaveSpy: DeviceSelectionPersisting {
+    private(set) var saveCameraCallCount = 0
+    // swiftlint:disable:next force_unwrapping
+    private let backing = UserDefaultsDeviceSelectionStore(defaults: InMemoryUserDefaults(suiteName: nil)!)
+
+    func resetCount() {
+        self.saveCameraCallCount = 0
+    }
+
+    func saveCamera(_ selection: PersistedCameraSelection) {
+        self.saveCameraCallCount += 1
+        self.backing.saveCamera(selection)
+    }
+
+    func saveMicrophone(_ record: DeviceSelectionRecord) {
+        self.backing.saveMicrophone(record)
+    }
+
+    func loadCamera() -> PersistedCameraSelection? {
+        self.backing.loadCamera()
+    }
+
+    func loadMicrophone() -> DeviceSelectionRecord? {
+        self.backing.loadMicrophone()
+    }
+
+    func clearCamera() {
+        self.backing.clearCamera()
+    }
+
+    func clearMicrophone() {
+        self.backing.clearMicrophone()
     }
 }
 
