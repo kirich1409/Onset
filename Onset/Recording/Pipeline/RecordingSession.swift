@@ -106,7 +106,7 @@ actor RecordingSession {
 
     /// The session-scoped subdirectory where both output files are written.
     ///
-    /// Computed once in `init` from `config.outputDirectory` + session-start timestamp so
+    /// Computed once in `init` from `config.baseOutputDirectory` + session-start timestamp so
     /// both pipelines share the same parent directory. Unique-collision-avoidance (` (N)` suffix)
     /// is applied at the **directory** level here; individual file names inside are stable.
     /// The directory is created lazily in `start()` after capability checks pass.
@@ -205,7 +205,7 @@ actor RecordingSession {
         // Collision avoidance (` (N)` suffix) is applied at the directory level so both files
         // inside the folder carry stable, unsuffixed names (#225).
         let sessionDir = OutputDirectoryNaming.uniqueSessionDirectory(
-            in: config.outputDirectory,
+            in: config.baseOutputDirectory,
             timestamp: startDate
         )
         self.sessionDirectory = sessionDir
@@ -240,7 +240,11 @@ actor RecordingSession {
         // Both kinds close over `startDate` and `sessionDir` — not a fresh Date() / new URL per
         // call — so the pair of files for one session shares the same timestamp and parent folder.
         self.writerFactory = writerFactory ?? LiveWriterFactory(configuration: config) { kind in
-            RecordingSession.defaultOutputURL(for: kind, in: sessionDir, date: startDate)
+            let fileKind: RecordingFileKind = switch kind {
+            case .screen: .screen
+            case .camera: .camera
+            }
+            return RecordingOutput.uniqueOutputURL(in: sessionDir, timestamp: startDate, kind: fileKind)
         }
     }
 
@@ -876,35 +880,6 @@ actor RecordingSession {
         await self.dropMonitor?.stop()
         self.dropMonitor = nil
         self.stage = nil
-    }
-
-    // MARK: - Default output URL
-
-    /// Builds the default output URL for a pipeline inside the given session directory.
-    ///
-    /// Delegates to `RecordingOutput.uniqueOutputURL` for spec-compliant naming (§135).
-    /// File-level collision avoidance is inherited from `uniqueOutputURL`; directory-level
-    /// collision avoidance is handled at the `sessionDirectory` level in `init` (#225).
-    ///
-    /// - Parameters:
-    ///   - kind: Which pipeline this file belongs to (selects screen vs camera suffix).
-    ///   - sessionDirectory: The session-scoped subdirectory (computed in `init`).
-    ///   - date: Session-start timestamp shared by both pipelines in the same session (#198).
-    private static func defaultOutputURL(
-        for kind: RecordingPipelineKind,
-        in sessionDirectory: URL,
-        date: Date
-    )
-    -> URL {
-        let fileKind: RecordingFileKind = switch kind {
-        case .screen: .screen
-        case .camera: .camera
-        }
-        return RecordingOutput.uniqueOutputURL(
-            in: sessionDirectory,
-            timestamp: date,
-            kind: fileKind
-        )
     }
 }
 

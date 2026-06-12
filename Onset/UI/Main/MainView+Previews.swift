@@ -236,7 +236,7 @@ import SwiftUI
         )
         // Override the default output directory so the row shows a non-default path.
         let customURL = URL(filePath: NSHomeDirectory() + "/Desktop/Recordings", directoryHint: .isDirectory)
-        model.setOutputDirectory(customURL)
+        model.outputDirectoryURL = customURL
         return MainView(model: model) {}
     }
 #endif

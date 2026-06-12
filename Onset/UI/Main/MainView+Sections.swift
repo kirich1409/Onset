@@ -112,7 +112,7 @@ extension MainView {
     var outputSection: some View {
         SectionCard(title: "ВЫВОД") {
             OutputFolderRow(folderURL: self.model.outputDirectoryURL) {
-                self.model.setOutputDirectory($0)
+                self.model.outputDirectoryURL = $0
             }
         }
     }

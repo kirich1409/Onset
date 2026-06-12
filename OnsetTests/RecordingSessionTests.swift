@@ -1217,7 +1217,7 @@ struct RecordingSessionOutputDirectoryTests {
             degradedWindowSeconds: mvp.degradedWindowSeconds,
             postStopDropWarningThreshold: mvp.postStopDropWarningThreshold,
             budgetCap: mvp.budgetCap,
-            outputDirectory: tempDir
+            baseOutputDirectory: tempDir
         )
 
         let probe = SampleProbeOK()

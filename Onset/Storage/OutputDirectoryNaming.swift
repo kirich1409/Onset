@@ -51,8 +51,8 @@ extension OutputDirectoryValidation {
 ///
 /// ### Collision handling
 /// When a same-name directory already exists (same-second double-start or manual
-/// pre-existing folder), a ` (N)` suffix is appended at the **folder** level and
-/// incremented until a free slot is found. The search is bounded at 999 attempts.
+/// pre-existing folder), a ` (N)` suffix is appended at the **folder** level via
+/// `RecordingOutput.uniqueSlot`, which bounds the search at 999 attempts.
 ///
 /// All methods are `nonisolated` static — no stored state, no actor isolation required.
 nonisolated enum OutputDirectoryNaming {
@@ -63,7 +63,7 @@ nonisolated enum OutputDirectoryNaming {
     /// - Parameter timestamp: Session-start timestamp (shared with file names).
     /// - Returns: A directory name such as `"Onset 2026-06-12 14.30.05"`.
     nonisolated static func sessionDirectoryName(for timestamp: Date) -> String {
-        let formatted = Self.makeDateFormatter().string(from: timestamp)
+        let formatted = RecordingOutput.makeDateFormatter().string(from: timestamp)
         return "Onset \(formatted)"
     }
 
@@ -72,9 +72,9 @@ nonisolated enum OutputDirectoryNaming {
     /// Returns a unique session-scoped directory URL inside `baseDirectory`.
     ///
     /// The name is built by `sessionDirectoryName(for:)`. If a directory or file with
-    /// that name already exists, ` (N)` is appended (starting at 2) and incremented until
-    /// a free slot is found. After 999 attempts the un-suffixed candidate is returned and
-    /// the caller is responsible for any downstream error.
+    /// that name already exists, ` (N)` is appended (starting at 2) via
+    /// `RecordingOutput.uniqueSlot`, which bounds the search at 999 attempts and returns
+    /// the un-suffixed candidate when exhausted.
     ///
     /// The directory is NOT created by this method — creation is deferred to
     /// `RecordingOutput.ensureDirectory(_:)` at session start.
@@ -90,25 +90,11 @@ nonisolated enum OutputDirectoryNaming {
     )
     -> URL {
         let baseName = Self.sessionDirectoryName(for: timestamp)
-        let fileManager = FileManager()
+        let base = baseDirectory.appending(path: baseName, directoryHint: .isDirectory)
 
-        let candidate = baseDirectory.appending(path: baseName, directoryHint: .isDirectory)
-        if !fileManager.fileExists(atPath: candidate.path(percentEncoded: false)) {
-            return candidate
+        return RecordingOutput.uniqueSlot(base: base) { counter in
+            baseDirectory.appending(path: "\(baseName) (\(counter))", directoryHint: .isDirectory)
         }
-
-        let collisionCounterStart = 2
-        let collisionCounterMax = 999
-        for counter in collisionCounterStart...collisionCounterMax {
-            let suffixed = "\(baseName) (\(counter))"
-            let suffixedURL = baseDirectory.appending(path: suffixed, directoryHint: .isDirectory)
-            if !fileManager.fileExists(atPath: suffixedURL.path(percentEncoded: false)) {
-                return suffixedURL
-            }
-        }
-
-        // Safety valve: return the un-suffixed URL; downstream creation will fail and surface the error.
-        return candidate
     }
 
     // MARK: - Base directory validation
@@ -121,7 +107,7 @@ nonisolated enum OutputDirectoryNaming {
     /// - Parameter directory: The base output directory to validate.
     /// - Returns: An `OutputDirectoryValidation` verdict.
     nonisolated static func validateBaseDirectory(_ directory: URL) -> OutputDirectoryValidation {
-        let fileManager = FileManager()
+        let fileManager = FileManager.default
         let path = directory.path(percentEncoded: false)
 
         guard fileManager.fileExists(atPath: path) else {
@@ -133,24 +119,5 @@ nonisolated enum OutputDirectoryNaming {
         }
 
         return .ok
-    }
-
-    // MARK: - Private helpers
-
-    /// Date formatter for the `YYYY-MM-DD HH.mm.ss` component of the session directory name.
-    ///
-    /// Extracted into a `nonisolated private static func` factory — not a `static let` —
-    /// because under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` +
-    /// `NonisolatedNonsendingByDefault`, a closure literal assigned to a `nonisolated static let`
-    /// is still inferred `@MainActor`. A named function carries `nonisolated` unambiguously
-    /// (same pattern as `RecordingOutput.makeDateFormatter()`).
-    nonisolated private static func makeDateFormatter() -> DateFormatter {
-        let formatter = DateFormatter()
-        // en_US_POSIX: locale-invariant formatting for directory names.
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        // Current system time zone — recording happened local to the user.
-        formatter.timeZone = TimeZone.current
-        formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
-        return formatter
     }
 }

@@ -75,9 +75,9 @@ nonisolated enum RecordingOutput {
     ///
     /// The base name is built by `fileName(timestamp:kind:)` (spec §135). If the resulting path
     /// already exists — a same-second double-start or a pre-existing file — the method appends a
-    /// ` (N)` disambiguator before the `.mp4` extension, incrementing `N` until a free slot is
-    /// found. The search is bounded: after 999 attempts it returns the candidate as-is and lets
-    /// `AVAssetWriter` surface the error, preserving the one-shot pipeline contract.
+    /// ` (N)` disambiguator before the `.mp4` extension via `uniqueSlot`, which bounds the search
+    /// at 999 attempts and returns the candidate as-is on exhaustion, letting `AVAssetWriter`
+    /// surface the error and preserving the one-shot pipeline contract.
     ///
     /// - Parameters:
     ///   - directory: The directory in which the file will be created (e.g. `RecordingOutput.directory()`).
@@ -92,32 +92,15 @@ nonisolated enum RecordingOutput {
     )
     -> URL {
         let baseName = self.fileName(timestamp: timestamp, kind: kind)
-        let base = URL(filePath: baseName, relativeTo: directory).path(percentEncoded: false)
-        let fileManager = FileManager()
-
-        if !fileManager.fileExists(atPath: base) {
-            return URL(filePath: base)
-        }
+        let baseURL = URL(filePath: baseName, relativeTo: directory)
 
         // Derive stem and extension via URL path manipulation — avoids NSString bridging.
-        let fileURL = URL(filePath: baseName)
-        let stem = fileURL.deletingPathExtension().lastPathComponent // "Onset YYYY-MM-DD HH.mm.ss — Screen"
-        let ext = fileURL.pathExtension // "mp4"
+        let stem = baseURL.deletingPathExtension().lastPathComponent // "Onset YYYY-MM-DD HH.mm.ss — Screen"
+        let ext = baseURL.pathExtension // "mp4"
 
-        // Upper bound avoids an infinite loop; AVAssetWriter will report an error if we
-        // somehow exhaust the range (extremely unlikely in normal use).
-        let collisionCounterStart = 2
-        let collisionCounterMax = 999
-        for counter in collisionCounterStart...collisionCounterMax {
-            let candidate = "\(stem) (\(counter)).\(ext)"
-            let candidatePath = URL(filePath: candidate, relativeTo: directory).path(percentEncoded: false)
-            if !fileManager.fileExists(atPath: candidatePath) {
-                return URL(filePath: candidatePath)
-            }
+        return Self.uniqueSlot(base: baseURL) { counter in
+            URL(filePath: "\(stem) (\(counter)).\(ext)", relativeTo: directory)
         }
-
-        // Safety valve: return the original URL and let AVAssetWriter handle the collision.
-        return URL(filePath: base)
     }
 
     // MARK: - Directory
@@ -171,6 +154,43 @@ nonisolated enum RecordingOutput {
         )
     }
 
+    // MARK: - Internal helpers
+
+    /// Returns the first URL in the ` (N)` collision series that does not exist on disk.
+    ///
+    /// Shared by `uniqueOutputURL` (file collision) and `OutputDirectoryNaming.uniqueSessionDirectory`
+    /// (directory collision) — both use the same counter range (2…999) and safety-valve semantics.
+    ///
+    /// - Parameters:
+    ///   - base: The unsuffixed candidate URL. Returned immediately if it does not exist.
+    ///   - appendSuffix: Closure that builds the ` (N)`-suffixed URL for a given counter value.
+    ///     Called with `n` starting at 2, up to 999.
+    /// - Returns: The first URL that does not exist on disk; `base` when the range is exhausted.
+    nonisolated static func uniqueSlot(
+        base: URL,
+        appendSuffix: (Int) -> URL
+    )
+    -> URL {
+        let fileManager = FileManager.default
+
+        if !fileManager.fileExists(atPath: base.path(percentEncoded: false)) {
+            return base
+        }
+
+        // Upper bound avoids an infinite loop; callers surface the error on exhaustion.
+        let collisionCounterStart = 2
+        let collisionCounterMax = 999
+        for counter in collisionCounterStart...collisionCounterMax {
+            let candidate = appendSuffix(counter)
+            if !fileManager.fileExists(atPath: candidate.path(percentEncoded: false)) {
+                return candidate
+            }
+        }
+
+        // Safety valve: return the un-suffixed URL; the caller is responsible for the error.
+        return base
+    }
+
     // MARK: - Private helpers
 
     nonisolated private static func suffix(for kind: RecordingFileKind) -> String {
@@ -183,17 +203,20 @@ nonisolated enum RecordingOutput {
         }
     }
 
-    /// Date formatter for the `YYYY-MM-DD HH.mm.ss` component of the file name.
+    /// Date formatter for the `YYYY-MM-DD HH.mm.ss` component of output paths.
     ///
-    /// Extracted into a `nonisolated private static func` factory — not a `static let` —
+    /// Shared by `RecordingOutput` (file names) and `OutputDirectoryNaming` (session directory
+    /// names) — both use the identical format, locale, and time-zone settings.
+    ///
+    /// Extracted into a `nonisolated static func` factory — not a `static let` —
     /// because under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` +
     /// `NonisolatedNonsendingByDefault`, a closure literal assigned to a `nonisolated static
     /// let` is still inferred `@MainActor`, making it unusable from nonisolated static
     /// methods. A named function carries `nonisolated` unambiguously (same pattern as
     /// `RecordingConfiguration.makeMVPDefault()`).
-    nonisolated private static func makeDateFormatter() -> DateFormatter {
+    nonisolated static func makeDateFormatter() -> DateFormatter {
         let formatter = DateFormatter()
-        // en_US_POSIX: locale-invariant parsing/formatting for file names.
+        // en_US_POSIX: locale-invariant parsing/formatting for file and directory names.
         formatter.locale = Locale(identifier: "en_US_POSIX")
         // Current system time zone — recording happened local to the user.
         formatter.timeZone = TimeZone.current

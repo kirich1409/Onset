@@ -39,7 +39,6 @@ nonisolated let mainViewModelLogger = Logger(
 /// `RecordingSession` has no screen-skip branch. Screen capture is mandatory in MVP.
 @Observable
 @MainActor
-// swiftlint:disable:next type_body_length
 final class MainViewModel {
     // MARK: - Injectable seams
 
@@ -84,13 +83,6 @@ final class MainViewModel {
     /// `withScopedDefaults`.
     @ObservationIgnored
     let makeStore: () -> any DeviceSelectionPersisting
-
-    /// Closure seam for output-folder persistence — injectable for tests.
-    ///
-    /// The default closure builds a `UserDefaultsOutputFolderStore` backed by `.standard`.
-    /// Tests inject an `InMemoryUserDefaults`-backed store via `withScopedDefaults`.
-    @ObservationIgnored
-    let makeOutputFolderStore: () -> any OutputFolderPersisting
 
     @ObservationIgnored
     private let outputFolderStore: any OutputFolderPersisting
@@ -179,22 +171,12 @@ final class MainViewModel {
     /// The user-selected base output directory, or `~/Movies/Onset/` when no selection was saved.
     ///
     /// UI reads this to display the current path and offer "Show in Finder". The setter persists
-    /// the new path immediately via `makeOutputFolderStore`. Backed by `UserDefaults` (no sandbox,
+    /// the new path immediately via `outputFolderStore`. Backed by `UserDefaults` (no sandbox,
     /// no security-scoped bookmark needed — Onset runs as Developer ID / direct distribution).
     var outputDirectoryURL: URL {
         didSet {
             self.outputFolderStore.saveBaseDirectory(self.outputDirectoryURL)
         }
-    }
-
-    /// Replaces the output folder with `url` and persists the selection.
-    ///
-    /// Called by the UI after a successful `NSOpenPanel` sheet. The path is validated at
-    /// recording start — not here — so this setter is a simple write-through.
-    ///
-    /// - Parameter url: Absolute `URL` to the directory the user chose.
-    func setOutputDirectory(_ url: URL) {
-        self.outputDirectoryURL = url
     }
 
     /// Whether the camera is enabled for recording (#77, #76).
@@ -453,19 +435,13 @@ final class MainViewModel {
         self.makeDeviceChangeStream = makeDeviceChangeStream
         self.makeCameraSource = makeCameraSource
         self.makeStore = makeStore
-        self.makeOutputFolderStore = makeOutputFolderStore
         self.screenChangeEvents = screenChangeEvents
 
         // Create the store once; the same instance is reused in outputDirectoryURL.didSet.
         self.outputFolderStore = makeOutputFolderStore()
 
         // Restore the persisted base directory, falling back to ~/Movies/Onset/.
-        // `NSHomeDirectory()` avoids `FileManager.default.urls(for:in:)` which is
-        // `@MainActor`-isolated under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`
-        // (same workaround as `RecordingConfiguration.makeMVPDefault()`).
-        let defaultDirectory = URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory)
-            .appending(path: "Movies", directoryHint: .isDirectory)
-            .appending(path: "Onset", directoryHint: .isDirectory)
-        self.outputDirectoryURL = self.outputFolderStore.loadBaseDirectory() ?? defaultDirectory
+        // `RecordingOutput.directory()` is the single authoritative source for the default path.
+        self.outputDirectoryURL = self.outputFolderStore.loadBaseDirectory() ?? RecordingOutput.directory()
     }
 }
