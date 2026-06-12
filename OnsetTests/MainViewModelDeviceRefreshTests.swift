@@ -164,7 +164,41 @@ struct MainViewModelDeviceRefreshTests {
         }
     }
 
-    // MARK: - Test 4: finished stream exits the loop
+    // MARK: - Test 4: cameraDisplayNames cache invalidated on reload
+
+    /// After a device-change event causes a reload, `cameraDisplayNames` must contain exactly
+    /// the keys present in the new `cameras` list and must not retain keys from devices that
+    /// have left the list. This guards the cache-invalidation invariant: a device that goes
+    /// away must not keep a stale entry visible to `cameraLabel(for:)` on the next render.
+    @Test("Device reload rebuilds cameraDisplayNames — new keys present, old keys absent")
+    func deviceReload_cameraDisplayNamesUpdated() async {
+        let cam1 = Self.makeCamera(id: "cam-display-1")
+        let cam2 = Self.makeCamera(id: "cam-display-2")
+        let box = DeviceListBox([cam1])
+        let (stream, continuation) = AsyncStream.makeStream(of: DeviceChangeEvent.self)
+
+        await withScopedDefaults { defaults in
+            let sut = self.makeSUT(defaults: defaults, box: box, deviceChanges: stream)
+            await sut.loadDevices()
+            // After initial load: cam1 present, cam2 absent.
+            #expect(sut.cameraDisplayNames.keys.contains(cam1.uniqueID))
+            #expect(!sut.cameraDisplayNames.keys.contains(cam2.uniqueID))
+
+            // Swap the device list: cam1 gone, cam2 arrived.
+            box.set([cam2])
+            let observeTask = Task { await sut.observeDeviceChanges() }
+            continuation.yield(.connected)
+
+            let reloaded = await eventuallyMainActor {
+                sut.cameraDisplayNames.keys.contains(cam2.uniqueID)
+            }
+            #expect(reloaded)
+            #expect(!sut.cameraDisplayNames.keys.contains(cam1.uniqueID))
+            observeTask.cancel()
+        }
+    }
+
+    // MARK: - Test 5: finished stream exits the loop
 
     /// When the stream finishes, `observeDeviceChanges()` returns — no parked task leaks.
     @Test("Finished stream exits the observe loop")

@@ -1,3 +1,4 @@
+// swiftlint:disable file_length
 import AppKit
 import CoreGraphics
 import SwiftUI
@@ -45,6 +46,10 @@ extension MainView {
     /// The "Камеры не найдены" case is embedded inside the picker branch: when `cameras`
     /// is empty the picker renders only the "Выключена" row, which is the correct UX
     /// (camera is effectively off and there is nothing to enable).
+    ///
+    /// When the previously selected camera has been disconnected (`disconnectedCameraName != nil`),
+    /// a `CameraUnavailableRow` is shown below the picker so the user can distinguish a device
+    /// disappearance from an explicit "Выключена" selection.
     @ViewBuilder
     private var cameraPickerOrDenied: some View {
         if self.model.isCameraDenied {
@@ -65,6 +70,9 @@ extension MainView {
                 .pickerStyle(.menu)
                 .labelsHidden()
                 .accessibilityLabel("Выберите камеру")
+            }
+            if let name = self.model.disconnectedCameraName {
+                CameraUnavailableRow(cameraName: name)
             }
         }
     }
@@ -255,6 +263,30 @@ private struct CameraDeniedRow: View {
     }
 }
 
+// MARK: - CameraUnavailableRow
+
+/// Shown when `disconnectedCameraName != nil`: the previously selected camera has disappeared
+/// (e.g. unplugged or lid closed) while the camera was enabled. Distinguishes an involuntary
+/// disconnection from an explicit "Выключена" selection so the user is not confused.
+private struct CameraUnavailableRow: View {
+    /// Display name of the missing camera device — shown in UI only, never logged.
+    let cameraName: String
+
+    var body: some View {
+        HStack(spacing: MainView.Metrics.accessorySpacing) {
+            Image(systemName: "camera.fill.badge.ellipsis")
+                .foregroundStyle(.secondary)
+                .frame(width: MainView.Metrics.iconColumnWidth)
+                .accessibilityHidden(true)
+            Text("Камера «\(self.cameraName)» недоступна")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Камера «\(self.cameraName)» недоступна.")
+    }
+}
+
 // MARK: - MicrophoneUnavailableRow
 
 private struct MicrophoneUnavailableRow: View {
@@ -373,3 +405,4 @@ private struct OutputFolderRow: View {
         }
     }
 }
+// swiftlint:enable file_length

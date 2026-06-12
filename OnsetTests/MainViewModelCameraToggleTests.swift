@@ -344,11 +344,13 @@ struct MainViewModelCameraToggleTests {
         let camB = Self.makeCamera(id: "cam-B")
 
         await withScopedDefaults { defaults in
-            // Build SUT with two cameras but without calling loadDevices, so auto-select never runs.
-            // Set cameraEnabled = false explicitly to reach the target state:
-            // cameraEnabled=false, selectedCameraID=nil.
+            // Build SUT with two cameras; loadDevices populates the camera list so the
+            // guard in enableCamera can validate the uniqueID against it.
             let sut = self.makeSUT(cameras: [camA, camB], defaults: defaults)
+            await sut.loadDevices()
+            // Reach the target state: disable camera after load so selectedCameraID is nil.
             sut.cameraEnabled = false
+            sut.selectedCameraID = nil
             // Confirm pre-conditions: no device selected, camera off.
             #expect(sut.selectedCameraID == nil)
             #expect(sut.cameraEnabled == false)
@@ -446,21 +448,113 @@ struct MainViewModelCameraToggleTests {
         sut.cameraPickerSelection = cam.uniqueID
 
         #expect(spy.saveCameraCallCount == 1)
+        // Selecting a valid device must never call clearCamera.
+        #expect(spy.clearCameraCallCount == 0)
+    }
+
+    // MARK: - New persist-path tests
+
+    /// Setting `cameraPickerSelection = nil` while already disabled must not trigger
+    /// any persistence — `cameraEnabled` was already `false`, no state changed.
+    @Test("cameraEnabled already false + nil picker → zero persist calls")
+    func cameraAlreadyDisabled_nilPickerSelection_zeroPersistCalls() async {
+        let cam = Self.makeCamera(id: "cam-already-off")
+        let spy = CameraSaveSpy()
+
+        let perms = FakePermissionsService(screen: .authorized, camera: .authorized, microphone: .notDetermined)
+        let sut = MainViewModel(
+            permissions: perms,
+            coordinator: RecordingCoordinator(),
+            discoverDisplays: { _ in [Self.makeDisplay()] },
+            discoverCameras: { _ in [cam] },
+            discoverMicrophones: { _ in [] },
+            makeStore: { spy }
+        )
+        await sut.loadDevices()
+        // Disable first so cameraEnabled == false before the assignment below.
+        sut.cameraEnabled = false
+        spy.resetCount()
+
+        // Assigning nil while already disabled: cameraEnabled.didSet sees no change → skip persist.
+        sut.cameraPickerSelection = nil
+
+        #expect(spy.saveCameraCallCount == 0)
+        #expect(spy.clearCameraCallCount == 0)
+    }
+
+    /// When `cameras` is empty and `cameraEnabled == true`, `cameraPickerSelection` must
+    /// be `nil` (disconnected getter path) and `disconnectedCameraName` must be non-nil
+    /// after a device load that finds no cameras for a previously saved selection.
+    @Test("Enabled + no matching device → cameraPickerSelection nil, disconnectedCameraName non-nil")
+    func enabledWithNoMatchingDevice_pickerNilAndDisconnectedNameSet() async {
+        // Persist a selection so loadCamerasAndMicrophones triggers the .disconnected branch.
+        await withScopedDefaults { defaults in
+            // Seed persisted selection via the real store before creating the SUT.
+            let seedStore = UserDefaultsDeviceSelectionStore(defaults: defaults)
+            seedStore.saveCamera(.enabled(DeviceSelectionRecord(uniqueID: "cam-gone", localizedName: "Old Camera")))
+
+            let perms = FakePermissionsService(screen: .authorized, camera: .authorized, microphone: .notDetermined)
+            let sut = MainViewModel(
+                permissions: perms,
+                coordinator: RecordingCoordinator(),
+                discoverDisplays: { _ in [Self.makeDisplay()] },
+                // Camera list is empty — the saved device has gone away.
+                discoverCameras: { _ in [] },
+                discoverMicrophones: { _ in [] },
+                makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) }
+            )
+            await sut.loadDevices()
+
+            // Disconnected state: enabled but no matching device in the list.
+            #expect(sut.cameraPickerSelection == nil)
+            #expect(sut.disconnectedCameraName != nil)
+        }
+    }
+
+    /// Assigning a `cameraPickerSelection` whose device ID is not in `cameras` must be
+    /// ignored: the picker selection must not change and no persist call must be emitted.
+    @Test("enableCamera with unknown ID → selection unchanged, no persist")
+    func enableCamera_unknownDeviceID_selectionUnchanged() async {
+        let cam = Self.makeCamera(id: "cam-known")
+        let spy = CameraSaveSpy()
+
+        let perms = FakePermissionsService(screen: .authorized, camera: .authorized, microphone: .notDetermined)
+        let sut = MainViewModel(
+            permissions: perms,
+            coordinator: RecordingCoordinator(),
+            discoverDisplays: { _ in [Self.makeDisplay()] },
+            discoverCameras: { _ in [cam] },
+            discoverMicrophones: { _ in [] },
+            makeStore: { spy }
+        )
+        await sut.loadDevices()
+        // After load the known camera is auto-selected.
+        let selectionBeforeAttempt = sut.cameraPickerSelection
+        spy.resetCount()
+
+        // Simulate a stale picker value referencing a device that is no longer in the list.
+        sut.cameraPickerSelection = "missing-id"
+
+        #expect(sut.cameraPickerSelection == selectionBeforeAttempt)
+        #expect(spy.saveCameraCallCount == 0)
+        #expect(spy.clearCameraCallCount == 0)
     }
 }
 
 // MARK: - CameraSaveSpy
 
-/// Minimal `DeviceSelectionPersisting` spy that counts `saveCamera` invocations.
-/// Delegates load/clear to an in-memory store so restore logic remains functional.
+/// Minimal `DeviceSelectionPersisting` spy that counts `saveCamera` and `clearCamera` invocations.
+/// Delegates load/clear/save to an in-memory store so restore logic remains functional.
 @MainActor
 private final class CameraSaveSpy: DeviceSelectionPersisting {
     private(set) var saveCameraCallCount = 0
+    private(set) var clearCameraCallCount = 0
     // swiftlint:disable:next force_unwrapping
     private let backing = UserDefaultsDeviceSelectionStore(defaults: InMemoryUserDefaults(suiteName: nil)!)
 
     func resetCount() {
         self.saveCameraCallCount = 0
+        self.clearCameraCallCount = 0
     }
 
     func saveCamera(_ selection: PersistedCameraSelection) {
@@ -481,6 +575,7 @@ private final class CameraSaveSpy: DeviceSelectionPersisting {
     }
 
     func clearCamera() {
+        self.clearCameraCallCount += 1
         self.backing.clearCamera()
     }
 

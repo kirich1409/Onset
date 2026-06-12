@@ -115,6 +115,32 @@ import SwiftUI
         return model
     }
 
+    /// Helper for the disconnected-camera preview state: authorized, one display, NO cameras
+    /// in the current list (simulates hot-unplug), with `disconnectedCameraName` set.
+    @MainActor
+    private func makeDisconnectedCameraPreviewModel() -> MainViewModel {
+        let display = Display(
+            displayID: 1,
+            name: "Встроенный дисплей",
+            pixelWidth: 1920,
+            pixelHeight: 1080,
+            refreshHz: 60
+        )
+        let mic = MicrophoneDevice(uniqueID: "mic-1")
+        // No cameras in the list — device has been unplugged.
+        let model = makePreviewModel(
+            camera: .authorized,
+            microphone: .authorized,
+            displays: [display],
+            cameras: [],
+            microphones: [mic]
+        )
+        // Simulate the disconnected state written by loadCamerasAndMicrophones.
+        model.cameraEnabled = true
+        model.disconnectedCameraName = "Logitech MX Brio"
+        return model
+    }
+
     // swiftlint:enable no_magic_numbers
 
     #Preview("No permissions — empty state") {
@@ -229,6 +255,12 @@ import SwiftUI
     #Preview("Camera — device selected, preview visible") {
         // device selected — preview placeholder would appear in a real session.
         MainView(model: makeCameraPreviewModel(pickerSelection: "camera-1")) {}
+    }
+
+    #Preview("Camera — disconnected (device unplugged while enabled)") {
+        // cameraEnabled=true, selectedCameraID=nil, disconnectedCameraName set.
+        // The CameraUnavailableRow should appear below the picker.
+        MainView(model: makeDisconnectedCameraPreviewModel()) {}
     }
 
     #Preview("Output folder — custom path") {
