@@ -68,12 +68,6 @@ struct MainView: View {
     @State
     private var pendingAlert: PostStopAlert?
 
-    /// Drives the output-directory validation alert shown when `record()` detects a
-    /// missing or non-writable output folder (issue #225). Surfaced as a modal alert
-    /// because the ВЫВОД section is visually distant from the Record button.
-    @State
-    private var outputDirAlertMessage: String?
-
     // MARK: - Body
 
     var body: some View {
@@ -136,23 +130,20 @@ struct MainView: View {
             self.makeAlert(for: alert)
         }
         // Output-directory validation alert: shown when `record()` rejects a missing or
-        // non-writable output folder. Uses the same alert presentation layer as post-stop
-        // errors to keep a single, predictable error-surfacing channel.
-        .onChange(of: self.model.outputDirectoryError) { _, newValue in
-            if let message = newValue {
-                self.outputDirAlertMessage = message
-            }
-        }
+        // non-writable output folder. Bound directly to `model.outputDirectoryError` so
+        // repeated clicks with the same error message reliably re-show the alert — an
+        // intermediate @State copy would miss re-triggers when Observable batches a
+        // nil→value mutation within a single synchronous block (old == new for onChange).
         .alert(
             "Папка для записи недоступна",
             isPresented: Binding(
-                get: { self.outputDirAlertMessage != nil },
-                set: { if !$0 { self.outputDirAlertMessage = nil } }
+                get: { self.model.outputDirectoryError != nil },
+                set: { if !$0 { self.model.outputDirectoryError = nil } }
             )
         ) {
-            Button("ОК") { self.outputDirAlertMessage = nil }
+            Button("ОК") { self.model.outputDirectoryError = nil }
         } message: {
-            if let message = self.outputDirAlertMessage {
+            if let message = self.model.outputDirectoryError {
                 Text(message)
             }
         }

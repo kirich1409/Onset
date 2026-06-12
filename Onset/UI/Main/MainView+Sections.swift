@@ -274,27 +274,34 @@ private struct OutputFolderRow: View {
 
     var body: some View {
         HStack(spacing: MainView.Metrics.accessorySpacing) {
-            // A: visible "Папка" label on the left, matching the style of other section rows
-            // (e.g. "Дисплей", "Устройство" in the reference design).
-            Text("Папка")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .frame(width: MainView.Metrics.outputFolderLabelWidth, alignment: .leading)
-            Image(systemName: "folder")
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            // C: tooltip shows the full abbreviated path on hover.
-            // D: label names the purpose; value carries the current path — VoiceOver reads
-            //    "Папка для записи: ~/Movies/Onset" instead of the raw abbreviated string.
-            Text(self.abbreviatedPath)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .help(self.abbreviatedPath)
-                .accessibilityLabel("Папка для записи")
-                .accessibilityValue(self.abbreviatedPath)
+            // Info group: "Папка" label + folder icon + path text, collapsed into a single
+            // AX element so VoiceOver reads the full sentence "Папка для записи: ~/Movies/Onset"
+            // rather than three separate static-text fragments. `.accessibilityElement(children: .ignore)`
+            // on the container hides the individual children and exposes label + value at container level.
+            HStack(spacing: MainView.Metrics.accessorySpacing) {
+                // A: visible "Папка" label on the left, matching the style of other section rows
+                // (e.g. "Дисплей", "Устройство" in the reference design).
+                Text("Папка")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(width: MainView.Metrics.outputFolderLabelWidth, alignment: .leading)
+                Image(systemName: "folder")
+                    .foregroundStyle(.secondary)
+                // C: tooltip shows the full abbreviated path on hover.
+                Text(self.abbreviatedPath)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(self.abbreviatedPath)
+            }
+            // D: the container becomes the single AX element that VoiceOver reads as
+            //    "Папка для записи: ~/Movies/Onset". Children are hidden from the AX tree.
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Папка для записи")
+            .accessibilityValue(self.abbreviatedPath)
             Spacer(minLength: 0)
+            // "Выбрать…" is a separate interactive element — NOT inside the ignore container.
             Button("Выбрать…") {
                 self.openPanel()
             }
