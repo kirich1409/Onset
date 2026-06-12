@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import SwiftUI
 
@@ -101,6 +102,22 @@ extension MainView {
                 .pickerStyle(.menu)
                 .labelsHidden()
                 .accessibilityLabel("Выберите микрофон")
+            }
+        }
+    }
+
+    // MARK: - Output section
+
+    /// Output folder selection row — issue #225.
+    var outputSection: some View {
+        SectionCard(title: "ВЫВОД") {
+            VStack(alignment: .leading, spacing: Metrics.rowSpacing) {
+                OutputFolderRow(folderURL: self.model.outputDirectoryURL) {
+                    self.model.outputDirectoryURL = $0
+                }
+                Text("Каждая запись сохраняется в отдельную папку сессии.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -238,5 +255,107 @@ private struct MicrophoneUnavailableRow: View {
                 .foregroundStyle(.secondary)
         }
         .accessibilityLabel("Микрофон недоступен. Запись будет вестись без звука.")
+    }
+}
+
+// MARK: - OutputFolderRow
+
+/// A single row in the output section showing the current base output directory and a «Выбрать…»
+/// button that opens `NSOpenPanel`. Issue #225.
+///
+/// Displays the path abbreviated with a tilde so long `/Users/…` paths stay readable.
+/// The `NSOpenPanel` sheet is presented as a child of the key window so it behaves as a
+/// document-modal sheet on macOS and does not block other app windows.
+private struct OutputFolderRow: View {
+    /// The currently selected base output directory.
+    let folderURL: URL
+    /// Called with the URL the user picked in `NSOpenPanel`. Never called on cancellation.
+    let onChoose: (URL) -> Void
+
+    var body: some View {
+        HStack(spacing: MainView.Metrics.accessorySpacing) {
+            // Info group: "Папка" label + folder icon + path text, collapsed into a single
+            // AX element so VoiceOver reads the full sentence "Папка для записи: ~/Movies/Onset"
+            // rather than three separate static-text fragments. `.accessibilityElement(children: .ignore)`
+            // on the container hides the individual children and exposes label + value at container level.
+            HStack(spacing: MainView.Metrics.accessorySpacing) {
+                // A: visible "Папка" label on the left, matching the style of other section rows
+                // (e.g. "Дисплей", "Устройство" in the reference design).
+                Text("Папка")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(width: MainView.Metrics.outputFolderLabelWidth, alignment: .leading)
+                Image(systemName: "folder")
+                    .foregroundStyle(.secondary)
+                // C: tooltip shows the full abbreviated path on hover.
+                Text(self.abbreviatedPath)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(self.abbreviatedPath)
+            }
+            // D: the container becomes the single AX element that VoiceOver reads as
+            //    "Папка для записи: ~/Movies/Onset". Children are hidden from the AX tree.
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Папка для записи")
+            .accessibilityValue(self.abbreviatedPath)
+            Spacer(minLength: 0)
+            // "Выбрать…" is a separate interactive element — NOT inside the ignore container.
+            Button("Выбрать…") {
+                self.openPanel()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .accessibilityLabel("Выбрать папку для сохранения")
+        }
+    }
+
+    /// The folder path with `$HOME` collapsed to `~` for display.
+    ///
+    /// Replaces the home directory prefix with `~` — equivalent to `NSString.abbreviatingWithTildeInPath`
+    /// but avoids bridging to the Objective-C reference type, which SwiftLint flags as `legacy_objc_type`.
+    ///
+    /// Bug fix (F): `hasPrefix(home)` incorrectly matched `/Users/foobar` when `home = /Users/foo`.
+    /// Guard requires `home + "/"` as prefix (or exact equality for `$HOME` itself) to avoid false matches.
+    private var abbreviatedPath: String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let path = self.folderURL.path
+        if path == home {
+            return "~"
+        }
+        let homeWithSlash = home + "/"
+        if path.hasPrefix(homeWithSlash) {
+            return "~/" + String(path.dropFirst(homeWithSlash.count))
+        }
+        return path
+    }
+
+    /// Opens a directory-picker `NSOpenPanel` as a child of the key window.
+    ///
+    /// `canCreateDirectories` is `true` so the user can create a new folder inline without
+    /// leaving the dialog. `canChooseFiles` is `false` — only directories are valid targets.
+    private func openPanel() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = self.folderURL
+        panel.prompt = "Выбрать"
+        panel.message = "Выберите папку для сохранения записей"
+
+        guard let window = NSApp.keyWindow else {
+            // Fallback: run modally if there is no key window (should not happen in practice).
+            if panel.runModal() == .OK, let url = panel.url {
+                self.onChoose(url)
+            }
+            return
+        }
+
+        panel.beginSheetModal(for: window) { response in
+            if response == .OK, let url = panel.url {
+                self.onChoose(url)
+            }
+        }
     }
 }

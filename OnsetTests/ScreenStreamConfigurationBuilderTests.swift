@@ -97,7 +97,7 @@ struct ScreenStreamConfigurationBuilderTests {
             degradedWindowSeconds: self.config.degradedWindowSeconds,
             postStopDropWarningThreshold: self.config.postStopDropWarningThreshold,
             budgetCap: self.config.budgetCap,
-            outputDirectory: self.config.outputDirectory
+            baseOutputDirectory: self.config.baseOutputDirectory
         )
         let streamConfig = ScreenStreamConfigurationBuilder.makeConfiguration(plan: plan, config: customConfig)
 
@@ -131,7 +131,7 @@ struct ScreenStreamConfigurationBuilderTests {
             degradedWindowSeconds: self.config.degradedWindowSeconds,
             postStopDropWarningThreshold: self.config.postStopDropWarningThreshold,
             budgetCap: self.config.budgetCap,
-            outputDirectory: self.config.outputDirectory
+            baseOutputDirectory: self.config.baseOutputDirectory
         )
         let streamConfig = ScreenStreamConfigurationBuilder.makeConfiguration(plan: plan, config: emptyConfig)
 

@@ -84,6 +84,9 @@ final class MainViewModel {
     @ObservationIgnored
     let makeStore: () -> any DeviceSelectionPersisting
 
+    @ObservationIgnored
+    private let outputFolderStore: any OutputFolderPersisting
+
     /// Closure seam for display-configuration-change events — injectable for tests.
     ///
     /// Live default yields `Void` on each `NSApplication.didChangeScreenParametersNotification`.
@@ -163,6 +166,19 @@ final class MainViewModel {
         }
     }
 
+    // MARK: - Output folder (#225)
+
+    /// The user-selected base output directory, or `~/Movies/Onset/` when no selection was saved.
+    ///
+    /// UI reads this to display the current path and offer "Show in Finder". The setter persists
+    /// the new path immediately via `outputFolderStore`. Backed by `UserDefaults` (no sandbox,
+    /// no security-scoped bookmark needed — Onset runs as Developer ID / direct distribution).
+    var outputDirectoryURL: URL {
+        didSet {
+            self.outputFolderStore.saveBaseDirectory(self.outputDirectoryURL)
+        }
+    }
+
     /// Whether the camera is enabled for recording (#77, #76).
     ///
     /// When `false`: `activeCamera` is nil, no preview is shown, camera is excluded from
@@ -209,6 +225,13 @@ final class MainViewModel {
     /// Internal (not private) so `MainViewModel+Record.swift` and `MainViewModel+Devices.swift`
     /// extensions can write it.
     var recordError: String?
+
+    /// Non-nil when `validateOutputDirectory()` detected a missing or non-writable folder.
+    ///
+    /// Surfaced as a modal alert in `MainView` (output-directory errors originate in the ВЫВОД
+    /// section, which is visually distant from the Record button — a footer caption is easily missed).
+    /// Written exclusively by `MainViewModel+Record.swift`; reset at each `record()` call.
+    var outputDirectoryError: String?
 
     /// `true` while a `record()` call is in flight.
     /// Internal (not private) so `MainViewModel+Record.swift` extension can write it.
@@ -393,6 +416,9 @@ final class MainViewModel {
         makeStore: @escaping () -> any DeviceSelectionPersisting = {
             UserDefaultsDeviceSelectionStore()
         },
+        makeOutputFolderStore: @escaping () -> any OutputFolderPersisting = {
+            UserDefaultsOutputFolderStore()
+        },
         screenChangeEvents: @escaping () -> AsyncStream<Void> = {
             // Bridges didChangeScreenParametersNotification as a Void signal.
             // Async-sequence form avoids a non-Sendable observer token in @Sendable closure.
@@ -417,5 +443,12 @@ final class MainViewModel {
         self.makeCameraSource = makeCameraSource
         self.makeStore = makeStore
         self.screenChangeEvents = screenChangeEvents
+
+        // Create the store once; the same instance is reused in outputDirectoryURL.didSet.
+        self.outputFolderStore = makeOutputFolderStore()
+
+        // Restore the persisted base directory, falling back to ~/Movies/Onset/.
+        // `RecordingOutput.directory()` is the single authoritative source for the default path.
+        self.outputDirectoryURL = self.outputFolderStore.loadBaseDirectory() ?? RecordingOutput.directory()
     }
 }

@@ -111,8 +111,9 @@ nonisolated enum RecordingError: Error {
 extension RecordingError: LocalizedError {
     /// Actionable description surfaced to the user.
     ///
-    /// Only `captureDidNotActivate` returns a string; other cases fall through to Swift's
-    /// default formatting — their callers set explicit UI copy at the call site.
+    /// `captureDidNotActivate` and `outputDirectoryUnavailable` return actionable strings;
+    /// other cases fall through to Swift's default formatting — their callers set explicit
+    /// UI copy at the call site.
     nonisolated var errorDescription: String? {
         switch self {
         case .captureDidNotActivate:
@@ -120,6 +121,11 @@ extension RecordingError: LocalizedError {
             "Не удалось начать запись экрана. " +
                 "Разрешите запись экрана в Системных настройках → " +
                 "Конфиденциальность и безопасность → Запись экрана и попробуйте снова."
+
+        case .outputDirectoryUnavailable:
+            // Actionable instruction: tell the user the folder is missing or not writable.
+            "Не удалось подготовить папку для записи. " +
+                "Проверьте, что выбранная папка существует и доступна для записи."
 
         default:
             nil

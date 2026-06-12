@@ -39,6 +39,9 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
     nonisolated let captureActiveStream: AsyncStream<Void>
     private let captureActiveContinuation: AsyncStream<Void>.Continuation
 
+    /// Fake session directory — a sentinel path used in coordinator tests.
+    nonisolated let sessionDirectory = URL(filePath: "/tmp/onset-fake-session")
+
     private(set) var startCalled = false
     private(set) var stopCalled = false
     private(set) var startCount = 0
@@ -181,7 +184,8 @@ private enum CoordinatorFixtures {
                 cameraDescription: nil,
                 microphoneDescription: nil
             ),
-            origin: origin
+            origin: origin,
+            config: .mvpDefault
         )
     }
 
@@ -234,7 +238,8 @@ private enum CoordinatorFixtures {
                 cameraDescription: "FaceTime HD · 1080p30",
                 microphoneDescription: "MacBook Pro — микрофон"
             ),
-            origin: .main
+            origin: .main,
+            config: .mvpDefault
         )
     }
 }
@@ -364,8 +369,8 @@ struct RecordingCoordinatorTests {
         #expect(coordinator.lastDegradedWarning == false)
         #expect(coordinator.drops.encoderBackpressureDrops == 0, "drops propagate from result (clean path)")
         #expect(coordinator.lastWriteError == nil, "no write error on clean result")
-        #expect(revealed?.count == 1, "finished files must be revealed in Finder")
-        #expect(revealed?.first?.lastPathComponent == "onset-coordinator-screen.mp4", "revealed URL matches result")
+        #expect(revealed?.count == 1, "session folder must be revealed in Finder")
+        #expect(revealed?.first?.lastPathComponent == "onset-fake-session", "revealed URL is the session directory")
     }
 
     @Test("stop → phase returns to .idle when started from the menu bar")

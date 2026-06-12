@@ -96,6 +96,11 @@ struct RecordingRequest {
     let checklist: RecordingChecklist
     /// Where the recording was started from (main window vs menu bar).
     let origin: RecordingOrigin
+    /// Recording configuration carrying the user-selected output directory (#225).
+    ///
+    /// Defaults to `RecordingConfiguration.mvpDefault` when callers that predate output-folder
+    /// selection do not provide an explicit config.
+    let config: RecordingConfiguration
 }
 
 // MARK: - RecordingCoordinator
@@ -153,6 +158,12 @@ final class RecordingCoordinator {
     /// The terminal result of the most recent session (for reveal + warning). `nil` until the first
     /// stop completes.
     private(set) var lastResult: RecordingResult?
+
+    /// The session-scoped output subdirectory of the most recent session.
+    ///
+    /// Set at stop time from `session.sessionDirectory` so `revealInFinder` can open the folder
+    /// instead of individual files (#225). `nil` until the first stop completes.
+    private(set) var lastSessionDirectory: URL?
 
     /// `true` when the most recent finished session had enough encoder-backpressure drops to
     /// warrant the post-stop warning (AC-9). Threshold from `RecordingConfiguration`.
@@ -299,13 +310,20 @@ final class RecordingCoordinator {
                 cameraDevice: request.cameraDevice,
                 cameraFormat: request.cameraFormat,
                 micDevice: request.micDevice,
-                config: .mvpDefault
+                config: request.config
             )
         },
         activationTimeoutSeconds: Double = 30,
         revealInFinder: @escaping ([URL]) -> Void = { urls in
-            guard !urls.isEmpty else { return }
-            NSWorkspace.shared.activateFileViewerSelecting(urls)
+            // Open the session folder itself in Finder (AC-9 #225): `activateFileViewerSelecting`
+            // on a directory-URL would select the folder inside its parent — `open(_:)` opens
+            // the folder's contents instead.
+            guard let url = urls.first else { return }
+            let opened = NSWorkspace.shared.open(url)
+            if !opened {
+                // Log only the folder name — not the full path — to avoid logging the user's home directory.
+                coordinatorLogger.error("NSWorkspace.open failed for '\(url.lastPathComponent)'")
+            }
         }
     ) {
         self.sessionFactory = sessionFactory
@@ -633,9 +651,13 @@ final class RecordingCoordinator {
         self.revocationTask = nil
         await tick?.value
 
+        // Capture sessionDirectory before the await — nonisolated let, safe to read synchronously.
+        let sessionDir = session.sessionDirectory
+
         let result = await session.stop()
 
         self.lastResult = result
+        self.lastSessionDirectory = sessionDir
         self.drops = result.drops
         self.lastSessionEverDegraded = result.sessionEverDegraded
         self.lastDroppedFrames = result.drops.encoderBackpressureDrops
@@ -646,7 +668,9 @@ final class RecordingCoordinator {
 
         // Transient finished phase, then return to the origin (spec lifecycle).
         self.phase = .finished
-        self.revealInFinder(result.outputURLs)
+        // Reveal the session folder itself rather than individual files (#225):
+        // the folder groups screen + camera files and survives an empty session gracefully.
+        self.revealInFinder([sessionDir])
         if let writeError = result.writeFailureReason {
             coordinatorLogger.error(
                 "Recording finished with write failure — \(writeError)"
@@ -678,8 +702,11 @@ final class RecordingCoordinator {
         }
 
         self.isStopping = false
+        // Session directory name (not full path) is safe to log — no home path (issue #188).
+        let fileCount = result.outputURLs.count
+        let originDescription = String(describing: self.origin)
         coordinatorLogger.info(
-            "Recording stopped — files=\(result.outputURLs.count) origin=\(String(describing: self.origin))"
+            "Recording stopped — files=\(fileCount) dir=\(sessionDir.lastPathComponent) origin=\(originDescription)"
         )
     }
 

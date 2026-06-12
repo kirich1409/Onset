@@ -50,6 +50,16 @@ nonisolated protocol RecordingControlling: Sendable {
     /// **Single-consumer.** The coordinator is the ONLY iterator.
     nonisolated var captureActiveStream: AsyncStream<Void> { get }
 
+    /// The session-scoped output subdirectory.
+    ///
+    /// The URL is valid from `init` — it is computed once at construction time and is
+    /// immutable thereafter. The **directory itself is created lazily** in `start()` via
+    /// `RecordingOutput.ensureDirectory(_:)`; before `start()` returns, the path may not
+    /// yet exist on disk.
+    ///
+    /// `nonisolated` because `URL` is a value type and the property is set once at init.
+    nonisolated var sessionDirectory: URL { get }
+
     /// Starts the session. Throws `RecordingError` on the AC-6 / AC-11 blocking paths. Never throws
     /// `.budgetExceeded` — the session self-adopts the reduced profile (research §3.1).
     func start(permissions: EffectivePermissions) async throws

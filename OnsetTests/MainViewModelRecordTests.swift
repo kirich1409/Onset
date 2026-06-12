@@ -163,6 +163,54 @@ struct MainViewModelRecordTests {
 
         #expect(startCount == 1, "only one coordinator.start must be invoked under concurrent record() calls")
     }
+
+    // MARK: - Output-directory validation
+
+    @Test("record() — non-existent output directory → outputDirectoryError set, no coordinator start")
+    func record_nonExistentOutputDirectory_errorSet() async {
+        var startCalled = false
+        let sut = await self.makeSUT(startBehavior: { _ in startCalled = true })
+        // Point to a path that cannot exist at test runtime.
+        sut.outputDirectoryURL = URL(
+            filePath: "/tmp/onset-nonexistent-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+
+        await sut.record()
+
+        #expect(
+            !startCalled,
+            "coordinator.start must NOT be called when the output directory does not exist"
+        )
+        #expect(
+            sut.outputDirectoryError != nil,
+            "outputDirectoryError must be set for a missing output directory"
+        )
+    }
+
+    @Test("record() — outputDirectoryError reset and re-set on second call after external clear")
+    func record_secondCallAfterExternalClear_errorReSet() async {
+        let sut = await self.makeSUT()
+        let missingURL = URL(
+            filePath: "/tmp/onset-nonexistent-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        sut.outputDirectoryURL = missingURL
+
+        // First call: error is set.
+        await sut.record()
+        #expect(sut.outputDirectoryError != nil, "outputDirectoryError must be set on first call")
+
+        // Simulate alert dismissal resetting the error (what the view's Binding does on OK tap).
+        sut.outputDirectoryError = nil
+
+        // Second call with the same missing directory: error must be set again.
+        await sut.record()
+        #expect(
+            sut.outputDirectoryError != nil,
+            "outputDirectoryError must be re-set on a second call after external clear"
+        )
+    }
 }
 
 // swiftlint:enable trailing_closure
