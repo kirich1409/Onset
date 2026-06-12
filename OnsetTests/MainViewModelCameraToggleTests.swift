@@ -4,11 +4,15 @@ import Testing
 
 // MARK: - MainViewModelCameraToggleTests
 
-/// Tests for the camera toggle feature (#77, #76).
+// swiftlint:disable type_body_length
+// Rationale: covers the full camera toggle + picker-selection surface area (#77, #76, #224);
+// splitting by topic would scatter related toggle/picker/persistence cases across files.
+
+/// Tests for the camera toggle feature (#77, #76) and the picker-selection API (#224).
 ///
-/// Covers `cameraEnabled`, `activeCamera`, `isCameraActive`, and their effect on the
-/// recording request and `canRecord`. The suite is `@MainActor` because `MainViewModel`
-/// and `FakePermissionsService` are `@MainActor`-isolated.
+/// Covers `cameraEnabled`, `cameraPickerSelection`, `activeCamera`, `isCameraActive`, and their
+/// effect on the recording request and `canRecord`. The suite is `@MainActor` because
+/// `MainViewModel` and `FakePermissionsService` are `@MainActor`-isolated.
 @Suite("MainViewModel — camera toggle")
 @MainActor
 struct MainViewModelCameraToggleTests {
@@ -22,17 +26,37 @@ struct MainViewModelCameraToggleTests {
         displays: [Display] = []
     )
     -> MainViewModel {
-        let perms = FakePermissionsService(screen: screen, camera: camera, microphone: microphone)
-        let coordinator = RecordingCoordinator()
         // swiftlint:disable:next force_unwrapping
         let store = InMemoryUserDefaults(suiteName: nil)!
+        return self.makeSUT(
+            screen: screen,
+            camera: camera,
+            microphone: microphone,
+            cameras: cameras,
+            displays: displays,
+            defaults: store
+        )
+    }
+
+    /// Overload that accepts an explicit `InMemoryUserDefaults` for persistence round-trip tests.
+    private func makeSUT(
+        screen: PermissionStatus = .authorized,
+        camera: PermissionStatus = .authorized,
+        microphone: PermissionStatus = .notDetermined,
+        cameras: [CameraDevice] = [],
+        displays: [Display] = [],
+        defaults: InMemoryUserDefaults
+    )
+    -> MainViewModel {
+        let perms = FakePermissionsService(screen: screen, camera: camera, microphone: microphone)
+        let coordinator = RecordingCoordinator()
         return MainViewModel(
             permissions: perms,
             coordinator: coordinator,
             discoverDisplays: { _ in displays },
             discoverCameras: { _ in cameras },
             discoverMicrophones: { _ in [] },
-            makeStore: { UserDefaultsDeviceSelectionStore(defaults: store) }
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) }
         )
     }
 
@@ -230,4 +254,133 @@ struct MainViewModelCameraToggleTests {
         #expect(sut.activeCamera == nil)
         #expect(sut.isCameraActive == false)
     }
+
+    // MARK: - cameraPickerSelection (#224)
+
+    @Test("cameraPickerSelection equals selectedCameraID when camera is enabled")
+    func cameraPickerSelection_enabled_equalsSelectedCameraID() async {
+        let cam = Self.makeCamera(id: "cam-picker")
+        let sut = self.makeSUT(cameras: [cam])
+        await sut.loadDevices()
+        // loadDevices auto-selects the first camera and sets cameraEnabled = true.
+
+        #expect(sut.cameraPickerSelection == "cam-picker")
+    }
+
+    @Test("cameraPickerSelection is nil when camera is disabled")
+    func cameraPickerSelection_disabled_isNil() async {
+        let cam = Self.makeCamera(id: "cam-picker")
+        let sut = self.makeSUT(cameras: [cam])
+        await sut.loadDevices()
+
+        sut.cameraEnabled = false
+
+        #expect(sut.cameraPickerSelection == nil)
+    }
+
+    @Test("cameraPickerSelection is nil when cameraEnabled true but no device selected (disconnected)")
+    func cameraPickerSelection_disconnected_isNil() async {
+        // Disconnected state: cameraEnabled = true, selectedCameraID = nil
+        let sut = self.makeSUT(cameras: [])
+        await sut.loadDevices()
+        // No cameras → auto-select skipped; cameraEnabled still defaults to true.
+
+        #expect(sut.cameraEnabled == true)
+        #expect(sut.selectedCameraID == nil)
+        #expect(sut.cameraPickerSelection == nil)
+    }
+
+    // MARK: - cameraPickerSelection setter — disable (nil)
+
+    @Test("Setting cameraPickerSelection to nil disables camera, persists .disabled")
+    func setCameraPickerSelection_nil_disablesAndPersists() async {
+        let cam = Self.makeCamera(id: "cam-1")
+
+        await withScopedDefaults { defaults in
+            let sut = self.makeSUT(cameras: [cam], defaults: defaults)
+            await sut.loadDevices()
+            // Camera starts enabled with cam-1 selected.
+
+            sut.cameraPickerSelection = nil
+
+            #expect(sut.cameraEnabled == false)
+            #expect(sut.activeCamera == nil)
+
+            // selectedCameraID is intentionally preserved so re-enable restores the prior device.
+            #expect(sut.selectedCameraID == cam.uniqueID)
+
+            // Verify persistence round-trip: a second launch must restore disabled.
+            let secondLaunch = self.makeSUT(cameras: [cam], defaults: defaults)
+            await secondLaunch.loadDevices()
+            #expect(secondLaunch.cameraEnabled == false)
+            #expect(secondLaunch.cameraPickerSelection == nil)
+        }
+    }
+
+    // MARK: - cameraPickerSelection setter — select device from disabled state
+
+    @Test("Setting cameraPickerSelection to a device ID from disabled state enables camera")
+    func setCameraPickerSelection_deviceID_fromDisabled_enablesCamera() async {
+        let cam1 = Self.makeCamera(id: "cam-1")
+        let cam2 = Self.makeCamera(id: "cam-2")
+        let sut = self.makeSUT(cameras: [cam1, cam2])
+        await sut.loadDevices()
+        sut.cameraEnabled = false
+
+        sut.cameraPickerSelection = "cam-2"
+
+        #expect(sut.cameraEnabled == true)
+        #expect(sut.selectedCameraID == "cam-2")
+        #expect(sut.activeCamera?.uniqueID == "cam-2")
+        #expect(sut.cameraPickerSelection == "cam-2")
+    }
+
+    // MARK: - Restore from persistence — cameraPickerSelection reflects stored state
+
+    @Test("Restore from .disabled → cameraPickerSelection is nil on next launch")
+    func restore_disabled_cameraPickerSelection_isNil() async {
+        let cam = Self.makeCamera(id: "cam-restore")
+
+        await withScopedDefaults { defaults in
+            let firstLaunch = self.makeSUT(cameras: [cam], defaults: defaults)
+            await firstLaunch.loadDevices()
+            firstLaunch.cameraEnabled = false
+
+            let secondLaunch = self.makeSUT(cameras: [cam], defaults: defaults)
+            await secondLaunch.loadDevices()
+
+            #expect(secondLaunch.cameraPickerSelection == nil)
+        }
+    }
+
+    @Test("Restore from .enabled(id) → cameraPickerSelection equals saved uniqueID on next launch")
+    func restore_enabled_cameraPickerSelection_equalsID() async {
+        let cam = Self.makeCamera(id: "cam-restore")
+
+        await withScopedDefaults { defaults in
+            let firstLaunch = self.makeSUT(cameras: [cam], defaults: defaults)
+            await firstLaunch.loadDevices()
+            // Camera is auto-selected and enabled by loadDevices; explicitly confirm selection.
+            firstLaunch.selectedCameraID = cam.uniqueID
+
+            let secondLaunch = self.makeSUT(cameras: [cam], defaults: defaults)
+            await secondLaunch.loadDevices()
+
+            #expect(secondLaunch.cameraPickerSelection == cam.uniqueID)
+        }
+    }
+
+    @Test("First launch with no saved selection → cameraPickerSelection equals first camera uniqueID")
+    func firstLaunch_noSavedSelection_cameraPickerSelection_equalsFirstCamera() async {
+        let cam = Self.makeCamera(id: "cam-first-launch")
+
+        await withScopedDefaults { defaults in
+            let sut = self.makeSUT(cameras: [cam], defaults: defaults)
+            await sut.loadDevices()
+
+            #expect(sut.cameraPickerSelection == cam.uniqueID)
+        }
+    }
 }
+
+// swiftlint:enable type_body_length

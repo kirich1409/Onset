@@ -22,10 +22,14 @@ nonisolated let mainViewModelLogger = Logger(
 /// - (c) mic unavailable → record without audio, «без звука» indicator
 /// - (d) screen permission denied → empty state (return to onboarding)
 ///
-/// ### Camera toggle
-/// `cameraEnabled` (default `true`) lets the user switch camera recording on/off (#77, #76).
-/// `activeCamera` is the unified single predicate: non-nil iff `cameraEnabled == true` AND a
-/// real camera is selected. Camera is NOT a factor in `canRecord` — screen is always required.
+/// ### Camera selection
+/// `cameraPickerSelection` is the single source of truth for the camera device picker (#224).
+/// `nil` represents "Выключена" (camera disabled); a non-nil `String` is the `uniqueID` of the
+/// selected device. Setting it drives both `cameraEnabled` and `selectedCameraID`.
+/// `cameraEnabled` remains a stored `var` for internal use by persistence, restore logic, and
+/// `activeCamera`. `activeCamera` is the unified single predicate: non-nil iff `cameraEnabled`
+/// is `true` AND a real camera is selected. Camera is NOT a factor in `canRecord` — screen is
+/// always required.
 ///
 /// ### Preview lifecycle
 /// A generation counter (`previewGeneration`) drives `.id()` on `CameraPreviewRepresentable`
@@ -39,6 +43,7 @@ nonisolated let mainViewModelLogger = Logger(
 /// `RecordingSession` has no screen-skip branch. Screen capture is mandatory in MVP.
 @Observable
 @MainActor
+// swiftlint:disable:next type_body_length
 final class MainViewModel {
     // MARK: - Injectable seams
 
@@ -216,6 +221,42 @@ final class MainViewModel {
     /// Equivalent to `activeCamera != nil`; surfaced separately for readability at call sites.
     var isCameraActive: Bool {
         self.activeCamera != nil
+    }
+
+    // MARK: - Camera picker selection (#224)
+
+    /// Single source of truth for the camera device picker.
+    ///
+    /// Maps the two-field `(cameraEnabled, selectedCameraID)` state onto a single `String?`:
+    /// - `nil` — camera is disabled ("Выключена" picker row is selected).
+    /// - non-nil — camera is enabled and the value is the `uniqueID` of the selected device.
+    ///
+    /// Disconnected state (`cameraEnabled == true`, `selectedCameraID == nil`) also maps to `nil`
+    /// so the picker reflects "no selection"; the disconnected notice is surfaced separately via
+    /// `disconnectedCameraName`.
+    ///
+    /// ### Setter semantics
+    /// - `nil` → disables the camera (`cameraEnabled = false`). `selectedCameraID` is unchanged
+    ///   so re-enabling via `cameraEnabled = true` restores the previous device automatically.
+    /// - non-nil id → enables the camera and sets `selectedCameraID = id`.
+    ///
+    /// Use `$model.cameraPickerSelection` as the `Picker` binding; tag the "Выключена" row with
+    /// `String?.none` and device rows with `Optional(camera.uniqueID)`.
+    var cameraPickerSelection: String? {
+        get {
+            self.cameraEnabled ? self.selectedCameraID : nil
+        }
+        set {
+            if let id = newValue {
+                // Non-nil: enable the camera and select the given device.
+                self.cameraEnabled = true
+                self.selectedCameraID = id
+            } else {
+                // nil: disable the camera. selectedCameraID is intentionally preserved
+                // so re-enabling via cameraEnabled = true restores the prior selection.
+                self.cameraEnabled = false
+            }
+        }
     }
 
     // MARK: - Error state
