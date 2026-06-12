@@ -238,7 +238,9 @@ final class MainViewModel {
     /// ### Setter semantics
     /// - `nil` → disables the camera (`cameraEnabled = false`). `selectedCameraID` is unchanged
     ///   so re-enabling via `cameraEnabled = true` restores the previous device automatically.
-    /// - non-nil id → enables the camera and sets `selectedCameraID = id`.
+    /// - non-nil id → sets `selectedCameraID = id` first, then enables the camera.
+    ///   This order prevents a parasitic intermediate persist: `cameraEnabled.didSet` calls
+    ///   `selectFirstCameraIfNeeded()`, which exits early when `selectedCameraID` is already set.
     ///
     /// Use `$model.cameraPickerSelection` as the `Picker` binding; tag the "Выключена" row with
     /// `String?.none` and device rows with `Optional(camera.uniqueID)`.
@@ -248,9 +250,10 @@ final class MainViewModel {
         }
         set {
             if let id = newValue {
-                // Non-nil: enable the camera and select the given device.
-                self.cameraEnabled = true
+                // Non-nil: select the device first so selectFirstCameraIfNeeded() (called
+                // from cameraEnabled.didSet) exits early — no parasitic intermediate persist.
                 self.selectedCameraID = id
+                self.cameraEnabled = true
             } else {
                 // nil: disable the camera. selectedCameraID is intentionally preserved
                 // so re-enabling via cameraEnabled = true restores the prior selection.

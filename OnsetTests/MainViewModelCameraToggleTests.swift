@@ -4,7 +4,7 @@ import Testing
 
 // MARK: - MainViewModelCameraToggleTests
 
-// swiftlint:disable type_body_length
+// swiftlint:disable type_body_length file_length
 // Rationale: covers the full camera toggle + picker-selection surface area (#77, #76, #224);
 // splitting by topic would scatter related toggle/picker/persistence cases across files.
 
@@ -335,6 +335,39 @@ struct MainViewModelCameraToggleTests {
         #expect(sut.cameraPickerSelection == "cam-2")
     }
 
+    // MARK: - cameraPickerSelection setter — fresh disabled state selects exactly the requested device
+
+    @Test("cameraPickerSelection setter from nil-selectedID disabled state persists .enabled(B), not .enabled(A)")
+    func setCameraPickerSelection_fromNilSelectedID_disabled_persistsExactDevice() async {
+        let camA = Self.makeCamera(id: "cam-A")
+        let camB = Self.makeCamera(id: "cam-B")
+
+        await withScopedDefaults { defaults in
+            // Build SUT with two cameras but without calling loadDevices, so auto-select never runs.
+            // Set cameraEnabled = false explicitly to reach the target state:
+            // cameraEnabled=false, selectedCameraID=nil.
+            let sut = self.makeSUT(cameras: [camA, camB], defaults: defaults)
+            sut.cameraEnabled = false
+            // Confirm pre-conditions: no device selected, camera off.
+            #expect(sut.selectedCameraID == nil)
+            #expect(sut.cameraEnabled == false)
+
+            // Act: select cam-B via the picker binding.
+            sut.cameraPickerSelection = camB.uniqueID
+
+            // selectedCameraID must be B, not A; cameraEnabled must flip on.
+            #expect(sut.selectedCameraID == camB.uniqueID)
+            #expect(sut.cameraEnabled == true)
+
+            // Persistence round-trip: second launch must restore .enabled(B), not .enabled(A).
+            let secondLaunch = self.makeSUT(cameras: [camA, camB], defaults: defaults)
+            await secondLaunch.loadDevices()
+            #expect(secondLaunch.selectedCameraID == camB.uniqueID)
+            #expect(secondLaunch.cameraEnabled == true)
+            #expect(secondLaunch.cameraPickerSelection == camB.uniqueID)
+        }
+    }
+
     // MARK: - Restore from persistence — cameraPickerSelection reflects stored state
 
     @Test("Restore from .disabled → cameraPickerSelection is nil on next launch")
@@ -383,4 +416,4 @@ struct MainViewModelCameraToggleTests {
     }
 }
 
-// swiftlint:enable type_body_length
+// swiftlint:enable type_body_length file_length

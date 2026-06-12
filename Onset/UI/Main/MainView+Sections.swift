@@ -64,9 +64,8 @@ extension MainView {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
+                .accessibilityLabel("Выберите камеру")
             }
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel("Устройство камеры")
         }
     }
 
