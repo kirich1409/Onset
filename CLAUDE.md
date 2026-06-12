@@ -88,7 +88,7 @@ Artifact checks (CI `artifact-checks` job):
   `pkill -9 Onset` (exactly this name, never broader). One `xcodebuild test` at a
   time — hardware tests fight over the camera and hang, spawning extra instances.
 - Reference hardware for L5: Logitech MX Brio (`docs/quality/production-quality-bar.md`).
-- Recordings land in `~/Movies/Onset/` — L5 outputs for verify-cfr/ffprobe live there.
+- Recordings land in session subfolders `Onset <timestamp>/` inside the user-selected base directory (default `~/Movies/Onset/`) — L5 outputs for verify-cfr/ffprobe live there.
 - Test-writing conventions (fakes, naming, suites): `OnsetTests/CLAUDE.md`.
 - Coverage on by default in `Onset.xctestplan`, scoped to target `Onset` (not the test
   bundle); the L5 plan gathers none. Inspect: add `-resultBundlePath /tmp/R.xcresult`
