@@ -1,3 +1,4 @@
+// swiftlint:disable file_length
 import AppKit
 import CoreGraphics
 import SwiftUI
@@ -19,47 +20,83 @@ extension MainView {
 
     // MARK: - Camera section
 
+    /// Camera section — device picker plus optional live preview.
+    ///
+    /// The toggle from the original design has been removed (#224): the first row is
+    /// the "Устройство" picker whose top item is "Выключена". Selecting any device
+    /// enables the camera; selecting "Выключена" disables it. The preview appears only
+    /// when a device is selected (`isCameraActive`). The denied TCC branch is preserved
+    /// via `cameraPickerOrDenied` and is always visible (no outer enable-gate).
     var cameraSection: some View {
         SectionCard(title: "КАМЕРА") {
             VStack(alignment: .leading, spacing: Metrics.rowSpacing) {
-                Toggle("Камера", isOn: self.$model.cameraEnabled)
-                    .toggleStyle(.switch)
-                    .accessibilityLabel("Камера")
-                // Gate on cameraEnabled (not isCameraActive) so the picker/denied rows
-                // remain visible when the toggle is on but no camera is available yet —
-                // that is when "Камеры не найдены" must render. isCameraActive is nil in
-                // that state, so using it here would hide the not-found row.
-                if self.model.cameraEnabled {
-                    self.cameraPickerOrDenied
-                    self.cameraPreview
-                }
+                self.cameraPickerOrDenied
+                self.cameraPreview
             }
         }
     }
 
+    /// Shows either the TCC-denied row, a "Камеры не найдены" placeholder, or the device picker.
+    ///
+    /// Layout matches the reference design: a "Устройство" label on the left and the menu
+    /// picker on the right. The label is rendered as a plain `Text` inside an `HStack` so it
+    /// respects the section's horizontal rhythm without requiring a `Form` context (consistent
+    /// with `OutputFolderRow`).
+    ///
+    /// Branch priority (top-to-bottom wins):
+    /// 1. TCC denied → `CameraDeniedRow`.
+    /// 2. Cameras available → device picker. When a disconnected notice is also present
+    ///    (`disconnectedCameraName != nil`), `CameraUnavailableRow(hasAlternatives: true)` is
+    ///    appended below the picker so the user can immediately select a replacement device.
+    /// 3. No cameras AND disconnected notice → `CameraUnavailableRow(hasAlternatives: false)`
+    ///    (no picker because there is nothing to pick from).
+    /// 4. No cameras AND no disconnected notice → non-interactive "Камеры не найдены" text,
+    ///    parallel to the microphone section's empty state.
     @ViewBuilder
     private var cameraPickerOrDenied: some View {
         if self.model.isCameraDenied {
             CameraDeniedRow(onReturnToOnboarding: self.onReturnToOnboarding)
-        } else if self.model.cameras.isEmpty {
+        } else if !self.model.cameras.isEmpty {
+            // Picker is always shown when alternatives exist — even in the disconnected state
+            // so the user can immediately choose a replacement device.
+            HStack {
+                Text("Устройство")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Picker("Устройство", selection: self.$model.cameraPickerSelection) {
+                    Text("Выключена").tag(String?.none)
+                    ForEach(self.model.cameras, id: \.uniqueID) { camera in
+                        Text(self.model.cameraLabel(for: camera))
+                            .tag(Optional(camera.uniqueID))
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .accessibilityLabel("Устройство камеры")
+            }
+            if let name = self.model.disconnectedCameraName {
+                // Supplementary notice below the picker: explains why the previously
+                // selected camera is no longer in the list. hasAlternatives = true because
+                // the picker above contains at least one device to switch to.
+                CameraUnavailableRow(cameraName: name, hasAlternatives: true)
+            }
+        } else if let name = self.model.disconnectedCameraName {
+            // No alternatives — only the unavailability notice, without a picker.
+            CameraUnavailableRow(cameraName: name, hasAlternatives: false)
+        } else {
             Text("Камеры не найдены")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-        } else {
-            Picker("Камера", selection: self.$model.selectedCameraID) {
-                ForEach(self.model.cameras, id: \.uniqueID) { camera in
-                    Text(self.model.cameraLabel(for: camera))
-                        .tag(Optional(camera.uniqueID))
-                }
-            }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .accessibilityLabel("Выберите камеру")
+                .accessibilityLabel("Камеры не найдены")
         }
     }
 
     @ViewBuilder
     private var cameraPreview: some View {
+        // Show the preview only when a device is selected; "Выключена" (nil picker) hides it.
+        // `isCameraActive` reflects whether the picker has a concrete device selected, surfaced
+        // via the VM's `isCameraActive` predicate.
         if self.model.isCameraActive {
             CameraPreviewRepresentable(sessionHandle: self.model.previewHandle)
                 .id(self.model.previewGeneration)
@@ -241,6 +278,44 @@ private struct CameraDeniedRow: View {
     }
 }
 
+// MARK: - CameraUnavailableRow
+
+/// Shown when `disconnectedCameraName != nil`: the previously selected camera has disappeared
+/// (e.g. unplugged or lid closed) while the camera was enabled. Distinguishes an involuntary
+/// disconnection from an explicit "Выключена" selection so the user is not confused.
+///
+/// When other cameras are available (`hasAlternatives == true`), the row appends a hint to
+/// select another device so the user immediately knows recovery is possible without dismissing
+/// the panel and inspecting the picker.
+private struct CameraUnavailableRow: View {
+    /// Display name of the missing camera device — shown in UI only, never logged.
+    let cameraName: String
+    /// When `true`, the hint "выберите другую камеру" is appended to the row label.
+    let hasAlternatives: Bool
+
+    var body: some View {
+        HStack(spacing: MainView.Metrics.accessorySpacing) {
+            Image(systemName: "camera.fill.badge.ellipsis")
+                .foregroundStyle(.secondary)
+                .frame(width: MainView.Metrics.iconColumnWidth)
+                .accessibilityHidden(true)
+            Text(self.rowText)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(self.rowText)
+    }
+
+    private var rowText: String {
+        if self.hasAlternatives {
+            "Камера «\(self.cameraName)» недоступна — выберите другую камеру"
+        } else {
+            "Камера «\(self.cameraName)» недоступна"
+        }
+    }
+}
+
 // MARK: - MicrophoneUnavailableRow
 
 private struct MicrophoneUnavailableRow: View {
@@ -359,3 +434,5 @@ private struct OutputFolderRow: View {
         }
     }
 }
+
+// swiftlint:enable file_length
