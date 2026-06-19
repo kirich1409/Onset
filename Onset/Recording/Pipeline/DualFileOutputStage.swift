@@ -105,6 +105,11 @@ actor DualFileOutputStage {
         var state: WriterState = .live
 
         /// `true` while the writer is open and accepting audio/video.
+        ///
+        /// A faulted writer MUST remain `isLive` (i.e. `recordFault` must never flip `state` to
+        /// `.finalized`): `finishAll`/`finalizePipeline` skip `markFinished()` on non-live writers,
+        /// and `markFinished()` is what seals the `drops` stream. If a fault left `drops` open,
+        /// `DropMonitor.stop()` — which drains those streams — would hang on session stop (#202).
         var isLive: Bool {
             if case .live = self.state { return true }
             return false

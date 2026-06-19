@@ -252,10 +252,14 @@ nonisolated struct BackpressureDegradationWindow {
 /// even when no new drops arrive. `RecordingState` is emitted on `state` only on TRANSITIONS.
 ///
 /// ### Lifecycle / teardown
-/// `stop()` is the primary terminator: it cancels and awaits the tick task, cancels the observe
-/// child tasks, and finishes the `state` stream (mirrors `VideoEncoder.stop()`'s finish-always
-/// discipline). `deinit` is a best-effort safety net — it can only cancel tasks and `finish()` the
-/// continuation (both thread-safe, no `await`).
+/// `stop()` is the primary (graceful) terminator: it cancels+awaits the tick task, then **drains**
+/// (awaits without cancelling) the observe child tasks so the buffered `DropEvent` tail is ingested
+/// before the counters are read (#202), then finishes the `state` stream. It assumes every observed
+/// `drops` stream is already finished. `cancelObservation()` is the abnormal-teardown terminator
+/// (failed start): it **cancels** the observe tasks instead of draining, so it cannot hang on an
+/// unfinished stream — at the cost of truncating the tail, which does not matter on a failed start.
+/// `deinit` is a best-effort safety net — it can only cancel tasks and `finish()` the continuation
+/// (both thread-safe, no `await`).
 actor DropMonitor {
     // MARK: - Logging
 
@@ -559,16 +563,63 @@ actor DropMonitor {
 
     // MARK: - Lifecycle
 
-    /// Primary terminator: cancels and awaits the recovery tick, cancels and awaits the observe
-    /// child tasks, then finishes the `state` stream. Idempotent — finishing an already-finished
-    /// continuation is a no-op. Awaiting the observe tasks before finishing the continuation
-    /// ensures deterministic teardown: any in-flight `ingest(_:)` call that holds the actor
-    /// completes before the stream is closed, eliminating reliance on yield-after-finish being a
-    /// no-op. Mirrors `VideoEncoder.stop()`'s finish-always discipline.
+    /// Primary terminator for the graceful stop path: cancels and awaits the recovery tick, then
+    /// **drains** (awaits without cancelling) the observe child tasks, then finishes the `state`
+    /// stream. Idempotent — finishing an already-finished continuation is a no-op.
+    ///
+    /// ### Why drain, not cancel (#202)
+    /// Each observe task runs `for await event in drops { ingest(event) }`. Cancelling the task
+    /// would truncate that iteration immediately, discarding any `DropEvent` still buffered in the
+    /// source's `drops` stream (buffer depth 8) — so the final `breakdownSnapshot()` / `snapshot()`
+    /// would under-count the tail. Awaiting *without* cancelling lets each task read its buffered
+    /// tail and end naturally when its stream finishes, so every drop is ingested before the
+    /// counters are read.
+    ///
+    /// The tick task is the exception: it is an infinite recovery loop that never ends on its own,
+    /// so it MUST be cancelled (then awaited) — it observes no `DropEvent`s, so cancelling it
+    /// truncates nothing.
+    ///
+    /// ### Precondition — all observed `drops` streams are finished before this call
+    /// Drain-only termination relies on every observed stream already being finished: an observe
+    /// task only ends once its `drops` stream finishes. The graceful caller
+    /// (`RecordingSession.performStop()`) guarantees this by ordering teardown so each observed
+    /// stream is finished first — `source.stop()` finishes source.drops, `encoder.stop()` finishes
+    /// encoder.drops, and `stage.finishAll()` → `FileWriter.markFinished()` finishes each
+    /// writer.drops — all before `dropMonitor.stop()`. If `stop()` were ever called with an
+    /// unfinished observed stream, this drain would hang forever; the abnormal teardown path
+    /// (failed start) must use `cancelObservation()` instead, which cancels rather than drains.
     ///
     /// Emits a single `.notice` per-source diagnostic summary after all observe tasks drain —
     /// counts are final at this point and survive in release `log show` output (AC-8).
     func stop() async {
+        self.tickTask?.cancel()
+        await self.tickTask?.value
+        self.tickTask = nil
+        // Drain without cancelling: each task ends when its (already-finished) stream is fully
+        // read, ingesting the buffered tail. See the precondition above — cancelling here would
+        // truncate that tail (#202).
+        for task in self.observeTasks {
+            await task.value
+        }
+        self.observeTasks.removeAll()
+        let breakdown = self.breakdownSnapshot()
+        self.logger.notice("\(breakdown.summaryLine, privacy: .public)")
+        self.stateContinuation.finish()
+    }
+
+    /// Abnormal-teardown terminator for the failed-start path: **cancels** the recovery tick and
+    /// the observe child tasks (rather than draining them), then finishes the `state` stream.
+    ///
+    /// Unlike `stop()`, this does NOT assume the observed `drops` streams are finished.
+    /// `teardownAfterFailedStart()` does not call `stage.finishAll()`, so if a writer was created
+    /// (and its `drops` observed) just before the start threw, that writer's stream may still be
+    /// open. Draining it would hang; cancelling ends each observe task immediately regardless of
+    /// stream state. Tail accuracy does not matter on a failed start — no `RecordingResult` reads
+    /// these counters — so truncating the buffered tail here is acceptable.
+    ///
+    /// Mirrors the `deinit` safety net but is awaitable, so the failed-start caller can deterministically
+    /// join the cancelled tasks before tearing down the rest of the session.
+    func cancelObservation() async {
         self.tickTask?.cancel()
         await self.tickTask?.value
         self.tickTask = nil
@@ -579,8 +630,6 @@ actor DropMonitor {
             await task.value
         }
         self.observeTasks.removeAll()
-        let breakdown = self.breakdownSnapshot()
-        self.logger.notice("\(breakdown.summaryLine, privacy: .public)")
         self.stateContinuation.finish()
     }
 }
