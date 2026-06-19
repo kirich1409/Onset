@@ -127,8 +127,12 @@ Full type-level map (Russian): `docs/architecture.md`.
   types (`CFRNormalizer`, `CapabilityResolver`, `EffectivePermissions`, `AppRouter`,
   `MenuBarLabelMapper`); framework/C interop stays inside actors. New logic follows
   this split.
-- **Default MainActor isolation**: value types declare explicit `nonisolated` static
-  operators for `Equatable`/`Hashable` to stay usable off the main actor.
+- **Default MainActor isolation**: value types declare `Equatable`/`Hashable`
+  conformances on the `nonisolated` type declaration itself. For structs this is
+  sufficient — the compiler synthesizes nonisolated witnesses. For enums,
+  `InferIsolatedConformances` still infers the synthesized conformance as
+  `@MainActor` even on a `nonisolated` decl, so enums require an explicit
+  `nonisolated static func ==` witness to be usable off the main actor.
 - **Single T0 epoch** (`HostTimeAnchor`) per session; all PTS are host-time offsets
   from T0, converted once at ingest.
 - **One-shot lifecycle**: `start()` succeeds once, a throwing `start()` is terminal,

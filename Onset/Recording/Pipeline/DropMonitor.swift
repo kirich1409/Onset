@@ -35,7 +35,7 @@ import os
 /// are distinct from the sliding window that drives `RecordingState`. Three fields cover four
 /// `DropReason` cases: `.captureDrop` and `.captureBackpressureDrops` fold into `captureDrops`;
 /// only `.encoderBackpressureDrops` feeds the degraded-state window.
-nonisolated struct DropCounters {
+nonisolated struct DropCounters: Equatable {
     /// Total `DropReason.encoderBackpressureDrops` seen this session. Also the only reason that
     /// feeds the degraded-state window.
     nonisolated let encoderBackpressureDrops: Int
@@ -61,23 +61,13 @@ nonisolated struct DropCounters {
 ///
 /// `dominantCause` identifies the backpressure stage that accumulated the most drops (see
 /// `DropCause` tie-break order). `.notDegraded` when the session was never degraded.
-nonisolated struct DropHealthSnapshot {
+nonisolated struct DropHealthSnapshot: Equatable {
     /// Cumulative per-reason drop tallies (same data as `DropCounters`).
     nonisolated let counters: DropCounters
     /// `true` when the session transitioned to `.degraded` at least once (live HUD flashed).
     nonisolated let sessionEverDegraded: Bool
     /// The backpressure stage that accumulated the most drops, or `.notDegraded` if never degraded.
     nonisolated let dominantCause: DropCause
-}
-
-// swiftformat:disable:next redundantEquatable
-extension DropHealthSnapshot: Equatable {
-    /// Manual `nonisolated` implementation (mirrors `DropCounters`).
-    nonisolated static func == (lhs: DropHealthSnapshot, rhs: DropHealthSnapshot) -> Bool {
-        lhs.counters == rhs.counters
-            && lhs.sessionEverDegraded == rhs.sessionEverDegraded
-            && lhs.dominantCause == rhs.dominantCause
-    }
 }
 
 // MARK: - DropBreakdown
@@ -88,7 +78,7 @@ extension DropHealthSnapshot: Equatable {
 /// maps to `DropSource` and is used EXCLUSIVELY for the single `.notice` log line emitted
 /// at session stop. It does not affect UI counters, `RecordingState`, or the degraded-state
 /// window — diagnostic only.
-nonisolated struct DropBreakdown {
+nonisolated struct DropBreakdown: Equatable {
     /// Drops detected by `ScreenSource` (SCStream video overflow).
     nonisolated let captureScreen: Int
     /// Drops detected by `CameraSource` video path (AVCapture video overflow).
@@ -110,31 +100,6 @@ nonisolated struct DropBreakdown {
             " capture-camera-audio=\(self.captureCameraAudio)" +
             " encode=\(self.encode)" +
             " writer=\(self.writer)"
-    }
-}
-
-// swiftformat:disable:next redundantEquatable
-extension DropBreakdown: Equatable {
-    /// Manual `nonisolated` implementation (mirrors `DropCounters`).
-    nonisolated static func == (lhs: DropBreakdown, rhs: DropBreakdown) -> Bool {
-        lhs.captureScreen == rhs.captureScreen
-            && lhs.captureCameraVideo == rhs.captureCameraVideo
-            && lhs.captureCameraAudio == rhs.captureCameraAudio
-            && lhs.encode == rhs.encode
-            && lhs.writer == rhs.writer
-    }
-}
-
-// The synthesised `==` would be inferred `@MainActor` under `InferIsolatedConformances` because
-// the conformance is declared in an extension; the manual `nonisolated` witness is required so
-// `DropCounters` is comparable from `nonisolated` code (mirrors `RecordingState` / `DropReason`).
-// swiftformat:disable:next redundantEquatable
-extension DropCounters: Equatable {
-    /// Manual `nonisolated` implementation (mirrors `DropReason`).
-    nonisolated static func == (lhs: DropCounters, rhs: DropCounters) -> Bool {
-        lhs.encoderBackpressureDrops == rhs.encoderBackpressureDrops
-            && lhs.captureDrops == rhs.captureDrops
-            && lhs.cfrNormalizationDrops == rhs.cfrNormalizationDrops
     }
 }
 
