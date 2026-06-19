@@ -129,16 +129,22 @@ extension MainView {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             } else {
-                Picker("Микрофон", selection: self.$model.selectedMicID) {
-                    Text("Без микрофона").tag(String?.none)
-                    ForEach(self.model.microphones, id: \.uniqueID) { mic in
-                        Text(self.model.microphoneLabel(for: mic))
-                            .tag(Optional(mic.uniqueID))
+                HStack {
+                    Text("Устройство")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    Picker("Устройство", selection: self.$model.selectedMicID) {
+                        Text("Без микрофона").tag(String?.none)
+                        ForEach(self.model.microphones, id: \.uniqueID) { mic in
+                            Text(self.model.microphoneLabel(for: mic))
+                                .tag(Optional(mic.uniqueID))
+                        }
                     }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .accessibilityLabel("Устройство микрофона")
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                .accessibilityLabel("Выберите микрофон")
             }
         }
     }
@@ -215,15 +221,22 @@ private struct DisplayPickerContent: View {
         } else if self.model.displays.count == 1, let display = self.model.displays.first {
             SingleDisplayRow(label: self.model.displayLabel(for: display))
         } else {
-            Picker("Дисплей", selection: self.$model.selectedDisplayID) {
-                Text("Выберите дисплей").tag(CGDirectDisplayID?.none)
-                ForEach(self.model.displays, id: \.displayID) { display in
-                    Text(self.model.displayLabel(for: display))
-                        .tag(Optional(display.displayID))
+            HStack {
+                Text("Дисплей")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Picker("Дисплей", selection: self.$model.selectedDisplayID) {
+                    Text("Выберите дисплей").tag(CGDirectDisplayID?.none)
+                    ForEach(self.model.displays, id: \.displayID) { display in
+                        Text(self.model.displayLabel(for: display))
+                            .tag(Optional(display.displayID))
+                    }
                 }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .accessibilityLabel("Дисплей")
             }
-            .pickerStyle(.menu)
-            .labelsHidden()
         }
     }
 }
