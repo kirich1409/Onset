@@ -468,8 +468,9 @@ actor FileWriter {
     private func markFaulted(track: String) {
         self.isFaulted = true
         let status = self.assetWriter.status.rawValue
-        let underlying = String(describing: self.assetWriter.error)
-        // .public on all interpolations so the NSError details survive privacy redaction (#105).
+        // Log error domain+code only — String(describing:)/userInfo may embed the ~/Movies/Onset/<user>
+        // output path via NSFilePathErrorKey/NSURLErrorKey (#188).
+        let underlying = self.assetWriter.error.map { "\(($0 as NSError).domain) #\(($0 as NSError).code)" } ?? "nil"
         self.logger.error(
             // swiftlint:disable:next line_length
             "FileWriter \(track, privacy: .public) append failed (writer faulted) — status \(status, privacy: .public): \(underlying, privacy: .public)"

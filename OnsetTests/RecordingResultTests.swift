@@ -261,3 +261,73 @@ struct RecordingResultTests {
         #expect(result.writeFailureReason == "The disk is full.")
     }
 }
+
+// MARK: - writeFailureDiagnostic — PII-free logging (#188)
+
+/// Regression lock for #188: `writeFailureDiagnostic` must never embed the output path.
+///
+/// `writeFailureReason` produces `localizedDescription` for user-facing alerts; that string
+/// may embed `~/Movies/Onset/<username>/…`. `writeFailureDiagnostic` must use only
+/// `(error as NSError).domain` and `.code`, which are definitionally path-free.
+@Suite("RecordingResult — writeFailureDiagnostic PII-free logging (#188)")
+struct RecordingResultDiagnosticTests {
+    private let screenURL = URL(filePath: "/tmp/screen.mp4")
+    private let cameraURL = URL(filePath: "/tmp/camera.mp4")
+    private let zeroDrops = DropHealthSnapshot(
+        counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
+        sessionEverDegraded: false,
+        dominantCause: .notDegraded
+    )
+
+    @Test("writeFailureDiagnostic contains domain and code, not the output path")
+    func writeFailureDiagnostic_isPIIFree() {
+        // Construct an error whose localizedDescription embeds a fake user path — the kind
+        // of string AVAssetWriter produces on disk-full or permission errors (#188).
+        let err = NSError(
+            domain: "TestDomain",
+            code: 42,
+            userInfo: [NSLocalizedDescriptionKey: "write failed /Users/secretuser/Movies/Onset/x.mp4"]
+        )
+        let result = RecordingResult.completed(
+            .screenOnly(.failed(url: self.screenURL, error: err)),
+            self.zeroDrops
+        )
+
+        let diagnostic = result.writeFailureDiagnostic
+        let reason = result.writeFailureReason
+
+        // diagnostic must carry the structured error identity
+        #expect(diagnostic?.contains("TestDomain") == true)
+        #expect(diagnostic?.contains("42") == true)
+
+        // diagnostic must NOT embed user-identifiable path fragments
+        #expect(diagnostic?.contains("secretuser") == false)
+        #expect(diagnostic?.contains("/Users/") == false)
+
+        // reason (used for the user-facing alert) still carries the path — proves the
+        // diagnostic is the PII-free variant, not a renamed alias
+        #expect(reason?.contains("secretuser") == true)
+    }
+
+    @Test("writeFailureDiagnostic is nil when no writer failed")
+    func writeFailureDiagnostic_nilWhenNoFailure() {
+        let result = RecordingResult.completed(.screenOnly(.completed(url: self.screenURL)), self.zeroDrops)
+        #expect(result.writeFailureDiagnostic == nil)
+    }
+
+    @Test("writeFailureDiagnostic joins both screen and camera errors when both fail")
+    func writeFailureDiagnostic_joinsBothErrors() {
+        let screenErr = NSError(domain: "ScreenDomain", code: 1, userInfo: nil)
+        let cameraErr = NSError(domain: "CameraDomain", code: 2, userInfo: nil)
+        let result = RecordingResult.completed(
+            .both(
+                screen: .failed(url: self.screenURL, error: screenErr),
+                camera: .failed(url: self.cameraURL, error: cameraErr)
+            ),
+            self.zeroDrops
+        )
+        let diagnostic = result.writeFailureDiagnostic
+        #expect(diagnostic?.contains("ScreenDomain #1") == true)
+        #expect(diagnostic?.contains("CameraDomain #2") == true)
+    }
+}
