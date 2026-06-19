@@ -71,6 +71,11 @@ actor FileWriter {
     /// Audio input seam, nil when `includeAudio` was false.
     private var audioSeam: (any WriterInputSeam)?
 
+    /// Owner-only chmod seam — injectable for testing so a chmod failure can be simulated
+    /// deterministically (a real chmod on a just-created, owned file always succeeds). The
+    /// failure is non-fatal in `start()` (#204), and this seam lets tests assert that path.
+    private var setOwnerOnly: @Sendable (URL) throws -> Void = { try RecordingOutput.setOwnerOnly(file: $0) }
+
     /// Backing `AVAssetWriterInput` for the video track.
     /// Kept separately so `start()` can call `add()` on it and tests can inspect settings.
     private let rawVideoInput: AVAssetWriterInput
@@ -241,7 +246,9 @@ actor FileWriter {
     /// - `startSession(atSourceTime:)` establishes the timeline origin: all appended
     ///   `CMSampleBuffer` PTS values are interpreted relative to this anchor.
     ///
-    /// After a successful start, the output file is locked to owner-read/write (`0o600`).
+    /// After a successful start, the output file is restricted to owner-read/write (`0o600`)
+    /// on a best-effort basis: a chmod failure is logged and tolerated (stability > strict
+    /// permissions, #204) — it never aborts the recording.
     ///
     /// - Parameter sourceTime: The session timeline origin — pass the first sample's `ptsHostTime`.
     /// - Throws: `FileWriterError.startFailed` if `startWriting()` returns `false`.
@@ -263,7 +270,16 @@ actor FileWriter {
         self.sessionSourceTime = sourceTime // captured for first-append diagnostics (#105)
 
         // Restrict the file to owner-read/write after AVAssetWriter creates it.
-        try RecordingOutput.setOwnerOnly(file: self.outputURL)
+        // Best-effort hardening: a chmod failure must not abort recording — degrading it
+        // to a warning keeps the pipeline alive with default permissions (stability >
+        // strict perms, #204). Throwing here would orphan the just-started AVAssetWriter.
+        do {
+            try self.setOwnerOnly(self.outputURL)
+        } catch {
+            self.logger.warning(
+                "setOwnerOnly failed; continuing with default file permissions: \(error)"
+            )
+        }
 
         self.startTelemetryTask()
         self.logger.info("FileWriter started: \(self.outputURL.lastPathComponent)")
@@ -636,6 +652,12 @@ actor FileWriter {
     /// Only effective when the writer was initialised with `includeAudio: true`.
     func injectAudioInputForTesting(_ seam: some WriterInputSeam) {
         self.audioSeam = seam
+    }
+
+    /// Overrides the owner-only chmod seam so tests can force a `setOwnerOnly` failure (#204)
+    /// and assert that `start()` tolerates it without throwing.
+    func setOwnerOnlyOverrideForTesting(_ override: @escaping @Sendable (URL) throws -> Void) {
+        self.setOwnerOnly = override
     }
 
     /// Finishes the `drops` stream without calling `markFinished()` or `finish()`.

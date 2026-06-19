@@ -31,6 +31,7 @@ import AVFoundation
 import CoreMedia
 import CoreVideo
 @testable import Onset
+import os
 import Testing
 import VideoToolbox
 
@@ -881,6 +882,99 @@ struct FileWriterAudioTests {
         #expect(events.isEmpty, "audio hard failure must not emit a DropEvent")
         let faulted = await writer.isFaultedForTesting
         #expect(faulted, "append()==false on audio must mark the writer faulted")
+    }
+}
+
+// MARK: - FileWriterChmodTests (L2, stub seam)
+
+//
+// Regression for #204: a `setOwnerOnly` (chmod 0o600) failure must NOT abort `start()`.
+// chmod is best-effort hardening, not a recording invariant — when it throws, recording
+// continues with default file permissions and the AVAssetWriter is never orphaned.
+
+@Suite("FileWriter — setOwnerOnly failure is non-fatal (#204, L2)")
+struct FileWriterChmodTests {
+    private let tempDir: URL = FileManager.default.temporaryDirectory
+        .appending(path: "FileWriterChmodTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+
+    private struct ChmodError: Error {}
+
+    /// Cross-isolation flag (the override closure runs inside the actor; the test reads it after).
+    private final class ChmodRanFlag: Sendable {
+        private let lock = OSAllocatedUnfairLock(initialState: false)
+
+        func markRan() {
+            self.lock.withLock { $0 = true }
+        }
+
+        var didRun: Bool {
+            self.lock.withLock { $0 }
+        }
+    }
+
+    private func makeEncodedKeyframe(ptsSeconds: Double) throws -> EncodedSample {
+        let pts = CMTime(seconds: ptsSeconds, preferredTimescale: 600)
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: Int32(testFps)),
+            presentationTimeStamp: pts,
+            decodeTimeStamp: .invalid
+        )
+        let hint = try makeHEVCFormatDescription()
+        var sampleBuffer: CMSampleBuffer?
+        let status = CMSampleBufferCreate(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: nil,
+            dataReady: false,
+            makeDataReadyCallback: nil,
+            refcon: nil,
+            formatDescription: hint,
+            sampleCount: 1,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleSizeEntryCount: 0,
+            sampleSizeArray: nil,
+            sampleBufferOut: &sampleBuffer
+        )
+        guard status == noErr, let sampleBuffer else {
+            throw TestError.sampleBufferFailed(status)
+        }
+        return EncodedSample(sampleBuffer: sampleBuffer, ptsHostTime: pts, isKeyframe: true)
+    }
+
+    @Test("setOwnerOnly throws → start does not throw and the writer stays usable")
+    func setOwnerOnlyFails_startDoesNotThrow_writerStaysUsable() async throws {
+        try FileManager.default.createDirectory(at: self.tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: self.tempDir) }
+
+        let url = self.tempDir.appending(path: "test-chmod-fail.mp4")
+        let hint = try makeHEVCFormatDescription()
+        let writer = try FileWriter(
+            outputURL: url,
+            configuration: .mvpDefault,
+            includeAudio: false,
+            sourceFormatHint: hint
+        )
+
+        // Force the chmod seam to fail. The override must actually run and throw, otherwise
+        // "start did not throw" would pass vacuously — proven below via the failing flag.
+        let chmodRan = ChmodRanFlag()
+        await writer.setOwnerOnlyOverrideForTesting { _ in
+            chmodRan.markRan()
+            throw ChmodError()
+        }
+
+        // start() must tolerate the chmod failure (a thrown error fails this test — that is
+        // the assertion).
+        try await writer.start(atSourceTime: .zero)
+        #expect(chmodRan.didRun, "the chmod seam must have been invoked and thrown")
+
+        // The writer must remain usable: a ready keyframe appended after start() reaches the
+        // input — proving the pipeline survived the degraded chmod, not just that start() returned.
+        let stub = StubWriterInput(ready: true)
+        await writer.injectVideoInputForTesting(stub)
+        let keyframe = try self.makeEncodedKeyframe(ptsSeconds: 0.0)
+        await writer.appendVideo(keyframe)
+        #expect(!stub.appendedBuffers.isEmpty, "writer must keep appending after a non-fatal chmod failure")
     }
 }
 
