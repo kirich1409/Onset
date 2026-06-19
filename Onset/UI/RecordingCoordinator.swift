@@ -671,9 +671,11 @@ final class RecordingCoordinator {
         // Reveal the session folder itself rather than individual files (#225):
         // the folder groups screen + camera files and survives an empty session gracefully.
         self.revealInFinder([sessionDir])
-        if let writeError = result.writeFailureReason {
+        // Log domain+code only (PII-free); writeFailureReason/localizedDescription may embed
+        // the ~/Movies/Onset/<username> output path — #188.
+        if let diagnostic = result.writeFailureDiagnostic {
             coordinatorLogger.error(
-                "Recording finished with write failure — \(writeError)"
+                "Recording finished with write failure — \(diagnostic, privacy: .public)"
             )
         } else if result.degradedWarning(threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold) {
             coordinatorLogger.notice(

@@ -172,10 +172,33 @@ extension RecordingResult {
 
     /// A human-readable description of the write failure(s), joining screen and camera reasons
     /// with a newline when both failed. `nil` when `hasWriteFailure` is `false`.
+    ///
+    /// - Warning: May embed the output path (e.g. `~/Movies/Onset/<username>/…`) from
+    ///   `localizedDescription`. Use this only for user-facing alerts where showing the user
+    ///   their own path is appropriate. For logging, use `writeFailureDiagnostic` instead (#188).
     nonisolated var writeFailureReason: String? {
         guard self.hasWriteFailure else { return nil }
         let reasons = [self.screen?.failureError, self.camera?.failureError]
             .compactMap { $0?.localizedDescription }
         return reasons.joined(separator: "\n")
+    }
+
+    /// PII-free diagnostic string for logging write failure(s).
+    ///
+    /// Produces `"<domain> #<code>"` for each failing writer (screen and/or camera), joined
+    /// with a newline when both failed. `nil` when `hasWriteFailure` is `false`.
+    ///
+    /// Uses only `(error as NSError).domain` and `.code` — definitionally free of file paths
+    /// and user data. Safe to log with `privacy: .public`. For the user-facing error alert
+    /// (where showing the output path is acceptable), use `writeFailureReason` instead (#188).
+    nonisolated var writeFailureDiagnostic: String? {
+        guard self.hasWriteFailure else { return nil }
+        let parts = [self.screen?.failureError, self.camera?.failureError]
+            .compactMap { error -> String? in
+                guard let error else { return nil }
+                let nsError = error as NSError
+                return "\(nsError.domain) #\(nsError.code)"
+            }
+        return parts.joined(separator: "\n")
     }
 }
