@@ -235,7 +235,7 @@ private struct DisplayPickerContent: View {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
-                .accessibilityLabel("Дисплей")
+                .accessibilityLabel("Дисплей экрана")
             }
         }
     }
