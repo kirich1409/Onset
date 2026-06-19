@@ -113,6 +113,9 @@ private final class FakeScreenSource: VideoFrameSource, @unchecked Sendable {
     private(set) var startCalled = false
     private(set) var stopCalled = false
 
+    /// When set, `start(anchoredTo:)` throws this — drives the `teardownAfterFailedStart` path (#202).
+    var startError: (any Error)?
+
     init() {
         let (frames, framesContinuation) = AsyncStream.makeStream(of: VideoFrame.self)
         self.frames = frames
@@ -127,6 +130,7 @@ private final class FakeScreenSource: VideoFrameSource, @unchecked Sendable {
 
     func start(anchoredTo anchor: HostTimeAnchor) async throws {
         self.startCalled = true
+        if let startError { throw startError }
     }
 
     func stop() async {
@@ -548,6 +552,44 @@ struct RecordingSessionProbeTests {
         #expect(lastPlan == reducedPlan, "encoder must receive the budget-reduced plan (AC-5)")
         #expect(encoders.screenEncoder.startCalled, "screen encoder must have started")
 
+        _ = await session.stop()
+    }
+}
+
+// MARK: - Failed start teardown (#202)
+
+/// Covers the abnormal teardown path: when `start()` throws AFTER `makeStage()` built a live
+/// `DropMonitor` (i.e. in `buildPipelines`/`startSources`), `teardownAfterFailedStart()` must use
+/// `dropMonitor.cancelObservation()` — not `stop()`. Drain-only `stop()` would hang if any observed
+/// stream were still open on this path (no `stage.finishAll()` runs here). The integration assertion
+/// is simply that `start()` rejects and returns control — a hang would trip the suite time limit.
+@Suite("RecordingSession — failed start teardown (#202)", .timeLimit(.minutes(1)))
+struct RecordingSessionFailedStartTests {
+    @Test("source start throws after monitor built → start() rejects, teardown completes (no hang)")
+    func sourceStartThrows_teardownCompletes() async {
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        // Screen source throws in start(anchoredTo:) — this fires inside startSources(), AFTER
+        // makeStage() created the DropMonitor and buildPipelines() registered source/encoder drops.
+        struct StartFailure: Error {}
+        sources.screenSource.startError = StartFailure()
+        let okProbe: @Sendable () -> ProbeResult = { .ok(SessionFixtures.plan()) }
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: okProbe)
+
+        var didThrow = false
+        do {
+            try await session.start(permissions: SessionFixtures.fullPermissions())
+        } catch {
+            didThrow = true
+        }
+        // start() rejected, and reaching here proves teardownAfterFailedStart() (including
+        // dropMonitor.cancelObservation()) returned — a drain-on-open-stream regression would hang.
+        #expect(didThrow, "start() must rethrow the source failure")
+        #expect(sources.screenSource.startCalled, "the failing source must have been started")
+
+        // stop() after a failed start is a no-op (session never reached .running cleanly); it must
+        // also return promptly without hanging.
         _ = await session.stop()
     }
 }
