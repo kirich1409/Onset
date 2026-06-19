@@ -877,7 +877,12 @@ actor RecordingSession {
         self.revocationContinuation.finish()
         // Finish the capture-active stream so a waiting coordinator unblocks and reverts (#171).
         self.captureActiveContinuation.finish()
-        await self.dropMonitor?.stop()
+        // Cancel (not drain) the monitor's observe tasks: this path does NOT call stage.finishAll(),
+        // so if a writer was created and its drops observed just before the start threw, that stream
+        // may still be open. DropMonitor.stop() drains and would hang on an unfinished stream (#202);
+        // cancelObservation() ends the observe tasks regardless. Tail accuracy is irrelevant on a
+        // failed start — no RecordingResult reads these counters.
+        await self.dropMonitor?.cancelObservation()
         self.dropMonitor = nil
         self.stage = nil
     }

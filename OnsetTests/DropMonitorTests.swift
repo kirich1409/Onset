@@ -897,3 +897,94 @@ struct DropMonitorCaptureBackpressureTests {
         #expect(health.sessionEverDegraded == true)
     }
 }
+
+// MARK: - stop() drains buffered tail (#202)
+
+/// Regression guard for #202: `stop()` must DRAIN the observe tasks (await without cancelling),
+/// not cancel them. Cancelling truncates the `for await event in drops` iteration immediately,
+/// discarding any `DropEvent` still buffered in the source stream — so the final
+/// `breakdownSnapshot()` / `snapshot()` would under-count the tail.
+///
+/// ## Discrimination caveat (why this is a contract test, not a race-reproducer)
+///
+/// This asserts the contract — feed N events, finish, `stop()`, ALL N counted — which is
+/// deterministic under drain-only for any N. It does NOT deterministically reproduce the
+/// cancel-first bug in-process: `stop()` begins with `await tickTask?.value`, and that suspension
+/// hands the actor away long enough for the observe task to drain the entire (unbounded-buffered)
+/// stream of trivial `ingest` calls and end naturally — so the subsequent `task.cancel()` is a
+/// no-op even under the old code. Empirically verified: a temporary cancel-first revert still
+/// counted all N at N = 50_000 (the in-process race is un-loseable for trivial ingests through the
+/// public API). The bug bites in production where a real burst cannot drain inside that window.
+/// Keeping the contract assertion small and fast is the right trade — it stays green against future
+/// code and never flakes; adding a production `ingest` seam purely to lose the race would violate
+/// minimal-diff.
+@Suite("DropMonitor — stop() drains buffered tail (#202)", .timeLimit(.minutes(1)))
+struct DropMonitorStopDrainTests {
+    private let windowSeconds = 2.0
+    private let threshold = 3
+
+    /// All buffered diagnostic-breakdown drops are counted after `stop()` — none lost to truncation.
+    @Test("stop drains the full buffered tail into the breakdown counters")
+    func stop_drainsBufferedTail_breakdownCountsAll() async {
+        let monitor = DropMonitor(windowSeconds: self.windowSeconds, threshold: self.threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        // Buffer the events, then finish the stream. Drain-only stop() must ingest every one before
+        // reading the counters (see the suite caveat on why this is a contract, not a race repro).
+        let eventCount = 64
+        let pts = CMTime(value: 1000, timescale: 1000)
+        for _ in 0..<eventCount {
+            continuation.yield(DropEvent(
+                reason: .captureDrop, source: .captureScreen, count: 1, detectedAt: pts
+            ))
+        }
+        continuation.finish()
+
+        // Drain-only stop: must read every buffered event before snapshotting the counters.
+        await monitor.stop()
+
+        // Diagnostic breakdown counts ALL events — the drained tail is never lost.
+        let breakdown = await monitor.breakdownSnapshot()
+        #expect(breakdown.captureScreen == eventCount)
+
+        // The cumulative reason counter must also reflect the full tail.
+        let health = await monitor.snapshot()
+        #expect(health.counters.captureDrops == eventCount)
+    }
+
+    /// `stop()` completes (does not hang) when the observed stream is finished — the drain-only
+    /// precondition. If this test returns at all, drain-only terminated; a regression that left a
+    /// stream unfinished here would hang and trip the suite time limit.
+    @Test("stop completes without hanging when the observed stream is finished")
+    func stop_completes_whenStreamFinished() async {
+        let monitor = DropMonitor(windowSeconds: self.windowSeconds, threshold: self.threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+        continuation.finish()
+
+        await monitor.stop()
+        // Reaching here proves stop() returned — no deadlock on a finished stream.
+    }
+
+    /// `cancelObservation()` (failed-start path) terminates even when the observed stream is NOT
+    /// finished. Drain-only would hang here; cancellation ends the observe task regardless. This is
+    /// the deadlock guard for `teardownAfterFailedStart()`.
+    @Test("cancelObservation completes without hanging when the observed stream stays open")
+    func cancelObservation_completes_whenStreamOpen() async {
+        let monitor = DropMonitor(windowSeconds: self.windowSeconds, threshold: self.threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        // Deliberately do NOT finish the stream — mirrors a writer.drops left open on a failed start.
+        await monitor.cancelObservation()
+        // Reaching here proves cancelObservation() returned despite the open stream.
+
+        // Keep the continuation alive past the assertion so the stream is not finished by deinit
+        // before cancelObservation() ran.
+        continuation.finish()
+    }
+}
