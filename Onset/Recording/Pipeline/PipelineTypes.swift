@@ -221,7 +221,7 @@ nonisolated struct EncodedSample: @unchecked Sendable {
 ///   overflows. Distinct from encoder/disk pressure — does NOT drive the degraded alert.
 /// - `encoderBackpressureDrops`: counted when an `AsyncStream` buffer overflows because
 ///   the encoder or writer is not consuming fast enough.
-nonisolated enum DropReason {
+nonisolated enum DropReason: Equatable, Hashable {
     /// The capture hardware or SCStream dropped a frame before it reached the pipeline.
     ///
     /// SCStreamOutput delivers this via `SCStreamOutputType.screen` with a status flag;
@@ -251,12 +251,15 @@ nonisolated enum DropReason {
     case encoderBackpressureDrops
 }
 
-extension DropReason: Equatable {
-    /// Manual `nonisolated` implementation.
+extension DropReason {
+    /// Manual `nonisolated` `Equatable` witness for the conformance declared on the primary
+    /// `nonisolated enum DropReason` definition.
     ///
-    /// Under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, synthesised conformances are
-    /// inferred as `@MainActor` (`InferIsolatedConformances`). All value-type enums in
-    /// this project override this via manual nonisolated extensions — see `Container`.
+    /// The conformance is declared ON THE TYPE (not in a bare `extension DropReason: Equatable`)
+    /// so it is itself `nonisolated` under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` +
+    /// `InferIsolatedConformances`. A separate-extension conformance would be inferred
+    /// `@MainActor`, which compiles `==` but makes `!=` (the default `Equatable` extension that
+    /// needs the *conformance*) unusable from `nonisolated` contexts — see issue #187.
     nonisolated static func == (lhs: DropReason, rhs: DropReason) -> Bool {
         switch (lhs, rhs) {
         case (.captureDrop, .captureDrop),
@@ -271,16 +274,15 @@ extension DropReason: Equatable {
     }
 }
 
-extension DropReason: Hashable {
-    /// Manual `nonisolated` implementation.
+extension DropReason {
+    /// Manual `nonisolated` `Hashable` witness for the conformance declared on the primary
+    /// `nonisolated enum DropReason` definition.
     ///
-    /// Swift auto-synthesises `Hashable` for enums with no associated values. Under
-    /// `InferIsolatedConformances`, the synthesised `hash(into:)` witness is inferred
-    /// `@MainActor`, making `DropReason` unusable from `nonisolated` contexts. Providing
-    /// an explicit manual witness with `nonisolated` overrides the synthesised form.
-    /// (Same pattern documented on `BitrateKey` in `RecordingConfiguration.swift`, but
-    /// for `DropReason` the `Hashable` conformance is required as a `Sendable` enum may
-    /// be used as a `Dictionary` key in `DropMonitor`'s counter table.)
+    /// Swift auto-synthesises `Hashable` for enums with no associated values, but under
+    /// `InferIsolatedConformances` the synthesised `hash(into:)` witness is inferred
+    /// `@MainActor`. An explicit manual `nonisolated` witness overrides the synthesised form.
+    /// (`DropReason` needs `Hashable` because a `Sendable` enum may be used as a `Dictionary`
+    /// key in `DropMonitor`'s counter table.)
     nonisolated func hash(into hasher: inout Hasher) {
         switch self {
         case .captureDrop:
@@ -315,7 +317,7 @@ extension DropReason: Hashable {
 ///   writer > encode > captureScreen > captureCameraVideo > captureCameraAudio
 /// The first matching non-zero bucket wins. The order is deterministic and documented so
 /// tests can rely on it.
-nonisolated enum DropCause {
+nonisolated enum DropCause: Equatable, Hashable {
     /// The session was never degraded (latch `sessionEverDegraded == false`).
     ///
     /// By invariant, `snapshot().dominantCause == .notDegraded` iff `sessionEverDegraded == false`.
@@ -334,11 +336,10 @@ nonisolated enum DropCause {
     case writer
 }
 
-// Under SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor + InferIsolatedConformances, synthesised
-// Equatable and Hashable witnesses are inferred @MainActor. Manual nonisolated witnesses match
-// the pattern used by DropReason and DropSource so DropCause is usable from nonisolated code.
-// swiftformat:disable:next redundantEquatable
-extension DropCause: Equatable {
+/// Under SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor + InferIsolatedConformances, synthesised
+/// Equatable and Hashable witnesses are inferred @MainActor. Manual nonisolated witnesses match
+/// the pattern used by DropReason and DropSource so DropCause is usable from nonisolated code.
+extension DropCause {
     /// Manual `nonisolated` implementation (mirrors `DropReason`).
     nonisolated static func == (lhs: DropCause, rhs: DropCause) -> Bool {
         switch (lhs, rhs) {
@@ -356,7 +357,7 @@ extension DropCause: Equatable {
     }
 }
 
-extension DropCause: Hashable {
+extension DropCause {
     /// Manual `nonisolated` implementation.
     ///
     /// Swift auto-synthesises `Hashable` for enums with no associated values. Under
@@ -399,7 +400,7 @@ extension DropCause: Hashable {
 /// and emit a single diagnostic summary line at session stop. This is a DIAGNOSTIC
 /// dimension only — it does NOT alter the existing per-`DropReason` counter accounting
 /// (`DropCounters`) or the UI-facing `RecordingState` logic.
-nonisolated enum DropSource {
+nonisolated enum DropSource: Equatable, Hashable {
     /// SCStream video frame overflowed the capture → encoder `AsyncStream` buffer.
     case captureScreen
 
@@ -416,11 +417,10 @@ nonisolated enum DropSource {
     case writer
 }
 
-// Under SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor + InferIsolatedConformances, synthesised
-// Equatable and Hashable witnesses are inferred @MainActor. Manual nonisolated witnesses match
-// the pattern used by DropReason and DropCounters so DropSource is usable from nonisolated code.
-// swiftformat:disable:next redundantEquatable
-extension DropSource: Equatable {
+/// Under SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor + InferIsolatedConformances, synthesised
+/// Equatable and Hashable witnesses are inferred @MainActor. Manual nonisolated witnesses match
+/// the pattern used by DropReason and DropCounters so DropSource is usable from nonisolated code.
+extension DropSource {
     /// Manual `nonisolated` implementation (mirrors `DropReason`).
     nonisolated static func == (lhs: DropSource, rhs: DropSource) -> Bool {
         switch (lhs, rhs) {
@@ -437,7 +437,7 @@ extension DropSource: Equatable {
     }
 }
 
-extension DropSource: Hashable {
+extension DropSource {
     /// Manual `nonisolated` implementation.
     ///
     /// Swift auto-synthesises `Hashable` for enums with no associated values. Under
@@ -478,7 +478,7 @@ extension DropSource: Hashable {
 /// The count field enables batch reporting: if the source detects N drops in a single
 /// callback (e.g. the async-stream buffer was full for N consecutive ticks), it may
 /// emit one `DropEvent` with `count > 1` instead of N individual events.
-nonisolated struct DropEvent {
+nonisolated struct DropEvent: Equatable {
     /// The pipeline stage where the drop occurred.
     nonisolated let reason: DropReason
 
@@ -492,8 +492,6 @@ nonisolated struct DropEvent {
     /// Host-clock time at which the drop was detected.
     nonisolated let detectedAt: CMTime
 }
-
-extension DropEvent: Equatable {}
 
 // MARK: - RecordingState
 
@@ -562,7 +560,7 @@ extension RecordingState {
 /// Delivered on `VideoFrameSource.events: AsyncStream<SourceEvent>`. These are low-volume
 /// signals about the source's health, not frame-level data. `RecordingSession` (#34)
 /// observes this stream to decide whether to pause, stop, or degrade gracefully.
-nonisolated enum SourceEvent {
+nonisolated enum SourceEvent: Equatable {
     /// The display being recorded was physically disconnected.
     ///
     /// Emitted by `ScreenSource` (#28) when SCKit reports the display is no longer
@@ -587,7 +585,7 @@ nonisolated enum SourceEvent {
     case sourceInterrupted(reason: String)
 }
 
-extension SourceEvent: Equatable {
+extension SourceEvent {
     nonisolated static func == (lhs: SourceEvent, rhs: SourceEvent) -> Bool {
         switch (lhs, rhs) {
         case (.displayDisconnected, .displayDisconnected),

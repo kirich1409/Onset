@@ -529,9 +529,7 @@ struct DropMonitorHealthTests {
         // Latch must not reset after recovery.
         #expect(health.sessionEverDegraded == true)
         // dominantCause must remain set (invariant: non-.notDegraded iff sessionEverDegraded).
-        // `!=` requires the Equatable conformance (InferIsolatedConformances → @MainActor);
-        // `!(lhs == rhs)` binds the concrete nonisolated `==` witness directly.
-        #expect(!(health.dominantCause == .notDegraded))
+        #expect(health.dominantCause != .notDegraded)
     }
 
     // MARK: Test 3 — dominant cause reflects concentrated backpressure source
@@ -692,15 +690,11 @@ struct DropHealthSnapshotEquatableTests {
         #expect(lhs == rhs)
     }
 
-    // NOTE: `a != b` requires the Equatable conformance which is @MainActor-inferred under
-    // InferIsolatedConformances — unusable in #expect's nonisolated macro expansion.
-    // `!(lhs == rhs)` binds the concrete nonisolated `==` witness and compiles fine.
-
     @Test("snapshots differing in dominantCause are not equal")
     func differingDominantCause_notEqual() {
         let lhs = DropHealthSnapshot(counters: baseCounters, sessionEverDegraded: true, dominantCause: .writer)
         let rhs = DropHealthSnapshot(counters: baseCounters, sessionEverDegraded: true, dominantCause: .encode)
-        #expect(!(lhs == rhs))
+        #expect(lhs != rhs)
     }
 
     @Test("snapshots differing in sessionEverDegraded are not equal")
@@ -709,7 +703,7 @@ struct DropHealthSnapshotEquatableTests {
         let rhs = DropHealthSnapshot(
             counters: baseCounters, sessionEverDegraded: false, dominantCause: .notDegraded
         )
-        #expect(!(lhs == rhs))
+        #expect(lhs != rhs)
     }
 
     @Test("snapshots differing in a counter field are not equal")
@@ -721,7 +715,7 @@ struct DropHealthSnapshotEquatableTests {
         )
         let lhs = DropHealthSnapshot(counters: baseCounters, sessionEverDegraded: true, dominantCause: .writer)
         let rhs = DropHealthSnapshot(counters: otherCounters, sessionEverDegraded: true, dominantCause: .writer)
-        #expect(!(lhs == rhs))
+        #expect(lhs != rhs)
     }
 }
 
@@ -986,5 +980,47 @@ struct DropMonitorStopDrainTests {
         // Keep the continuation alive past the assertion so the stream is not finished by deinit
         // before cancelObservation() ran.
         continuation.finish()
+    }
+}
+
+// MARK: - NonisolatedInequalityRegressionTests (#187)
+
+/// Regression for #187: `!=` on the pipeline value types must be callable from a `nonisolated`
+/// context. The default `Equatable` `!=` extension binds the *conformance*, which under
+/// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` + `InferIsolatedConformances` is inferred
+/// `@MainActor` when declared in a bare `extension X: Equatable`. Moving the conformance onto the
+/// `nonisolated` type decl keeps it nonisolated so `!=` compiles off the main actor.
+///
+/// `compareOffMainActor` is a free `nonisolated` function — its body is exactly the call site that
+/// failed to compile before the fix. The assertions inside are `Bool` checks (no `#expect` in the
+/// nonisolated helper, since the macro expands main-actor-isolated); the test merely calls it.
+nonisolated private func compareOffMainActor() -> Bool {
+    let firstDropCount = 1
+    let secondDropCount = 2
+    let snapshotA = DropHealthSnapshot(
+        counters: DropCounters(encoderBackpressureDrops: firstDropCount, captureDrops: 0, cfrNormalizationDrops: 0),
+        sessionEverDegraded: true,
+        dominantCause: .writer
+    )
+    let snapshotB = DropHealthSnapshot(
+        counters: DropCounters(encoderBackpressureDrops: secondDropCount, captureDrops: 0, cfrNormalizationDrops: 0),
+        sessionEverDegraded: true,
+        dominantCause: .encode
+    )
+
+    // Each `!=` below would fail to compile from this nonisolated context before #187.
+    let snapshotsDiffer = snapshotA != snapshotB
+    let causesDiffer = DropCause.writer != DropCause.encode
+    let sourcesDiffer = DropSource.captureScreen != DropSource.encode
+    return snapshotsDiffer && causesDiffer && sourcesDiffer
+}
+
+@Suite("Pipeline value types — != from nonisolated context (#187)")
+struct NonisolatedInequalityRegressionTests {
+    /// Compiling + passing proves the conformances are nonisolated and `!=` is reachable off the
+    /// main actor — the exact construct that failed to compile before the fix.
+    @Test("!= on DropHealthSnapshot / DropCause / DropSource works from a nonisolated function")
+    func inequality_compilesAndHolds_fromNonisolatedContext() {
+        #expect(compareOffMainActor())
     }
 }
