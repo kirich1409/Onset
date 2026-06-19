@@ -191,7 +191,9 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
             throw error
         }
         // Preview emits no frames — an all-zero line every second is log noise.
-        if self.role == .record {
+        // Gate on .running too: the stop()-during-start abort path returns normally with
+        // state .stopped (stop() already ran its cancel), so telemetry must not start — #203.
+        if shouldStartCaptureTelemetry(role: self.role, state: self.captureState) {
             self.startCaptureTelemetryTask()
         }
     }
