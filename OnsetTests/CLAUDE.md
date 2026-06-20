@@ -26,6 +26,19 @@ covered in the root `CLAUDE.md` § Testing.
   `InMemoryUserDefaults` instance backed by a plain dictionary; cfprefsd is never
   involved so no `.plist` file is written to `~/Library/Preferences/` (issue #110).
   Violating this leaves one plist per test invocation on the developer's machine.
+  For a fresh isolated instance without a closure, construct `InMemoryUserDefaults()`
+  directly (parameterless — no force-unwrap needed).
+- `MainViewModel` makeSUT pattern (issue #227): one per-SUT `InMemoryUserDefaults`
+  feeds BOTH stores — `makeStore:` (device selection) AND `makeOutputFolderStore:`
+  (output folder). `MainViewModel.init` constructs the output-folder store EAGERLY,
+  so every SUT must inject it. A `defaults: InMemoryUserDefaults = InMemoryUserDefaults()`
+  makeSUT param gives fresh isolation by default; callers needing a persistence
+  round-trip pass an explicit instance. Both stores share that one instance.
+- Fail-fast guard: `UserDefaultsDeviceSelectionStore`/`UserDefaultsOutputFolderStore`
+  bound to `UserDefaults.standard` under a test run now trap via `assertionFailure`
+  (`isRunningUnderXCTest` in `TestRunDetection.swift`). A test that forgets to inject
+  an isolated store crashes instead of silently polluting `.standard` — inject an
+  `InMemoryUserDefaults` to fix.
 - SwiftLint: test files commonly carry `no_magic_numbers` / `file_length` exemptions
   for fixtures and synthetic data (CMSampleBuffer factories) — keep exemptions
   file-scoped, don't relax global config.

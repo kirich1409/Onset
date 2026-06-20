@@ -70,7 +70,8 @@ struct MainViewModelDeviceRefreshTests {
             discoverCameras: { _ in box.value },
             discoverMicrophones: { _ in [] },
             makeDeviceChangeStream: { deviceChanges },
-            makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) }
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) },
+            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: defaults) }
         )
     }
 

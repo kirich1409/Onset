@@ -9,21 +9,6 @@ nonisolated private let appLogger = Logger(
     category: "OnsetApp"
 )
 
-// MARK: - Test-mode detection
-
-/// `true` when the process is launched as a test host by XCTest.
-///
-/// XCTest sets `XCTestConfigurationFilePath` in the environment before executing any test
-/// bundle. Detecting it here prevents multiple app instances — each with an onboarding
-/// window and live `PermissionsService` UI — from accumulating across test runs and
-/// interfering with the L5 live-capture tests that fight over screen/camera permissions.
-///
-/// Note: screen-recording and camera TCC grants are held by the **process** (bundle ID),
-/// not by individual windows. Suppressing the UI scene here does NOT remove those grants
-/// from the test-host process, so L5 hardware-capture tests continue to pass.
-nonisolated private let isRunningUnderXCTest =
-    ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
-
 // MARK: - Window IDs
 
 /// Stable scene identifiers used by `openWindow` / `dismissWindow`.
