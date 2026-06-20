@@ -52,7 +52,18 @@ struct UserDefaultsOutputFolderStore: OutputFolderPersisting {
     ///
     /// - Parameter defaults: The `UserDefaults` to read from and write to.
     ///   Production callers omit this parameter to use `.standard`.
+    ///
+    /// Under a test run, binding to `UserDefaults.standard` traps via `assertionFailure`:
+    /// a test that forgot to inject an isolated store would otherwise silently write the
+    /// developer's real defaults. Tests must pass an `InMemoryUserDefaults` (see
+    /// `ScopedDefaults` / `OnsetTests/CLAUDE.md`).
     init(defaults: UserDefaults = .standard) {
+        if isRunningUnderXCTest, defaults === UserDefaults.standard {
+            assertionFailure(
+                "UserDefaultsOutputFolderStore bound to UserDefaults.standard under a test run — "
+                    + "inject an isolated InMemoryUserDefaults (see ScopedDefaults / OnsetTests/CLAUDE.md)."
+            )
+        }
         self.defaults = defaults
     }
 

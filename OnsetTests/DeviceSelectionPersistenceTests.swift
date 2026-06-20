@@ -53,7 +53,8 @@ struct DeviceSelectionPersistenceTests {
             discoverDisplays: { _ in [] },
             discoverCameras: { _ in cameras },
             discoverMicrophones: { _ in microphones },
-            makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) }
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) },
+            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: defaults) }
         )
     }
 
@@ -158,7 +159,8 @@ struct DeviceSelectionPersistenceTests {
                 discoverDisplays: { _ in [display] },
                 discoverCameras: { _ in [cam] },
                 discoverMicrophones: { _ in [mic] },
-                makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) }
+                makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) },
+                makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: defaults) }
             )
 
             // Act — first launch, no prior saved state.

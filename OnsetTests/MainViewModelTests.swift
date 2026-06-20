@@ -23,9 +23,10 @@ struct MainViewModelTests {
 
     /// Creates a `MainViewModel` with injected device lists and a fake permissions service.
     ///
-    /// Passes an in-memory `DeviceSelectionStore` backed by `InMemoryUserDefaults` so
-    /// no `.plist` files are written to `~/Library/Preferences/` during tests.
-    /// Use `withScopedDefaults` at the call site and pass the vended instance here.
+    /// Both persistence stores (device-selection and output-folder) are backed by a single
+    /// per-SUT `InMemoryUserDefaults` so no `.plist` files are written to
+    /// `~/Library/Preferences/` during tests. Callers needing a persistence round-trip pass
+    /// an explicit instance; otherwise a fresh isolated instance is used per SUT.
     private func makeSUT(
         screen: PermissionStatus = .authorized,
         camera: PermissionStatus = .authorized,
@@ -33,24 +34,19 @@ struct MainViewModelTests {
         displays: [Display] = [],
         cameras: [CameraDevice] = [],
         microphones: [MicrophoneDevice] = [],
-        defaults: InMemoryUserDefaults? = nil
+        defaults: InMemoryUserDefaults = InMemoryUserDefaults()
     )
     -> (sut: MainViewModel, perms: FakePermissionsService) {
         let perms = FakePermissionsService(screen: screen, camera: camera, microphone: microphone)
         let coordinator = RecordingCoordinator()
-        let store: InMemoryUserDefaults = if let provided = defaults {
-            provided
-        } else {
-            // swiftlint:disable:next force_unwrapping
-            InMemoryUserDefaults(suiteName: nil)!
-        }
         let sut = MainViewModel(
             permissions: perms,
             coordinator: coordinator,
             discoverDisplays: { _ in displays },
             discoverCameras: { _ in cameras },
             discoverMicrophones: { _ in microphones },
-            makeStore: { UserDefaultsDeviceSelectionStore(defaults: store) }
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) },
+            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: defaults) }
         )
         return (sut, perms)
     }
@@ -356,15 +352,15 @@ struct MainViewModelBuildChecklistTests {
     private func makeSUT() -> MainViewModel {
         let perms = FakePermissionsService()
         let coordinator = RecordingCoordinator()
-        // swiftlint:disable:next force_unwrapping
-        let store = InMemoryUserDefaults(suiteName: nil)!
+        let store = InMemoryUserDefaults()
         return MainViewModel(
             permissions: perms,
             coordinator: coordinator,
             discoverDisplays: { _ in [] },
             discoverCameras: { _ in [] },
             discoverMicrophones: { _ in [] },
-            makeStore: { UserDefaultsDeviceSelectionStore(defaults: store) }
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: store) },
+            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: store) }
         )
     }
 
@@ -422,8 +418,8 @@ struct MainViewModelStaleCameraIDTests {
     /// `selectFirstCameraIfNeeded` — the cheapest path that tests the healed invariant
     /// without needing a two-phase `loadDevices` with a swapped closure.
     @Test("Stale selectedCameraID not in cameras list → healed to first available camera")
-    func staleID_healedToFirstCamera() throws {
-        let store = try #require(InMemoryUserDefaults(suiteName: nil))
+    func staleID_healedToFirstCamera() {
+        let store = InMemoryUserDefaults()
         let perms = FakePermissionsService()
         let coordinator = RecordingCoordinator()
         let cam = Self.makeCamera(id: "cam-new")
@@ -433,7 +429,8 @@ struct MainViewModelStaleCameraIDTests {
             discoverDisplays: { _ in [] },
             discoverCameras: { _ in [cam] },
             discoverMicrophones: { _ in [] },
-            makeStore: { UserDefaultsDeviceSelectionStore(defaults: store) }
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: store) },
+            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: store) }
         )
 
         // Directly simulate the post-unplug state: cameras refreshed, id still stale.
@@ -446,8 +443,8 @@ struct MainViewModelStaleCameraIDTests {
     }
 
     @Test("Valid selectedCameraID in cameras list → selectFirstCameraIfNeeded leaves it unchanged")
-    func validID_notReplaced() throws {
-        let store = try #require(InMemoryUserDefaults(suiteName: nil))
+    func validID_notReplaced() {
+        let store = InMemoryUserDefaults()
         let perms = FakePermissionsService()
         let coordinator = RecordingCoordinator()
         let cam1 = Self.makeCamera(id: "cam-1")
@@ -458,7 +455,8 @@ struct MainViewModelStaleCameraIDTests {
             discoverDisplays: { _ in [] },
             discoverCameras: { _ in [cam1, cam2] },
             discoverMicrophones: { _ in [] },
-            makeStore: { UserDefaultsDeviceSelectionStore(defaults: store) }
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: store) },
+            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: store) }
         )
 
         sut.cameras = [cam1, cam2]
@@ -471,8 +469,8 @@ struct MainViewModelStaleCameraIDTests {
     }
 
     @Test("Nil selectedCameraID → selectFirstCameraIfNeeded selects first camera")
-    func nilID_selectsFirst() throws {
-        let store = try #require(InMemoryUserDefaults(suiteName: nil))
+    func nilID_selectsFirst() {
+        let store = InMemoryUserDefaults()
         let perms = FakePermissionsService()
         let coordinator = RecordingCoordinator()
         let cam = Self.makeCamera(id: "cam-only")
@@ -482,7 +480,8 @@ struct MainViewModelStaleCameraIDTests {
             discoverDisplays: { _ in [] },
             discoverCameras: { _ in [cam] },
             discoverMicrophones: { _ in [] },
-            makeStore: { UserDefaultsDeviceSelectionStore(defaults: store) }
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: store) },
+            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: store) }
         )
 
         sut.cameras = [cam]

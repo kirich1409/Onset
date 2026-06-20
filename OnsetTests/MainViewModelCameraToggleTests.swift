@@ -19,34 +19,19 @@ import Testing
 struct MainViewModelCameraToggleTests {
     // MARK: - Helpers
 
-    private func makeSUT(
-        screen: PermissionStatus = .authorized,
-        camera: PermissionStatus = .authorized,
-        microphone: PermissionStatus = .notDetermined,
-        cameras: [CameraDevice] = [],
-        displays: [Display] = []
-    )
-    -> MainViewModel {
-        // swiftlint:disable:next force_unwrapping
-        let store = InMemoryUserDefaults(suiteName: nil)!
-        return self.makeSUT(
-            screen: screen,
-            camera: camera,
-            microphone: microphone,
-            cameras: cameras,
-            displays: displays,
-            defaults: store
-        )
-    }
-
-    /// Overload that accepts an explicit `InMemoryUserDefaults` for persistence round-trip tests.
+    /// Creates a `MainViewModel` with injected device lists and a fake permissions service.
+    ///
+    /// Both persistence stores (device-selection and output-folder) are backed by a single
+    /// per-SUT `InMemoryUserDefaults` so tests never touch the real `~/Library/Preferences/`
+    /// domain. Persistence round-trip tests pass an explicit instance; otherwise a fresh
+    /// isolated instance is used per SUT.
     private func makeSUT(
         screen: PermissionStatus = .authorized,
         camera: PermissionStatus = .authorized,
         microphone: PermissionStatus = .notDetermined,
         cameras: [CameraDevice] = [],
         displays: [Display] = [],
-        defaults: InMemoryUserDefaults
+        defaults: InMemoryUserDefaults = InMemoryUserDefaults()
     )
     -> MainViewModel {
         let perms = FakePermissionsService(screen: screen, camera: camera, microphone: microphone)
@@ -57,7 +42,8 @@ struct MainViewModelCameraToggleTests {
             discoverDisplays: { _ in displays },
             discoverCameras: { _ in cameras },
             discoverMicrophones: { _ in [] },
-            makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) }
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) },
+            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: defaults) }
         )
     }
 
@@ -449,13 +435,15 @@ struct MainViewModelCameraToggleTests {
         let spy = CameraSaveSpy()
 
         let perms = FakePermissionsService(screen: .authorized, camera: .authorized, microphone: .notDetermined)
+        let outputDefaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: perms,
             coordinator: RecordingCoordinator(),
             discoverDisplays: { _ in [Self.makeDisplay()] },
             discoverCameras: { _ in [cam] },
             discoverMicrophones: { _ in [] },
-            makeStore: { spy }
+            makeStore: { spy },
+            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: outputDefaults) }
         )
         await sut.loadDevices()
         // loadDevices auto-selects and enables the first camera via the store.
@@ -479,13 +467,15 @@ struct MainViewModelCameraToggleTests {
         let spy = CameraSaveSpy()
 
         let perms = FakePermissionsService(screen: .authorized, camera: .authorized, microphone: .notDetermined)
+        let outputDefaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: perms,
             coordinator: RecordingCoordinator(),
             discoverDisplays: { _ in [Self.makeDisplay()] },
             discoverCameras: { _ in [cam] },
             discoverMicrophones: { _ in [] },
-            makeStore: { spy }
+            makeStore: { spy },
+            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: outputDefaults) }
         )
         await sut.loadDevices()
         // Disable first so cameraEnabled == false before the assignment below.
@@ -518,7 +508,8 @@ struct MainViewModelCameraToggleTests {
                 // Camera list is empty — the saved device has gone away.
                 discoverCameras: { _ in [] },
                 discoverMicrophones: { _ in [] },
-                makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) }
+                makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) },
+                makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: defaults) }
             )
             await sut.loadDevices()
 
@@ -537,13 +528,15 @@ struct MainViewModelCameraToggleTests {
         let spy = CameraSaveSpy()
 
         let perms = FakePermissionsService(screen: .authorized, camera: .authorized, microphone: .notDetermined)
+        let outputDefaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: perms,
             coordinator: RecordingCoordinator(),
             discoverDisplays: { _ in [Self.makeDisplay()] },
             discoverCameras: { _ in [cam] },
             discoverMicrophones: { _ in [] },
-            makeStore: { spy }
+            makeStore: { spy },
+            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: outputDefaults) }
         )
         await sut.loadDevices()
         // After load the known camera is auto-selected.
@@ -569,8 +562,7 @@ struct MainViewModelCameraToggleTests {
 private final class CameraSaveSpy: DeviceSelectionPersisting {
     private(set) var saveCameraCallCount = 0
     private(set) var clearCameraCallCount = 0
-    // swiftlint:disable:next force_unwrapping
-    private let backing = UserDefaultsDeviceSelectionStore(defaults: InMemoryUserDefaults(suiteName: nil)!)
+    private let backing = UserDefaultsDeviceSelectionStore(defaults: InMemoryUserDefaults())
 
     func resetCount() {
         self.saveCameraCallCount = 0

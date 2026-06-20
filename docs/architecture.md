@@ -125,7 +125,7 @@ TCC-разрешения, политика записи, запись MP4.
 | `OutputFolderKeys` | `Configuration/OutputFolderKeys.swift` | UserDefaults-ключ для персистирования базовой папки вывода (#225) |
 | `FileWriter` | `Storage/FileWriter.swift` | Актор: мультиплексирование HEVC+AAC в MP4 (passthrough); телеметрия drop/fault |
 | `RecordingOutput` | `Storage/RecordingOutput.swift` | Чистые утилиты: пути файлов внутри подпапки сессии, `~/Movies/Onset/` (дефолт базовой папки), POSIX-права 0600/0700 |
-| `OutputFolderStore` / `OutputFolderPersisting` | `Storage/OutputFolderStore.swift` | Персистирование пользовательской базовой папки вывода в UserDefaults; injectable для тестов (#225) |
+| `OutputFolderStore` / `OutputFolderPersisting` | `Storage/OutputFolderStore.swift` | Персистирование пользовательской базовой папки вывода в UserDefaults; injectable для тестов (#225). Под тест-раном привязка к `UserDefaults.standard` падает через `assertionFailure` (`isRunningUnderXCTest`, `TestRunDetection.swift`) — fail-fast против засорения реальных defaults (#227); та же защита в `UserDefaultsDeviceSelectionStore` |
 | `OutputDirectoryNaming` / `OutputDirectoryValidation` | `Storage/OutputDirectoryNaming.swift` | Чистые утилиты: имя подпапки сессии (`"Onset YYYY-MM-DD HH.mm.ss"`), collision avoidance с суффиксом ` (N)`, валидация записываемости базовой папки (#225) |
 
 Где искать:

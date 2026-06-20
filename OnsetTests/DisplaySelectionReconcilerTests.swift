@@ -106,9 +106,14 @@ struct MainViewModelApplyDisplaysTests {
     }
 
     private func makeViewModel() -> MainViewModel {
-        MainViewModel(
+        // Both persistence stores are backed by a per-SUT InMemoryUserDefaults so tests never
+        // touch the real ~/Library/Preferences/ domain (the .standard guard would otherwise trap).
+        let defaults = InMemoryUserDefaults()
+        return MainViewModel(
             permissions: FakePermissionsService(),
-            coordinator: RecordingCoordinator()
+            coordinator: RecordingCoordinator(),
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) },
+            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: defaults) }
         )
     }
 
@@ -188,10 +193,15 @@ struct MainViewModelSubscribeTests {
         )
         let (stream, continuation) = AsyncStream<Void>.makeStream()
 
+        // Both persistence stores are backed by a per-SUT InMemoryUserDefaults so the
+        // .standard guard does not trap (the suite never exercises persistence directly).
+        let defaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: FakePermissionsService(),
             coordinator: RecordingCoordinator(),
             discoverDisplays: { _ in [newDisplay] },
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) },
+            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: defaults) },
             screenChangeEvents: { stream }
         )
         // Pre-condition: no prior selection; stream event will trigger AC-1 auto-select.
