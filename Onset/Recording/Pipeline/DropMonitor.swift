@@ -502,7 +502,7 @@ actor DropMonitor {
 
     /// Current drop health snapshot for the session, combining cumulative counters with the
     /// degradation latch and dominant backpressure cause. Used by `RecordingSession.stop()`
-    /// to assemble `RecordingResult` and by `currentDrops()` (polled by the live drop pill).
+    /// to assemble `RecordingResult` (and the on-disk technical report) and by `currentDrops()`.
     func snapshot() -> DropHealthSnapshot {
         DropHealthSnapshot(
             counters: DropCounters(

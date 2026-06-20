@@ -192,11 +192,15 @@ final class RecordingCoordinator {
     /// write failure means the file was not saved cleanly. Reset on `start()` / `acknowledgeWriteError()`.
     private(set) var lastWriteError: String?
 
-    /// `true` when at least one post-stop alert is pending and has not yet been acknowledged.
+    /// `true` when a post-stop alert is pending and has not yet been acknowledged.
     /// Used by `stop()` to decide whether to surface the main window after a menu-bar-origin stop
     /// (#131): a pending alert requires the window so `MainView` can present it.
+    ///
+    /// Only the write-error alert remains a user-facing post-stop alert — frame-loss is now persisted
+    /// as an on-disk technical report, not surfaced as an alert — so a degraded-but-saved session no
+    /// longer forces the main window open.
     var hasPendingAlert: Bool {
-        self.lastWriteError != nil || self.lastDegradedWarning
+        self.lastWriteError != nil
     }
 
     // MARK: - Dependencies (injected)

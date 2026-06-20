@@ -114,6 +114,13 @@ actor RecordingSession {
     /// `nonisolated` because `URL` is a value type and the property is set once in `init`.
     nonisolated let sessionDirectory: URL
 
+    /// Session-start timestamp shared by both output files and the technical report file name.
+    ///
+    /// Captured once in `init` (the same `Date` used to derive `sessionDirectory` and the file
+    /// names), so the report header and file name match the recording files. `nonisolated` because
+    /// `Date` is a value type set once in `init`.
+    nonisolated let sessionStartDate: Date
+
     // MARK: - Seams
 
     private let probe: @Sendable () -> ProbeResult
@@ -200,6 +207,7 @@ actor RecordingSession {
         // Capture the session-start timestamp once. Both URL providers below close over this
         // value so screen and camera files always share an identical timestamp segment (#198).
         let startDate = Date()
+        self.sessionStartDate = startDate
 
         // Compute the session subdirectory from the base output directory and the start timestamp.
         // Collision avoidance (` (N)` suffix) is applied at the directory level so both files
@@ -456,9 +464,9 @@ actor RecordingSession {
 
     // MARK: - UI state surface (#36/#37)
 
-    /// The session's current drop health snapshot, polled by the UI (`RecordingCoordinator`) for
-    /// the recording-window drop pill. Returns a zero / never-degraded snapshot before `start()`
-    /// builds the monitor or after `performStop()` tears it down.
+    /// The session's current drop health snapshot, polled ~1 Hz by the UI (`RecordingCoordinator`)
+    /// to keep `RecordingCoordinator.drops` current during recording. Returns a zero / never-degraded
+    /// snapshot before `start()` builds the monitor or after `performStop()` tears it down.
     func currentDrops() async -> DropHealthSnapshot {
         await self.dropMonitor?.snapshot()
             ?? DropHealthSnapshot(
@@ -812,6 +820,16 @@ actor RecordingSession {
                 sessionEverDegraded: false,
                 dominantCause: .notDegraded
             )
+        // Per-source breakdown is read here (before the monitor is released) so the technical report
+        // below can include the source-level detail in addition to the reason-level snapshot.
+        let breakdown = await self.dropMonitor?.breakdownSnapshot()
+            ?? DropBreakdown(
+                captureScreen: 0,
+                captureCameraVideo: 0,
+                captureCameraAudio: 0,
+                encode: 0,
+                writer: 0
+            )
         self.dropMonitor = nil
 
         // End the UI state forwarding: dropMonitor.stop() already finished the monitor's state
@@ -838,6 +856,16 @@ actor RecordingSession {
         } else {
             .empty(healthSnapshot)
         }
+
+        // Persist the per-session technical report next to the recording files. Frame-loss is no
+        // longer surfaced in the UI (no live drop pill, no post-stop warning alert) — it lives on
+        // disk as a plain-text report instead. Written only for sessions that produced output
+        // (`.completed`): the `.empty` path created no files (and possibly no session directory), so
+        // there is nothing to attach a report to.
+        if case .completed = result {
+            self.writeTechnicalReport(snapshot: healthSnapshot, breakdown: breakdown)
+        }
+
         let warn = result.degradedWarning(threshold: self.config.postStopDropWarningThreshold)
         self.logger.info(
             // swiftlint:disable:next line_length
@@ -847,6 +875,35 @@ actor RecordingSession {
     }
 
     // swiftlint:enable function_body_length
+
+    // MARK: - Technical report
+
+    /// Formats and writes the per-session technical report into the session directory.
+    ///
+    /// Formatting (pure) is delegated to `DropReportFormatter`; the file write + POSIX permissions
+    /// (impure) live in `RecordingOutput.writeReport`. A write failure is logged and swallowed — the
+    /// report is a diagnostic artifact and must never fail the stop path or mask the recording result.
+    private func writeTechnicalReport(snapshot: DropHealthSnapshot, breakdown: DropBreakdown) {
+        let text = DropReportFormatter.report(
+            timestamp: self.sessionStartDate,
+            counters: snapshot.counters,
+            breakdown: breakdown,
+            sessionEverDegraded: snapshot.sessionEverDegraded,
+            dominantCause: snapshot.dominantCause
+        )
+        do {
+            try RecordingOutput.writeReport(text, in: self.sessionDirectory, timestamp: self.sessionStartDate)
+            self.logger.info(
+                "Technical report written: \(RecordingOutput.reportFileName(timestamp: self.sessionStartDate))"
+            )
+        } catch {
+            // Diagnostic-only artifact: never fail stop on a report-write error. Log the directory
+            // name (not the full path) to avoid logging the user's home path (#188).
+            self.logger.error(
+                "Technical report write failed in \(self.sessionDirectory.lastPathComponent) — \(error)"
+            )
+        }
+    }
 
     // MARK: - Failure teardown
 

@@ -387,10 +387,10 @@ struct RecordingCoordinatorTests {
         #expect(coordinator.phase == .idle, "menu-bar origin → return to .idle")
     }
 
-    // MARK: - menuBar + pending alert opens main window (#131)
+    // MARK: - menuBar + write error opens main window (#131)
 
-    @Test("stop menuBar + degraded warning → opens main window so alert can be presented (#131)")
-    func stop_menuBarWithDegradedWarning_opensMainWindow() async throws {
+    @Test("stop menuBar + degraded drops but saved → returns to .idle, no window open, no pending alert")
+    func stop_menuBarWithDegradedDrops_returnsToIdleWithoutOpeningWindow() async throws {
         let fake = FakeRecordingControlling(
             result: CoordinatorFixtures.result(backpressureDrops: 64)
         )
@@ -406,9 +406,9 @@ struct RecordingCoordinatorTests {
         try await coordinator.start(CoordinatorFixtures.request(origin: .menuBar))
         await coordinator.stop()
 
-        #expect(coordinator.phase == .main, "menuBar + pending alert → must open main window (phase .main)")
-        #expect(openCounter.value == 1, "openMainWindow must be called exactly once")
-        #expect(coordinator.hasPendingAlert, "hasPendingAlert must still be true until user acknowledges")
+        #expect(coordinator.phase == .idle, "degraded but saved menu-bar stop → return to .idle origin")
+        #expect(openCounter.value == 0, "degraded drops no longer open the main window")
+        #expect(!coordinator.hasPendingAlert, "degraded warning removed → nothing to present")
     }
 
     @Test("stop menuBar + write error → opens main window so alert can be presented (#131)")

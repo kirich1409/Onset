@@ -191,7 +191,8 @@ TCC-разрешения, политика записи, запись MP4.
 | `outputSection` / `OutputFolderRow` | `UI/Main/MainView+Sections.swift` | Секция «ВЫВОД» главного окна: строка с текущей базовой папкой (путь сокращён через `~`) и кнопка выбора через `NSOpenPanel` (#225) |
 | `OnboardingViewModel` | `UI/Onboarding/OnboardingViewModel.swift` | Статусы карточек разрешений из `PermissionsProviding`; поллинг TCC экрана |
 | `RecordingControlling` | `UI/RecordingControlling.swift` | Nonisolated-протокол над `RecordingSession` для координатора — юнит-тесты без железа |
-| `RecordingView` | `UI/Recording/RecordingView.swift` | Тонкий reader состояния координатора; логика статуса/drop-pill в `RecordingDisplayMapper` |
+| `RecordingView` | `UI/Recording/RecordingView.swift` | Тонкий reader состояния координатора; логика статуса (индикатор деградации) в `RecordingDisplayMapper`. Drop-pill удалён — потери кадров пишутся в технический отчёт на диске |
+| `DropReportFormatter` | `Recording/Pipeline/DropReportFormatter.swift` | Чистый nonisolated-форматтер per-session технического отчёта о потерях кадров (русский plain-text); запись файла — в `RecordingOutput.writeReport` |
 | `GlobalHotKeyMonitor` | `UI/HotKey/GlobalHotKeyMonitor.swift` | Системный хоткей ⌘⌥⌃R через Carbon `RegisterEventHotKey`; зовёт `coordinator.stop()` |
 | `MenuBarLabelMapper` | `UI/MenuBar/MenuBarLabelMapper.swift` | Чистый enum: phase+state → дескриптор лейбла меню-бара (красная/жёлтая точка, таймер, accessibilityLabel) |
 | `PermissionCardView` | `UI/Onboarding/PermissionCardView.swift` | Переиспользуемая карточка онбординга: иконка, статус-чип, кнопка, инструкции |

@@ -8,8 +8,6 @@
 //   few  — ends in 2–4 (not 12–14): 2, 22, 112 (112 ends in 12 → many, not few; covered explicitly)
 //   many — 0, 5–20, 11–14, and the teen exceptions: 11, 12, 100, 111
 //
-// Domain-phrase tests (AC-9 alert message) live in PostStopAlertTests.swift — PostStopAlertMessageTests.
-//
 @testable import Onset
 import Testing
 
