@@ -245,19 +245,21 @@ degradedWindowSeconds: 2.0,
 
 ## 5. UI-поверхности
 
-### 5.1 Живой счётчик и pill (`RecordingView`)
+### 5.1 Индикатор состояния (`RecordingView`)
 
-Файл: `Onset/UI/Recording/RecordingView.swift`, строка 157:
+Файл: `Onset/UI/Recording/RecordingView.swift`.
 
-```swift
-let dropCount = self.drops.encoderBackpressureDrops
-```
+Живой счётчик дропов (drop pill) **удалён**: число пропущенных кадров больше не показывается в
+окне записи. Информация о потерях кадров теперь пишется на диск как per-session технический отчёт
+(см. раздел 5.5).
 
-Читает **только** `encoderBackpressureDrops`. Текст pill:
-- `.normal`: `"\(encoderBackpressureDrops) пропущенных кадров"` (строка 342)
-- `.degraded`: `"Пропущено \(encoderBackpressureDrops) кадров · диск"` (строка 345)
+Что осталось в окне записи — **индикатор деградации**:
+- Текст статуса (`statusSection`): `«ИДЁТ ЗАПИСЬ»` при `.normal`, `«ЗАПИСЬ · ДЕГРАДАЦИЯ»` при `.degraded`.
+- Цвет dot записи: красный в обоих состояниях; цвет текста статуса — красный при `.normal`,
+  оранжевый при `.degraded`.
 
-Цвет dot записи (`statusSection`): красный при `.normal`, оранжевый при `.degraded` (строка 325–327).
+Состояние приходит из отдельного потока `RecordingState` (`RecordingCoordinator.recordingState`),
+не из `DropCounters`. Этот индикатор не затронут изменением и продолжает работать как прежде.
 
 ### 5.2 Menu bar (`MenuBarLabelMapper`)
 
@@ -269,31 +271,48 @@ let dropCount = self.drops.encoderBackpressureDrops
 Menu bar реагирует на `RecordingState` (`.normal` / `.degraded`), а не на `DropCounters` напрямую.
 Состояние приходит через `RecordingCoordinator.recordingState`.
 
-### 5.3 Completion-алерт (`MainView`)
+### 5.3 Post-stop алерт (`MainView`)
 
 Файл: `Onset/UI/Main/MainView.swift`.
 
-После остановки сессии `RecordingCoordinator` устанавливает `lastDroppedFrames` из `result.drops.encoderBackpressureDrops`;
-`lastDegradedWarning` вычисляется как `lastDroppedFrames >= RecordingConfiguration.postStopDropWarningThreshold`.
+Post-stop алерт «пропущено N кадров — возможны рывки» **удалён**. Единственный оставшийся post-stop
+алерт — `PostStopAlert.writeError(reason:)`: при ошибке записи файла (например, диск переполнен)
+пользователь должен узнать, что файл не сохранён. `PostStopAlert.resolve(writeError:)` возвращает
+этот алерт или `nil`.
 
-`RecordingResult.degradedWarning(threshold:)` (`Onset/Recording/Pipeline/RecordingResult.swift`):
-
-```swift
-// degradedWarning(threshold:) = drops.encoderBackpressureDrops >= threshold
-// Порог: RecordingConfiguration.postStopDropWarningThreshold (default 5, placeholder)
-```
-
-`PostStopAlert.resolve(writeError:droppedFrames:threshold:)` — гейт алерта «пропущены кадры» завязан
-на сравнении `droppedFrames >= threshold`. Алерт появляется тогда и только тогда, когда кумулятивное
-число `encoderBackpressureDrops` за сессию достигло порога.
-
-Приоритет алертов (`.writeError` > `.degradedWarning` > `nil`): при одновременном write-failure
-алерт про диск перекрывает алерт про дропы.
+`RecordingResult.degradedWarning(threshold:)` сохранён, но больше **не** управляет алертом — он
+используется только для строки лога при остановке (`RecordingSession.performStop` /
+`RecordingCoordinator.stop`). Константа `RecordingConfiguration.postStopDropWarningThreshold`
+осталась для этой лог-строки.
 
 ### 5.4 `captureDrops` и `cfrNormalizationDrops` не достигают ни одной UI-поверхности
 
-Оба счётчика хранятся в `DropCounters` и передаются через `RecordingResult`, но ни один View,
-ни алерт не обращается к ним. Это явное следствие текущего кода, не намеренный дизайн.
+Оба счётчика хранятся в `DropCounters` и передаются через `RecordingResult`. Ни один View, ни алерт
+к ним не обращается; их значения попадают только в технический отчёт на диске (раздел 5.5).
+
+### 5.5 Технический отчёт на диске (`DropReportFormatter` + `RecordingOutput`)
+
+Файлы: `Onset/Recording/Pipeline/DropReportFormatter.swift` (чистое форматирование текста),
+`Onset/Storage/RecordingOutput.swift` (запись файла + POSIX-права).
+
+Каждая сессия, которая произвела файлы (`RecordingResult.completed`), пишет один plain-text отчёт в
+папку сессии рядом с `— Screen.mp4` / `— Camera.mp4`:
+
+```
+Onset YYYY-MM-DD HH.mm.ss — Техническая информация.txt
+```
+
+Отчёт пишется и тогда, когда деградации не было (фиксируется чистая запись). Для `.empty`
+(файлы не созданы) отчёт **не** пишется — его не к чему прикреплять.
+
+Содержимое (русский, человекочитаемое): заголовок с таймстампом сессии; секция «Пропущенные кадры»
+с тремя `DropCounters`; секция «Разбивка по источникам» с пятью `DropBreakdown`; «Деградация в
+течение сессии: да/нет»; «Основная причина» из `dominantCause`. Разбивка по источникам берётся из
+`DropMonitor.breakdownSnapshot()` (та же, что и в `.notice`-строке лога при остановке).
+
+Разделение pure/impure: `DropReportFormatter` (nonisolated, без I/O) собирает текст;
+`RecordingOutput.writeReport(_:in:timestamp:)` пишет файл атомарно и ставит `0o600`. Ошибка записи
+отчёта логируется и проглатывается — это диагностический артефакт, он не должен ломать stop.
 
 ---
 

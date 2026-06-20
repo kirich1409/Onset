@@ -34,7 +34,6 @@ struct RecordingView: View {
         RecordingContentView(
             state: self.coordinator.recordingState,
             elapsed: self.coordinator.elapsed,
-            drops: self.coordinator.drops,
             checklist: self.coordinator.checklist,
             sourceLiveness: self.coordinator.sourceLiveness,
             onStop: {
@@ -63,11 +62,6 @@ struct RecordingContentView: View {
         static let statusSpacing: CGFloat = 4
         static let statusBottomPadding: CGFloat = 8
         static let timerBottomPadding: CGFloat = 8
-        static let pillDotSize: CGFloat = 6
-        static let pillDotSpacing: CGFloat = 4
-        static let pillHPadding: CGFloat = 12
-        static let pillVPadding: CGFloat = 5
-        static let pillBottomPadding: CGFloat = 8
         static let checklistTopDividerTopPadding: CGFloat = 12
         static let checklistRowHPadding: CGFloat = 16
         static let checklistRowVPadding: CGFloat = 10
@@ -89,8 +83,6 @@ struct RecordingContentView: View {
     /// weight across Dynamic Type sizes while still responding to accessibility preferences.
     @ScaledMetric(relativeTo: .largeTitle)
     private var timerFontSize: CGFloat = 56
-    @ScaledMetric(relativeTo: .caption)
-    private var pillFontSize: CGFloat = 12
     @ScaledMetric(relativeTo: .body)
     private var checklistLabelFontSize: CGFloat = 13
     @ScaledMetric(relativeTo: .caption)
@@ -104,7 +96,6 @@ struct RecordingContentView: View {
 
     let state: RecordingState
     let elapsed: Int
-    let drops: DropCounters
     let checklist: RecordingChecklist
     let sourceLiveness: SourceLiveness
     let onStop: () -> Void
@@ -119,7 +110,6 @@ struct RecordingContentView: View {
                 VStack(spacing: Metrics.sectionSpacing) {
                     self.statusSection
                     self.timerSection
-                    self.dropPillSection
                     Divider()
                         .padding(.top, Metrics.checklistTopDividerTopPadding)
                     self.checklistSection
@@ -164,28 +154,6 @@ struct RecordingContentView: View {
             .padding(.bottom, Metrics.timerBottomPadding)
             .accessibilityLabel("Время записи \(ElapsedFormatter.string(from: self.elapsed))")
             .accessibilityAddTraits(.updatesFrequently)
-    }
-
-    // MARK: Drop pill section
-
-    @ViewBuilder
-    private var dropPillSection: some View {
-        let pillLabel = RecordingDisplayMapper.pillAccessibilityLabel(state: self.state, drops: self.drops)
-        HStack(spacing: Metrics.pillDotSpacing) {
-            Circle()
-                .fill(RecordingDisplayMapper.pillDotColor(for: self.state))
-                .frame(width: Metrics.pillDotSize, height: Metrics.pillDotSize)
-            Text(RecordingDisplayMapper.pillText(state: self.state, drops: self.drops))
-                .font(.system(size: self.pillFontSize))
-                .foregroundStyle(RecordingDisplayMapper.pillTextColor(for: self.state))
-                .accessibilityLabel(pillLabel)
-                .accessibilityAddTraits(.updatesFrequently)
-        }
-        .padding(.horizontal, Metrics.pillHPadding)
-        .padding(.vertical, Metrics.pillVPadding)
-        .background(RecordingDisplayMapper.pillBackground(for: self.state))
-        .clipShape(Capsule())
-        .padding(.bottom, Metrics.pillBottomPadding)
     }
 
     // MARK: Checklist section
@@ -346,77 +314,6 @@ nonisolated enum RecordingDisplayMapper {
         }
     }
 
-    // MARK: Drop pill
-
-    /// The full pill text, with correct Russian pluralization.
-    ///
-    /// - Normal: «1 пропущенный кадр» / «2 пропущенных кадра» / «5 пропущенных кадров»
-    ///   (where N = encoderBackpressureDrops)
-    /// - Degraded: «Пропущен 1 кадр» / «Пропущено 2 кадра» / «Пропущено 5 кадров»
-    ///   (where N = encoderBackpressureDrops; no disk attribution — `DropCounters` carries no reason)
-    static func pillText(state: RecordingState, drops: DropCounters) -> String {
-        let count = drops.encoderBackpressureDrops
-        switch state {
-        case .normal:
-            let adjective = RussianPluralForm.select(
-                count: count,
-                one: "пропущенный",
-                few: "пропущенных",
-                many: "пропущенных"
-            )
-            let noun = RussianPluralForm.select(count: count, one: "кадр", few: "кадра", many: "кадров")
-            return "\(count) \(adjective) \(noun)"
-
-        case .degraded:
-            let verb = RussianPluralForm.select(
-                count: count,
-                one: "Пропущен",
-                few: "Пропущено",
-                many: "Пропущено"
-            )
-            let noun = RussianPluralForm.select(count: count, one: "кадр", few: "кадра", many: "кадров")
-            return "\(verb) \(count) \(noun)"
-        }
-    }
-
-    /// Accessibility label for the drop-pill element.
-    ///
-    /// Returns «Нет пропущенных кадров» when the encoder-backpressure drop counter is zero.
-    /// Otherwise delegates to `pillText(state:drops:)` so visual and accessibility labels match.
-    static func pillAccessibilityLabel(state: RecordingState, drops: DropCounters) -> String {
-        guard drops.encoderBackpressureDrops > 0 else { return "Нет пропущенных кадров" }
-        return self.pillText(state: state, drops: drops)
-    }
-
-    /// Color of the small dot inside the pill.
-    static func pillDotColor(for state: RecordingState) -> Color {
-        switch state {
-        case .normal: .secondary
-        case .degraded: .orange
-        }
-    }
-
-    /// Color of the pill text.
-    static func pillTextColor(for state: RecordingState) -> Color {
-        switch state {
-        case .normal: .secondary
-        case .degraded: .white
-        }
-    }
-
-    /// Background shape fill of the pill.
-    static func pillBackground(for state: RecordingState) -> Color {
-        switch state {
-        case .normal: Color.secondary.opacity(self.normalPillOpacity)
-        case .degraded: .orange
-        }
-    }
-
-    /// Opacity of the pill background in the normal (non-degraded) state.
-    ///
-    /// A subtle overlay matching the macOS secondary-label color at low opacity.
-    static let normalPillOpacity = 0.15
-
     // MARK: Checklist row liveness (#39 / AC-12)
 
     /// SF Symbol name for the checklist row status icon.
@@ -482,7 +379,6 @@ nonisolated enum RecordingDisplayMapper {
     RecordingContentView(
         state: .normal,
         elapsed: 257,
-        drops: .init(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
         checklist: .init(
             screenDescription: "3840×2160 @ 60 Гц",
             cameraDescription: "MX Brio · 1920×1080",
@@ -499,7 +395,6 @@ nonisolated enum RecordingDisplayMapper {
     RecordingContentView(
         state: .normal,
         elapsed: 257,
-        drops: .init(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
         checklist: .init(
             screenDescription: "3840×2160 @ 60 Гц",
             cameraDescription: "MX Brio · 1920×1080",
@@ -516,7 +411,6 @@ nonisolated enum RecordingDisplayMapper {
     RecordingContentView(
         state: .degraded,
         elapsed: 257,
-        drops: .init(encoderBackpressureDrops: 128, captureDrops: 0, cfrNormalizationDrops: 0),
         checklist: .init(
             screenDescription: "3840×2160 @ 60 Гц",
             cameraDescription: "MX Brio · 1920×1080",
@@ -533,7 +427,6 @@ nonisolated enum RecordingDisplayMapper {
     RecordingContentView(
         state: .normal,
         elapsed: 0,
-        drops: .init(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
         checklist: .init(
             screenDescription: "2560×1440 @ 60 Гц",
             cameraDescription: nil,
@@ -550,7 +443,6 @@ nonisolated enum RecordingDisplayMapper {
     RecordingContentView(
         state: .normal,
         elapsed: 312,
-        drops: .init(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
         checklist: .init(
             screenDescription: "3840×2160 @ 60 Гц",
             cameraDescription: "MX Brio · 1920×1080",
@@ -567,7 +459,6 @@ nonisolated enum RecordingDisplayMapper {
     RecordingContentView(
         state: .normal,
         elapsed: 257,
-        drops: .init(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
         checklist: .init(
             screenDescription: "3840×2160 @ 60 Гц",
             cameraDescription: "MX Brio · 1920×1080",

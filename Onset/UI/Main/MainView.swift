@@ -61,10 +61,9 @@ struct MainView: View {
 
     // MARK: - State
 
-    /// Drives the post-stop alert. Write-error supersedes degraded-warning: when both are set,
-    /// only the write-error alert fires (the file was not saved — higher severity).
-    /// Using `alert(item:)` with an enum enforces the priority ordering and avoids two
-    /// simultaneous `isPresented` bindings competing for the same presentation slot.
+    /// Drives the post-stop alert. The only post-stop alert is the write-error alert (the file was
+    /// not saved). Using `alert(item:)` with an enum keeps a single presentation slot and a single
+    /// alert-resolution entry point (`resolvedAlert`).
     @State
     private var pendingAlert: PostStopAlert?
 
@@ -121,10 +120,6 @@ struct MainView: View {
             if let alert = self.resolvedAlert() {
                 self.pendingAlert = alert
             }
-        }
-        .onChange(of: self.model.coordinator.lastDegradedWarning) { _, newValue in
-            guard newValue, self.pendingAlert == nil else { return }
-            self.pendingAlert = self.resolvedAlert()
         }
         .alert(item: self.$pendingAlert) { alert in
             self.makeAlert(for: alert)
@@ -279,17 +274,10 @@ extension MainView {
     /// Returns the highest-priority pending alert, or `nil` when no alert is due.
     /// Write-error supersedes degraded-warning when both flags are set simultaneously.
     private func resolvedAlert() -> PostStopAlert? {
-        PostStopAlert.resolve(
-            writeError: self.model.coordinator.lastWriteError,
-            droppedFrames: self.model.coordinator.lastDroppedFrames,
-            threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold
-        )
+        PostStopAlert.resolve(writeError: self.model.coordinator.lastWriteError)
     }
 
     /// Builds the `Alert` for a given `PostStopAlert` case.
-    ///
-    /// Write-error dismiss chains to `resolvedAlert()` to surface any pending degraded-warning
-    /// that was suppressed by the higher-priority write-error (Фикс 2: потеря второго алерта).
     private func makeAlert(for alert: PostStopAlert) -> Alert {
         switch alert {
         case let .writeError(reason):
@@ -298,21 +286,7 @@ extension MainView {
                 message: Text(reason),
                 dismissButton: .default(Text("ОК")) {
                     self.model.coordinator.acknowledgeWriteError()
-                    // Chain to the next pending alert (degradedWarning if drops >= threshold,
-                    // nil otherwise). Without this, onChange never re-fires for an unchanged
-                    // lastDegradedWarning, so the degraded-warning alert would be lost.
-                    self.pendingAlert = self.resolvedAlert()
-                }
-            )
-
-        case .degradedWarning:
-            Alert(
-                title: Text("Запись завершена"),
-                message: Text(alert.message),
-                dismissButton: .default(Text("ОК")) {
-                    self.model.coordinator.acknowledgeDegradedWarning()
-                    // resolvedAlert() returns nil here (lastDroppedFrames resets below threshold after
-                    // acknowledge); explicit assignment keeps the dismiss path symmetrical with writeError.
+                    // Re-resolve after acknowledge: returns nil now that the write error is cleared.
                     self.pendingAlert = self.resolvedAlert()
                 }
             )

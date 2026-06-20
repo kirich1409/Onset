@@ -111,6 +111,46 @@ nonisolated enum RecordingOutput {
         }
     }
 
+    // MARK: - Technical report
+
+    /// Builds the technical-report file name for a recording session.
+    ///
+    /// Follows the same naming convention as the recording files (`fileName(timestamp:kind:)`):
+    /// `"Onset YYYY-MM-DD HH.mm.ss — Техническая информация.txt"`, so the report sorts next to the
+    /// `— Screen.mp4` / `— Camera.mp4` files inside the session folder.
+    ///
+    /// - Parameter timestamp: Session-start timestamp shared with the recording files.
+    /// - Returns: File name including extension.
+    nonisolated static func reportFileName(timestamp: Date) -> String {
+        let formatted = Self.makeDateFormatter().string(from: timestamp)
+        return "Onset \(formatted) — Техническая информация.txt"
+    }
+
+    /// Writes the per-session technical report `text` into `directory` with owner-only permissions.
+    ///
+    /// The file is written atomically and then restricted to `0o600` (owner read/write), matching the
+    /// permission posture of the recording files (`setOwnerOnly(file:)`). A ` (N)` disambiguator is
+    /// applied via `uniqueSlot` on the (unlikely) collision of a same-named report already present.
+    ///
+    /// - Parameters:
+    ///   - text: The full report text (UTF-8).
+    ///   - directory: The session output directory (already created at session start).
+    ///   - timestamp: Session-start timestamp used for the file name.
+    /// - Throws: `CocoaError` if the write or permission change fails.
+    nonisolated static func writeReport(_ text: String, in directory: URL, timestamp: Date) throws {
+        let baseName = Self.reportFileName(timestamp: timestamp)
+        let baseURL = URL(filePath: baseName, relativeTo: directory)
+
+        let stem = baseURL.deletingPathExtension().lastPathComponent
+        let ext = baseURL.pathExtension
+        let url = Self.uniqueSlot(base: baseURL) { counter in
+            URL(filePath: "\(stem) (\(counter)).\(ext)", relativeTo: directory)
+        }
+
+        try text.write(to: url, atomically: true, encoding: .utf8)
+        try Self.setOwnerOnly(file: url)
+    }
+
     // MARK: - Directory
 
     /// Returns `~/Movies/Onset/` as a `URL`.
