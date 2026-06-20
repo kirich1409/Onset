@@ -45,6 +45,9 @@ struct MenuBarLabelDescriptor: Equatable {
     let dot: DotStyle
     /// Non-nil when an elapsed timer should appear; `nil` in idle state.
     let elapsed: Int?
+    /// VoiceOver label for the status-item button (#242). Describes the current recording state
+    /// and elapsed time so screen-reader users receive the same information as sighted users.
+    let accessibilityLabel: String
 }
 
 // MARK: - MenuBarLabelMapper
@@ -73,16 +76,25 @@ nonisolated enum MenuBarLabelMapper {
     -> MenuBarLabelDescriptor {
         switch phase {
         case .recording:
+            let elapsedString = ElapsedFormatter.string(from: elapsed)
             switch recordingState {
             case .normal:
-                MenuBarLabelDescriptor(dot: .red, elapsed: elapsed)
+                return MenuBarLabelDescriptor(
+                    dot: .red,
+                    elapsed: elapsed,
+                    accessibilityLabel: "Onset, идёт запись, \(elapsedString)"
+                )
 
             case .degraded:
-                MenuBarLabelDescriptor(dot: .yellow, elapsed: elapsed)
+                return MenuBarLabelDescriptor(
+                    dot: .yellow,
+                    elapsed: elapsed,
+                    accessibilityLabel: "Onset, запись деградирована, \(elapsedString)"
+                )
             }
 
         case .idle, .main, .finished:
-            MenuBarLabelDescriptor(dot: .hollow, elapsed: nil)
+            return MenuBarLabelDescriptor(dot: .hollow, elapsed: nil, accessibilityLabel: "Onset")
         }
     }
 }

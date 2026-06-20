@@ -280,12 +280,13 @@ private func eventuallyMain(timeoutMs: Int = 8000, _ condition: () -> Bool) asyn
 @Suite("RecordingCoordinator — lifecycle (#12 Phase 0)")
 @MainActor
 struct RecordingCoordinatorTests {
-    @Test("start → phase=.recording, checklist captured, windows choreographed")
+    @Test("start → phase=.recording, checklist captured, windows choreographed, notifier called")
     func start_transitionsToRecording() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let notifier = FakeRecordingStartNotifier()
         var openedRecording = false
         var dismissedMain = false
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake }, notifier: notifier)
         coordinator.bindWindowActions(
             openRecordingWindow: { openedRecording = true },
             dismissMainWindow: { dismissedMain = true },
@@ -301,8 +302,10 @@ struct RecordingCoordinatorTests {
         #expect(coordinator.checklist.screenDescription == "1280×720 @ 60 Гц")
         #expect(coordinator.checklist.cameraDescription == "FaceTime HD · 1080p30")
         #expect(coordinator.checklist.microphoneDescription == "MacBook Pro — микрофон")
-        #expect(openedRecording, "recording window must open on start (AC-3)")
+        // #242 — menu-bar-first: recording window is NOT opened automatically on start.
+        #expect(!openedRecording, "recording window must NOT open on start (menu-bar-first, #242)")
         #expect(dismissedMain, "main window must hide on start (AC-3)")
+        #expect(notifier.notifyCallCount == 1, "start notifier must fire exactly once")
 
         await coordinator.stop()
     }
@@ -984,7 +987,8 @@ struct RecordingCoordinatorConsentOrderingTests {
         try await startTask.value
 
         #expect(coordinator.phase == .recording, "phase must flip to .recording after first frame")
-        #expect(openedRecording, "recording window must open after first frame")
+        // #242 — menu-bar-first: recording window is never opened automatically.
+        #expect(!openedRecording, "recording window must NOT open, even after first frame (menu-bar-first, #242)")
         #expect(dismissedMain, "main window must dismiss after first frame")
         // Fix #6: startedAt must be set — timer anchors to first-frame time.
         #expect(coordinator.startedAt != nil, "startedAt must be set after activation (#171)")
