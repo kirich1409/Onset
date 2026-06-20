@@ -22,6 +22,17 @@ struct MenuBarLabel: View {
 
     let coordinator: RecordingCoordinator
 
+    /// Maps the semantic dot token to a concrete `Color` (#154 — keeps the color decision in the
+    /// view layer so `MenuBarLabelMapper` stays free of SwiftUI). Mirrors the original logic exactly:
+    /// hollow → `.primary` (no recording), red → `.red`, yellow → `.yellow`.
+    private func color(for dot: MenuBarLabelDescriptor.DotStyle) -> Color {
+        switch dot {
+        case .hollow: .primary
+        case .red: .red
+        case .yellow: .yellow
+        }
+    }
+
     var body: some View {
         // Resolve once per render so body reads exactly three coordinator properties.
         let desc = MenuBarLabelMapper.descriptor(
@@ -32,7 +43,7 @@ struct MenuBarLabel: View {
 
         HStack(spacing: Metrics.elementSpacing) {
             Image(systemName: desc.dot.systemName)
-                .foregroundStyle(desc.dot.color)
+                .foregroundStyle(self.color(for: desc.dot))
 
             if desc.dot.showsWarning {
                 Image(systemName: "exclamationmark.triangle.fill")
