@@ -205,6 +205,11 @@ final class RecordingCoordinator {
     @ObservationIgnored
     private let sessionFactory: @Sendable (RecordingRequest) -> any RecordingControlling
 
+    /// Fires a transient confirmation (local notification) when recording starts (#242).
+    /// Tests inject `FakeRecordingStartNotifier` to assert the call without posting a real notification.
+    @ObservationIgnored
+    private let notifier: any RecordingStartNotifying
+
     /// Opens the recording window. Bound from the SwiftUI scene via `bindWindowActions` (env
     /// `openWindow` is not available in a plain class). Defaults to a no-op so unit tests need not
     /// wire it.
@@ -296,6 +301,7 @@ final class RecordingCoordinator {
 
     /// - Parameters:
     ///   - sessionFactory: Builds the session for a request (live = `RecordingSession`).
+    ///   - notifier: Posts a transient start confirmation (#242). Tests inject a fake.
     ///   - activationTimeoutSeconds: Seconds to bound the first-frame wait (default: 30 s).
     ///     Pass a small value in unit tests to exercise the timeout path without wall-clock delay.
     ///   - revealInFinder: Reveals files (defaults to the live `NSWorkspace` call).
@@ -313,6 +319,7 @@ final class RecordingCoordinator {
                 config: request.config
             )
         },
+        notifier: any RecordingStartNotifying = LiveRecordingStartNotifier(),
         activationTimeoutSeconds: Double = 30,
         revealInFinder: @escaping ([URL]) -> Void = { urls in
             // Open the session folder itself in Finder (AC-9 #225): `activateFileViewerSelecting`
@@ -327,6 +334,7 @@ final class RecordingCoordinator {
         }
     ) {
         self.sessionFactory = sessionFactory
+        self.notifier = notifier
         self.activationTimeoutSeconds = activationTimeoutSeconds
         self.openRecordingWindow = {}
         self.dismissMainWindow = {}
@@ -510,9 +518,11 @@ final class RecordingCoordinator {
         self.startRevocationSubscription(session)
         self.startTickLoop(session)
 
-        // Window choreography (AC-3): hide main, open recording.
+        // Window choreography (AC-3): hide main window on start; recording window opens
+        // on demand from the menu bar («Открыть окно записи», #242 — menu-bar-first).
+        // Start notifier fires below to confirm the recording has begun.
         self.dismissMainWindow()
-        self.openRecordingWindow()
+        self.notifier.notifyRecordingStarted()
     }
 
     /// Awaits the first element from `session.captureActiveStream` with a bounded timeout.

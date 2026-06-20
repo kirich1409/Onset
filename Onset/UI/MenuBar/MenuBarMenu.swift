@@ -95,6 +95,9 @@ struct MenuBarMenu: View {
             // coordinator's isStopping guard handles concurrent calls).
             Task { await self.coordinator.stop() }
         }
+        // ⌘⌥⌃R — mirrors the global Carbon hotkey in OnsetApp.swift (AC-9, #242).
+        // Carbon and SwiftUI .keyboardShortcut are separate event paths; no double-trigger guard needed.
+        .keyboardShortcut(KeyEquivalent("r"), modifiers: [.command, .option, .control])
 
         Button("Открыть окно записи") {
             self.openWindow(id: WindowID.recording)

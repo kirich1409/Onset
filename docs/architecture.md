@@ -120,6 +120,7 @@ TCC-разрешения, политика записи, запись MP4.
 | `EffectivePermissions` | `Permissions/EffectivePermissions.swift` | Чистый расчёт доступных режимов записи из трёх статусов |
 | `AppRouter` | `Permissions/AppRouter.swift` | Чистый роутинг стартового экрана (onboarding/allSet/main) из статусов и аргументов relaunch |
 | `AppRelauncher` | `Permissions/AppRelauncher.swift` | Self-relaunch при гранте screen recording; анти-луп флаг в UserDefaults, аргумент `--post-screen-grant` |
+| `RecordingStartNotifying` / `LiveRecordingStartNotifier` | `Permissions/RecordingStartNotifier.swift` | Тонкий сервис подтверждения старта (#242): протокол + live-реализация на `UNUserNotificationCenter`; lazy-auth (authorized → post; notDetermined → request → post; denied → silent fallback) |
 | `RecordingConfiguration` | `Configuration/RecordingConfiguration.swift` | Иммутабельная политика: HEVC-настройки, таблица VBR-битрейтов, границы fps, бюджет |
 | `OutputFolderKeys` | `Configuration/OutputFolderKeys.swift` | UserDefaults-ключ для персистирования базовой папки вывода (#225) |
 | `FileWriter` | `Storage/FileWriter.swift` | Актор: мультиплексирование HEVC+AAC в MP4 (passthrough); телеметрия drop/fault |
@@ -192,7 +193,7 @@ TCC-разрешения, политика записи, запись MP4.
 | `RecordingControlling` | `UI/RecordingControlling.swift` | Nonisolated-протокол над `RecordingSession` для координатора — юнит-тесты без железа |
 | `RecordingView` | `UI/Recording/RecordingView.swift` | Тонкий reader состояния координатора; логика статуса/drop-pill в `RecordingDisplayMapper` |
 | `GlobalHotKeyMonitor` | `UI/HotKey/GlobalHotKeyMonitor.swift` | Системный хоткей ⌘⌥⌃R через Carbon `RegisterEventHotKey`; зовёт `coordinator.stop()` |
-| `MenuBarLabelMapper` | `UI/MenuBar/MenuBarLabelMapper.swift` | Чистый enum: phase+state → дескриптор лейбла меню-бара (красная/жёлтая точка, таймер) |
+| `MenuBarLabelMapper` | `UI/MenuBar/MenuBarLabelMapper.swift` | Чистый enum: phase+state → дескриптор лейбла меню-бара (красная/жёлтая точка, таймер, accessibilityLabel) |
 | `PermissionCardView` | `UI/Onboarding/PermissionCardView.swift` | Переиспользуемая карточка онбординга: иконка, статус-чип, кнопка, инструкции |
 
 Где искать:
@@ -201,7 +202,8 @@ TCC-разрешения, политика записи, запись MP4.
   `RecordingChecklist`, `SourceLiveness` в `RecordingCoordinator.swift`.
 - Гварды кнопки Record → `MainViewModel.canRecord`, `recordDisabledReason`,
   `validateRecordGuards`.
-- Stop из меню-бара (AC-9) → `MenuBarMenu.recordingMenu` → `coordinator.stop()`.
+- Stop из меню-бара (AC-9) → `MenuBarMenu.recordingMenu` → `coordinator.stop()`; hotkey ⌘⌥⌃R виден в меню через `.keyboardShortcut` (#242).
+- Старт без окна (#242) → `activateRecording()` вызывает `notifier.notifyRecordingStarted()`; окно открывается вручную через «Открыть окно записи».
 - Lifecycle превью камеры → `MainViewModel+Preview.swift`
   (`previewGeneration` + `.task(id:)`).
 - Форматирование таймера (mm:ss / h:mm:ss) → `ElapsedFormatter.string(from:)` —

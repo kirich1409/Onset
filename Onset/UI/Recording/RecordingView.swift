@@ -23,9 +23,10 @@ nonisolated private let recordingLogger = Logger(
 /// the layout-only `RecordingContentView`. The coordinator is the *sole* state owner — this view
 /// reads but never subscribes independently or owns its own timer.
 ///
-/// Title-bar close is intercepted via `.onDisappear`: when the window vanishes while recording is
-/// still active, the coordinator's `stop()` is called. The coordinator's `isStopping` guard makes
-/// the double-call safe (Stop button also dismisses the window — the second call is a no-op).
+/// Since #242 (menu-bar-first), recording starts without opening this window. The window is
+/// opened on demand via «Открыть окно записи» in the menu bar. The title-bar red button now
+/// **hides** the window rather than stopping the recording — closing the window no longer
+/// implies stopping. Cmd-Q graceful termination is tracked in #243.
 struct RecordingView: View {
     let coordinator: RecordingCoordinator
 
@@ -41,23 +42,10 @@ struct RecordingView: View {
                 Task { await self.coordinator.stop() }
             }
         )
-        // Intercept the title-bar red-button close: when the window disappears while a
-        // recording is still in progress, trigger stop(). The coordinator's `isStopping` guard
-        // makes this idempotent if the Stop button was also tapped (which dismisses the window,
-        // firing this observer as a second call — stop() exits early on the re-entrant path).
-        //
-        // Best-effort: on abrupt Cmd-Q the system may tear down this detached Task before
-        // session.stop() fully finalises the file. This is not a regression — the prior
-        // placeholder had no stop-on-close at all, and any partially-written file remains
-        // recoverable via the movieFragmentInterval fragment headers written mid-recording
-        // (AC-10). Proper applicationShouldTerminate / willTerminate await-stop handling
-        // is deferred to #38.
-        .onDisappear {
-                if self.coordinator.phase == .recording {
-                    recordingLogger.info("Recording window dismissed while recording — triggering stop")
-                    Task { await self.coordinator.stop() }
-                }
-            }
+        // No .onDisappear → stop() since #242: closing the recording window no longer stops
+        // the recording. The window is opened on demand and the red button simply hides it.
+        // Graceful Cmd-Q handling (applicationShouldTerminate / willTerminate await-stop) is
+        // tracked in #243.
     }
 }
 

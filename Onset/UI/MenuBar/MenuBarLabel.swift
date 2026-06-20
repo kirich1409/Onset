@@ -44,5 +44,6 @@ struct MenuBarLabel: View {
                     .monospacedDigit()
             }
         }
+        .accessibilityLabel(desc.accessibilityLabel)
     }
 }
