@@ -468,6 +468,10 @@ actor RecordingSession {
     /// the monitor's stream value + the stored continuation only (never `self`), so the task does
     /// not retain the session actor. The loop ends when the monitor finishes its `state` stream
     /// (in `DropMonitor.stop()`) or when `performStop()` cancels this task — whichever comes first.
+    ///
+    /// On loop exit the task finishes `recordingStateStream` itself, so the subscriber's loop ends
+    /// even on a path that never reaches `performStop()` (`finish()` is idempotent — the redundant
+    /// call in `performStop()` / `teardownAfterFailedStart()` is harmless).
     private func startStateForwarding() {
         guard let monitorState = self.dropMonitor?.state else { return }
         let continuation = self.stateContinuation
@@ -475,6 +479,7 @@ actor RecordingSession {
             for await state in monitorState {
                 continuation.yield(state)
             }
+            continuation.finish()
         }
     }
 
