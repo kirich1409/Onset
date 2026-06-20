@@ -32,9 +32,11 @@ import os
 /// Cumulative, never-reset drop tallies for the UI (#37) and the AC-9 end-of-session warning.
 ///
 /// Each counter accumulates `DropEvent.count` over the whole session and is NEVER reset — these
-/// are distinct from the sliding window that drives `RecordingState`. Three fields cover four
-/// `DropReason` cases: `.captureDrop` and `.captureBackpressureDrops` fold into `captureDrops`;
-/// only `.encoderBackpressureDrops` feeds the degraded-state window.
+/// are distinct from the sliding window that drives `RecordingState`. Three fields cover the
+/// degradation-relevant `DropReason` cases: `.captureDrop` and `.captureBackpressureDrops` fold
+/// into `captureDrops`; only `.encoderBackpressureDrops` feeds the degraded-state window.
+/// `.encoderHoldDrops` (synthetic catch-up holds, #200) is intentionally NOT represented here —
+/// it carries no user content and is tracked privately by `DropMonitor` for diagnostics only.
 nonisolated struct DropCounters: Equatable {
     /// Total `DropReason.encoderBackpressureDrops` seen this session. Also the only reason that
     /// feeds the degraded-state window.
@@ -209,6 +211,7 @@ nonisolated struct BackpressureDegradationWindow {
 ///   (the only reason that can trigger `.degraded`).
 /// - `.captureDrop` → cumulative `captureDrops` only (never triggers).
 /// - `.cfrNormalizationDrops` → cumulative `cfrNormalizationDrops` only (never triggers).
+/// - `.encoderHoldDrops` → private `encoderHoldDrops` only, diagnostic (never triggers; #200).
 ///
 /// ### Degraded = Live with recovery (user decision)
 /// The window goes `.degraded` when backpressure drops in the last `degradedWindowSeconds` exceed
@@ -255,6 +258,13 @@ actor DropMonitor {
     private var encoderBackpressureDrops = 0
     private var captureDrops = 0
     private var cfrNormalizationDrops = 0
+
+    /// Total `DropReason.encoderHoldDrops` seen this session (#200). Deliberately NOT exposed on
+    /// `DropCounters` / `DropHealthSnapshot`: a dropped synthetic catch-up hold carries no user
+    /// content, so it must never feed the user-facing dropped-frames count, the degraded-state
+    /// window, or the `sessionEverDegraded` latch. Tracked only for the diagnostic debug log; its
+    /// per-source visibility comes from `breakdownEncode` via the source-accounting switch below.
+    private var encoderHoldDrops = 0
 
     // MARK: - Degradation latch (never reset within a session)
 
@@ -406,6 +416,15 @@ actor DropMonitor {
             self.cfrNormalizationDrops += event.count
             let cfrDesc = String(describing: event.source)
             self.logger.debug("Drop [cfr-normalization] source=\(cfrDesc) count=\(event.count)")
+
+        case .encoderHoldDrops:
+            // Synthetic catch-up hold dropped at the encoder gate (#200): no user content lost.
+            // Routed like .cfrNormalizationDrops — a separate counter + debug log that never
+            // touches the window, applyDegraded, or the sessionEverDegraded latch. Per-source
+            // visibility still comes from breakdownEncode via the source-accounting switch below.
+            self.encoderHoldDrops += event.count
+            let holdDesc = String(describing: event.source)
+            self.logger.debug("Drop [encoder-hold] source=\(holdDesc) count=\(event.count)")
         }
 
         // Source accounting: diagnostic only — independent of reason accounting above.

@@ -58,13 +58,15 @@ AVAssetWriter → файл .mov
 
 ## 2. Таксономия `DropReason`
 
-Определение: `Onset/Recording/Pipeline/PipelineTypes.swift`, строки 210–240.
+Определение: `Onset/Recording/Pipeline/PipelineTypes.swift`, секция `// MARK: - DropReason`.
 
 ```swift
 nonisolated enum DropReason {
     case captureDrop
     case cfrNormalizationDrops
+    case captureBackpressureDrops
     case encoderBackpressureDrops
+    case encoderHoldDrops
 }
 ```
 
@@ -72,7 +74,8 @@ nonisolated enum DropReason {
 |------|-----------|------------|---------------------|
 | `.captureDrop` | Аппаратный дроп — AVCapture не успел доставить кадр в pipeline | `captureDropEvent()` в `CameraSourceHelpers.swift:52` | Штатный при перегрузке capture-очереди |
 | `.cfrNormalizationDrops` | Кадр прибыл в уже эмитированный CFR-слот; нормализатор отбрасывает его. После #102 (абсолютный дедлайн + grace-окно 5 ms) встречается редко — только при задержке доставки > grace. Холды повторяют `lastPixelBuffer` и не конкурируют с реальным кадром. | `CFRNormalizer.cfrNormalizationDrops` (счётчик в нормализаторе); `VideoEncoder` передаёт значение в `DropMonitor` | Штатный механизм CFR; редкий при нормальной работе после #102 |
-| `.encoderBackpressureDrops` | Downstream не успевает потреблять — переполнение `AsyncStream` или перегрузка энкодера/диска | Четыре эмиттера (см. раздел 3) | Аварийный — пользователь видит потерю кадров |
+| `.encoderBackpressureDrops` | Downstream не успевает потреблять — переполнение `AsyncStream` или перегрузка энкодера/диска. **Только реальный контент** (см. `.encoderHoldDrops` ниже) | Эмиттеры из раздела 3 | Аварийный — пользователь видит потерю кадров |
+| `.encoderHoldDrops` (#200) | Синтетический catch-up холд (повтор `lastPixelBuffer`) отброшен на gate во время batch'а после stall/sleep. Потери контента нет — следующий холд/реальный кадр заполнит слот. **Не** кормит sliding window, latch `sessionEverDegraded`, и user-facing счётчик «dropped N frames». Виден только в per-source breakdown (`encode`). | `VideoEncoder` gate при `isHold == true` | Штатный — последствие catch-up после stall, НЕ деградация |
 
 ### `CFRDropReason` — локальный enum нормализатора
 
@@ -93,7 +96,7 @@ nonisolated enum DropReason {
 | `Onset/Recording/Capture/CameraSourceHelpers.swift` | 52–53 | Capture hardware drop | `.captureDrop` | `captureDropEvent(pts:count:)` — вызывается из делегата `didDrop` |
 | `Onset/Recording/Capture/CameraSourceHelpers.swift` | 60–67 | Camera video overflow | `.encoderBackpressureDrops` | `cameraBackpressureDropEvent(for:pts:)` — переполнение `AsyncStream<VideoFrame>` |
 | `Onset/Recording/Capture/CameraSourceHelpers.swift` | 70–77 | Camera audio overflow | `.encoderBackpressureDrops` | `audioBackpressureDropEvent(for:pts:)` — переполнение `AsyncStream<AudioSample>` |
-| `Onset/Encode/VideoEncoder.swift` | 458–462 | Encoder backpressure gate | `.encoderBackpressureDrops` | `session.pendingFrameCount() >= maxPendingFrames` (default = 4) |
+| `Onset/Encode/VideoEncoder.swift` | `submit(…)` gate | Encoder backpressure gate | `.encoderBackpressureDrops` (реальный кадр, `isHold == false`) ИЛИ `.encoderHoldDrops` (синтетический холд, `isHold == true`, #200) | `session.pendingFrameCount() >= maxPendingFrames` (default = 4) |
 | `Onset/Storage/FileWriter.swift` | — | Writer/disk backpressure + GOP-window | `.encoderBackpressureDrops` | `videoSeam.isReadyForMoreMediaData == false`, ИЛИ входящий кадр — дельта в активном GOP-drop-окне (см. [DROP-G] ниже) |
 
 ### Примечание по `CFRNormalizer`
@@ -124,6 +127,17 @@ nonisolated enum DropReason {
 монотонно возрастающим PTS. Реальный кадр, прибывший в уже эмитированный слот, считается
 `cfrNormalizationDrops` (редко после #102 — только при задержке > grace).
 
+**Отброшенные холды на gate (#200).** Большой catch-up batch после stall/sleep синхронно
+сабмитит до `fps` холдов; прокси `pendingFrameCount()` не дренируется внутри batch'а, поэтому
+холды сверх `maxPendingFrames` отбрасываются на gate. Такой дроп — это потеря **синтетического**
+повтора, а не пользовательского контента: следующий холд или реальный кадр заполнит слот.
+Поэтому `submit(…)` помечает источник кадра через параметр `isHold` и при `isHold == true`
+эмитит `.encoderHoldDrops` (а не `.encoderBackpressureDrops`). `DropMonitor` маршрутизирует
+`.encoderHoldDrops` в приватный диагностический счётчик — он **не** кормит sliding window, latch
+`sessionEverDegraded`, и user-facing «dropped N frames». Без этого разделения один catch-up batch
+(до ~56 дропов при 60 fps) ложно пробивал `degradedBackpressureThreshold` и латчил degraded
+навсегда. Per-source видимость сохраняется через `breakdownEncode` (источник `.encode`).
+
 ---
 
 ## 4. Агрегация: `DropMonitor`
@@ -141,6 +155,10 @@ nonisolated struct DropCounters {
 ```
 
 Счётчики суммируют `DropEvent.count` за всю сессию и никогда не сбрасываются.
+`.encoderHoldDrops` (#200) сознательно **отсутствует** в `DropCounters` / `DropHealthSnapshot`:
+отброшенный синтетический холд не несёт пользовательского контента, поэтому он считается
+приватным счётчиком внутри `DropMonitor` (только диагностический debug-лог) и его per-source
+видимость обеспечивает `breakdownEncode`.
 
 ### `DropHealthSnapshot` — снапшот состояния сессии (#100)
 
@@ -215,7 +233,11 @@ degradedWindowSeconds: 2.0,
 .encoderBackpressureDrops → encoderBackpressureDrops (накопитель)
                           + bp* per-source тали (captureScreen / captureCameraVideo / … / writer)
                           + sliding window (Degraded-триггер + sessionEverDegraded latch)
+.encoderHoldDrops         → encoderHoldDrops (накопитель, только диагностика; в breakdownEncode)
+                          не влияет на sliding window / applyDegraded / sessionEverDegraded latch
+                          не инкрементирует пользовательские DropCounters (#200)
 .captureDrop              → captureDrops (накопитель только)
+.captureBackpressureDrops → captureDrops (накопитель только; sliding window не затрагивает, #100)
 .cfrNormalizationDrops    → cfrNormalizationDrops (накопитель только)
 ```
 
