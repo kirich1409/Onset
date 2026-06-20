@@ -232,6 +232,15 @@ struct CameraDeviceTests {
         #expect(device.formats[0].pixelWidth == 1920)
         #expect(device.formats[1].pixelWidth == 3840)
     }
+
+    @Test("isContinuityCamera defaults to false, can be set to true")
+    func isContinuityCamera_defaultAndExplicit() {
+        let regular = CameraDevice(uniqueID: "cam-001", formats: [])
+        let continuity = CameraDevice(uniqueID: "cam-002", formats: [], isContinuityCamera: true)
+
+        #expect(regular.isContinuityCamera == false)
+        #expect(continuity.isContinuityCamera == true)
+    }
 }
 
 // MARK: - MicrophoneDevice model tests

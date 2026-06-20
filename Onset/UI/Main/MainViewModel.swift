@@ -234,6 +234,15 @@ final class MainViewModel {
         self.activeCamera != nil
     }
 
+    /// True while a camera device is selected but the preview session has not yet started.
+    ///
+    /// `previewHandle` is cleared at the top of `managePreview` (via `stopCurrentPreview`) and
+    /// set only after `source.start()` returns, so this is `true` during both initial activation
+    /// and the switch window between devices (1-3 s for slow sources such as Continuity Camera).
+    var isCameraConnecting: Bool {
+        self.isCameraActive && self.previewHandle == nil
+    }
+
     // MARK: - Camera picker selection (#224)
 
     /// Single source of truth for the camera device picker.

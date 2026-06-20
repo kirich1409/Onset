@@ -75,6 +75,19 @@ nonisolated struct CameraDevice {
 
     /// All formats advertised by the device at enumeration time.
     let formats: [CameraFormat]
+
+    /// `true` when the device is a Continuity Camera (iPhone used as a webcam).
+    ///
+    /// Used to tailor UI copy — «Подключение iPhone…» vs «Подключение камеры…».
+    let isContinuityCamera: Bool
+
+    /// Creates a camera snapshot. `isContinuityCamera` defaults to `false` so existing
+    /// call sites that predate Continuity-Camera labeling keep compiling.
+    init(uniqueID: String, formats: [CameraFormat], isContinuityCamera: Bool = false) {
+        self.uniqueID = uniqueID
+        self.formats = formats
+        self.isContinuityCamera = isContinuityCamera
+    }
 }
 
 extension CameraDevice: Equatable {

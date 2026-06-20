@@ -94,28 +94,73 @@ extension MainView {
 
     @ViewBuilder
     private var cameraPreview: some View {
-        // Show the preview only when a device is selected; "Выключена" (nil picker) hides it.
+        // Show the preview area only when a device is selected; "Выключена" (nil picker) hides it.
         // `isCameraActive` reflects whether the picker has a concrete device selected, surfaced
         // via the VM's `isCameraActive` predicate.
         if self.model.isCameraActive {
-            CameraPreviewRepresentable(sessionHandle: self.model.previewHandle)
-                .id(self.model.previewGeneration)
-                .aspectRatio(Metrics.previewAspectRatio, contentMode: .fit)
-                // Cap on maxWidth (concrete in ScrollView) so the card is ≤140pt tall.
-                // maxHeight is also set for documentation intent; maxWidth is the reliable
-                // binding dimension since ScrollView propagates width, not height.
-                .frame(
-                    maxWidth: Metrics.previewMaxHeight * Metrics.previewAspectRatio,
-                    maxHeight: Metrics.previewMaxHeight
-                )
-                .clipShape(RoundedRectangle(cornerRadius: Metrics.previewCornerRadius))
-                // Center the narrower card within the section's full width.
-                .frame(maxWidth: .infinity)
-                .task(id: self.model.activeCamera?.uniqueID) {
-                    await self.model.managePreview(for: self.model.activeCamera?.uniqueID)
+            ZStack {
+                // Live preview — always mounted when active so the NSView layer is warm.
+                // `.id(previewGeneration)` forces recreation when the camera device changes;
+                // until the handle arrives the layer paints black (covered by the overlay below).
+                CameraPreviewRepresentable(sessionHandle: self.model.previewHandle)
+                    .id(self.model.previewGeneration)
+                    .accessibilityLabel("Предварительный просмотр камеры")
+
+                // Connecting overlay — shown while `previewHandle == nil` (source not yet started).
+                // Fades out via the ZStack-level `.animation` once the handle becomes non-nil.
+                // `CameraDevice` stores only `{uniqueID, formats}`; no transport flag exists, so
+                // the generic label is used for all devices. Follow-up: add a transport field to
+                // `CameraDevice` to enable an iPhone-specific label (Continuity Camera startup).
+                if self.model.isCameraConnecting {
+                    self.cameraConnectingOverlay
                 }
-                .accessibilityLabel("Предварительный просмотр камеры")
+            }
+            .aspectRatio(Metrics.previewAspectRatio, contentMode: .fit)
+            // Cap on maxWidth (concrete in ScrollView) so the card is ≤140pt tall.
+            // maxHeight is also set for documentation intent; maxWidth is the reliable
+            // binding dimension since ScrollView propagates width, not height.
+            .frame(
+                maxWidth: Metrics.previewMaxHeight * Metrics.previewAspectRatio,
+                maxHeight: Metrics.previewMaxHeight
+            )
+            .clipShape(RoundedRectangle(cornerRadius: Metrics.previewCornerRadius))
+            // Center the narrower card within the section's full width.
+            .frame(maxWidth: .infinity)
+            // Crossfade between connecting and live states. Scoped to `isCameraConnecting`
+            // so it does NOT animate the `.id()`-driven NSView recreation.
+            .animation(
+                .easeInOut(duration: Metrics.connectingCrossfadeDuration),
+                value: self.model.isCameraConnecting
+            )
+            // `.task` sits on the ZStack container, not on the representable, so generation
+            // bumps (`.id` on the inner view) do not cancel and re-fire `managePreview`.
+            .task(id: self.model.activeCamera?.uniqueID) {
+                await self.model.managePreview(for: self.model.activeCamera?.uniqueID)
+            }
         }
+    }
+
+    /// Placeholder shown while the preview session is starting.
+    ///
+    /// Occupies the same box as the live preview (sized by the parent ZStack) so no layout
+    /// jump occurs. Background matches the card surface (`controlBackgroundColor`).
+    private var cameraConnectingOverlay: some View {
+        ZStack {
+            Color(nsColor: .controlBackgroundColor)
+            VStack(spacing: Metrics.connectingSpinnerSpacing) {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .controlSize(.small)
+                let connectingLabel = model.activeCamera?.isContinuityCamera == true
+                    ? "Подключение iPhone…"
+                    : "Подключение камеры…"
+                Text(connectingLabel)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityLabel("Подключение камеры")
+        .accessibilityAddTraits(.updatesFrequently)
     }
 
     // MARK: - Microphone section
