@@ -221,6 +221,11 @@ nonisolated struct EncodedSample: @unchecked Sendable {
 ///   overflows. Distinct from encoder/disk pressure — does NOT drive the degraded alert.
 /// - `encoderBackpressureDrops`: counted when an `AsyncStream` buffer overflows because
 ///   the encoder or writer is not consuming fast enough.
+/// - `encoderHoldDrops`: a SYNTHETIC catch-up hold frame (a repeat of the last real frame)
+///   was dropped at the encoder gate during a post-stall/sleep catch-up batch. Losing a hold
+///   loses no user content (the next hold or real frame fills the slot), so it must NEVER drive
+///   the degraded-state window, the one-way latch, or the user-facing "dropped N frames" count —
+///   only the per-source diagnostic breakdown (#200).
 nonisolated enum DropReason: Equatable, Hashable {
     /// The capture hardware or SCStream dropped a frame before it reached the pipeline.
     ///
@@ -249,6 +254,16 @@ nonisolated enum DropReason: Equatable, Hashable {
     /// buffered element. The source detects the drop via the `yield` return value
     /// (`.dropped(evictedElement)`) and emits one `DropEvent` per eviction.
     case encoderBackpressureDrops
+
+    /// A SYNTHETIC catch-up hold frame was dropped at the `VideoEncoder` pending-frame gate.
+    ///
+    /// After a scheduler stall or system sleep, the CFR clock emits a synchronous catch-up batch
+    /// of up to `fps` hold frames (repeats of the last real frame). The gate's `pendingFrameCount`
+    /// proxy cannot drain mid-batch, so holds beyond `maxPendingFrames` are dropped. Unlike
+    /// `.encoderBackpressureDrops`, a dropped hold loses no user content — the next hold/real frame
+    /// fills the slot — so it must NOT feed the degraded-state window, the one-way latch, or the
+    /// user-facing dropped-frames counter. It remains visible in the per-source breakdown (#200).
+    case encoderHoldDrops
 }
 
 extension DropReason {
@@ -265,7 +280,8 @@ extension DropReason {
         case (.captureDrop, .captureDrop),
              (.cfrNormalizationDrops, .cfrNormalizationDrops),
              (.captureBackpressureDrops, .captureBackpressureDrops),
-             (.encoderBackpressureDrops, .encoderBackpressureDrops):
+             (.encoderBackpressureDrops, .encoderBackpressureDrops),
+             (.encoderHoldDrops, .encoderHoldDrops):
             true
 
         default:
@@ -300,6 +316,12 @@ extension DropReason {
             // Ordinal tag for the fourth enum case; 4 is not in no_magic_numbers' exempt list.
             // swiftlint:disable:next no_magic_numbers
             hasher.combine(4)
+
+        case .encoderHoldDrops:
+            // Ordinal tag for the fifth enum case; 5 is not in no_magic_numbers' exempt list.
+            // (Ordinal 2 is a historical gap in this switch — kept stable; 5 avoids any collision.)
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(5)
         }
     }
 }

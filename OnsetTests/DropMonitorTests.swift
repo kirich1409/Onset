@@ -892,6 +892,102 @@ struct DropMonitorCaptureBackpressureTests {
     }
 }
 
+// MARK: - encoderHoldDrops never degrades (#200)
+
+/// `.encoderHoldDrops` carries SYNTHETIC catch-up hold frames (repeats of the last real frame),
+/// which lose no user content when dropped. These tests assert the routing decision in
+/// `DropMonitor.ingest`:
+/// - hold drops NEVER set `sessionEverDegraded`, even far above the degraded threshold;
+/// - hold drops NEVER leak into the user-facing `DropCounters` (`encoderBackpressureDrops`,
+///   `captureDrops`, `cfrNormalizationDrops`);
+/// - hold drops STILL appear in the per-source diagnostic breakdown (`encode` bucket);
+/// - genuine `.encoderBackpressureDrops` still drives the alert (no over-suppression).
+@Suite("DropMonitor — encoderHoldDrops never degrades (#200)")
+struct DropMonitorHoldDropsTests {
+    private let windowSeconds = 2.0
+    private let threshold = 3
+
+    // MARK: Test 1 — hold drops far above threshold never latch, never inflate user counters
+
+    /// A burst of `.encoderHoldDrops` far exceeding the degraded threshold within the window must
+    /// NOT set `sessionEverDegraded` and must NOT increment any `DropCounters` field — while still
+    /// landing in the `encode` diagnostic bucket. Under the OLD code these holds carried
+    /// `.encoderBackpressureDrops` and would have latched degraded and inflated the user count.
+    @Test("encoderHoldDrops above threshold — no latch, user counters zero, visible in breakdown")
+    func holdDrops_aboveThreshold_neverDegradesNorInflates() async {
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        let pts = CMTime(value: 1000, timescale: 1000)
+        // A whole catch-up batch worth of holds — far past threshold. If any fed the window, this
+        // would degrade; if any landed on encoderBackpressureDrops, the user count would inflate.
+        continuation.yield(DropEvent(
+            reason: .encoderHoldDrops,
+            source: .encode,
+            count: self.threshold + 50,
+            detectedAt: pts
+        ))
+        continuation.finish()
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        // Never degraded — the one-way latch stays clear.
+        #expect(health.sessionEverDegraded == false)
+        #expect(health.dominantCause == .notDegraded)
+        // User-facing dropped-frames counters are NOT inflated by synthetic holds.
+        #expect(health.counters.encoderBackpressureDrops == 0)
+        #expect(health.counters.captureDrops == 0)
+        #expect(health.counters.cfrNormalizationDrops == 0)
+        // The post-stop warning must not fire from hold drops alone.
+        let result = RecordingResult.empty(health)
+        #expect(result.degradedWarning(threshold: self.threshold) == false)
+
+        // But the holds REMAIN observable in the per-source diagnostic breakdown (encode bucket).
+        let breakdown = await monitor.breakdownSnapshot()
+        #expect(breakdown.encode == self.threshold + 50)
+    }
+
+    // MARK: Test 2 — real backpressure still degrades alongside hold drops (no over-suppression)
+
+    /// Hold drops and genuine encoder-backpressure drops arrive together: the holds stay inert
+    /// while the real-content drops still cross the threshold and set the latch. Proves the fix
+    /// did not over-suppress the existing degraded behavior — only synthetic holds are spared.
+    @Test("encoderHoldDrops inert while real encoderBackpressureDrops still sets the latch")
+    func holdDrops_doNotSuppressRealBackpressureDegradation() async {
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        let pts = CMTime(value: 1000, timescale: 1000)
+        // Many synthetic holds — must NOT touch the window.
+        continuation.yield(DropEvent(
+            reason: .encoderHoldDrops, source: .encode, count: 50, detectedAt: pts
+        ))
+        // Genuine real-content backpressure: threshold+1 → crosses the window, sets the latch.
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops, source: .encode, count: self.threshold + 1, detectedAt: pts
+        ))
+        continuation.finish()
+
+        for _ in 0..<200 {
+            if await monitor.snapshot().sessionEverDegraded { break }
+            await Task.yield()
+        }
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        // Real backpressure still degrades — the fix is not over-suppressing.
+        #expect(health.sessionEverDegraded == true)
+        // Only the real-content drops are reflected in the user-facing counter; holds excluded.
+        #expect(health.counters.encoderBackpressureDrops == self.threshold + 1)
+        let result = RecordingResult.empty(health)
+        #expect(result.degradedWarning(threshold: self.threshold) == true)
+    }
+}
+
 // MARK: - stop() drains buffered tail (#202)
 
 /// Regression guard for #202: `stop()` must DRAIN the observe tasks (await without cancelling),
