@@ -14,7 +14,7 @@
 | `VideoFrameSource` | `CaptureSource.swift` | Протокол видеоисточника: frames/drops/events через AsyncStream, actor-isolated start/stop |
 | `AudioSampleSource` | `CaptureSource.swift` | Протокол аудиоисточника: samples/drops через AsyncStream |
 | `CameraSource` | `CameraSource.swift` | Актор: камера+микрофон через `AVCaptureSession`, реализует оба протокола |
-| `ScreenSource` | `ScreenSource.swift` | Актор: захват дисплея через ScreenCaptureKit, обрабатывает hot-plug отключение |
+| `ScreenSource` | `ScreenSource.swift` | Актор: захват дисплея через ScreenCaptureKit, обрабатывает hot-plug отключение; исключает собственные окна Onset из захвата (#244) |
 | `CameraDevice` | `CaptureDeviceModels.swift` | Иммутабельный снапшот камеры (uniqueID + форматы), без живых ссылок на `AVCaptureDevice` |
 | `Display` | `CaptureDeviceModels.swift` | Иммутабельный снапшот дисплея: `CGDirectDisplayID`, размеры, частота |
 | `DeviceDiscovery` | `DeviceDiscovery+Displays.swift`, `DeviceDiscovery+CaptureDevices.swift` | Nonisolated-перечисление устройств с чистыми мапперами для тестов; suspended-устройства (`isSuspended`, например FaceTime-камера при закрытой крышке) исключаются из результатов. Встроенный микрофон не флипает `isSuspended` при закрытой крышке (отдаёт цифровую тишину), поэтому скрывается отдельно — чистым фильтром `microphonesAvailable(_:lidClosed:)` по состоянию крышки из `LidState` |
