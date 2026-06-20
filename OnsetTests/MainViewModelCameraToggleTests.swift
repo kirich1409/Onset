@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreGraphics
 import Foundation
 @testable import Onset
@@ -594,6 +595,73 @@ private final class CameraSaveSpy: DeviceSelectionPersisting {
 
     func clearMicrophone() {
         self.backing.clearMicrophone()
+    }
+}
+
+// MARK: - isCameraConnecting predicate
+
+@Suite("MainViewModel — isCameraConnecting")
+@MainActor
+struct MainViewModelCameraConnectingTests {
+    private func makeSUT(cameras: [CameraDevice] = []) -> MainViewModel {
+        let perms = FakePermissionsService(screen: .authorized, camera: .authorized, microphone: .notDetermined)
+        let coordinator = RecordingCoordinator()
+        let defaults = InMemoryUserDefaults()
+        return MainViewModel(
+            permissions: perms,
+            coordinator: coordinator,
+            discoverDisplays: { _ in [] },
+            discoverCameras: { _ in cameras },
+            discoverMicrophones: { _ in [] },
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) },
+            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: defaults) }
+        )
+    }
+
+    private static func makeCamera(id: String = "cam-1") -> CameraDevice {
+        CameraDevice(uniqueID: id, formats: [
+            CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30, maxFps: 60),
+        ])
+    }
+
+    @Test("camera inactive → isCameraConnecting false")
+    func cameraInactive_isNotConnecting() {
+        let sut = self.makeSUT()
+        #expect(!sut.isCameraConnecting)
+    }
+
+    @Test("camera active, no handle, not failed → isCameraConnecting true")
+    func cameraActive_noHandle_notFailed_isConnecting() async {
+        let camera = Self.makeCamera()
+        let sut = self.makeSUT(cameras: [camera])
+        // loadDevices populates the internal `cameras` list and auto-selects the
+        // device, which is what drives `selectedCamera` → `activeCamera` non-nil.
+        // Setting `selectedCameraID` alone leaves `cameras` empty, so the lookup
+        // would return nil and `isCameraActive` would be false.
+        await sut.loadDevices()
+        // previewHandle is nil by default, previewFailed is false by default
+        #expect(sut.isCameraActive)
+        #expect(sut.isCameraConnecting)
+    }
+
+    @Test("camera active, handle set → isCameraConnecting false")
+    func cameraActive_handleSet_isNotConnecting() {
+        let camera = Self.makeCamera()
+        let sut = self.makeSUT(cameras: [camera])
+        sut.cameraEnabled = true
+        sut.selectedCameraID = camera.uniqueID
+        sut.previewHandle = SessionHandle(session: AVCaptureSession())
+        #expect(!sut.isCameraConnecting)
+    }
+
+    @Test("camera active, previewFailed true → isCameraConnecting false")
+    func cameraActive_previewFailed_isNotConnecting() {
+        let camera = Self.makeCamera()
+        let sut = self.makeSUT(cameras: [camera])
+        sut.cameraEnabled = true
+        sut.selectedCameraID = camera.uniqueID
+        sut.previewFailed = true
+        #expect(!sut.isCameraConnecting)
     }
 }
 

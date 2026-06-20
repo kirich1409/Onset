@@ -98,6 +98,8 @@ extension CameraDevice: Equatable {
         // CameraFormat: Equatable conformance is inferred @MainActor even with a
         // manual nonisolated == implementation. Direct element comparison bypasses
         // the witness table and calls CameraFormat stored-property access directly.
+        // `isContinuityCamera` is intentionally excluded: it is determined by `uniqueID`
+        // (transport is intrinsic per device), so comparing `uniqueID` is sufficient.
         guard lhs.formats.count == rhs.formats.count else { return false }
         return zip(lhs.formats, rhs.formats).allSatisfy { pair in
             let (lhs, rhs) = pair

@@ -234,13 +234,24 @@ final class MainViewModel {
         self.activeCamera != nil
     }
 
-    /// True while a camera device is selected but the preview session has not yet started.
+    /// `true` while a camera is active but the preview handle is not yet available —
+    /// covers both the connecting state and the failed state.
+    ///
+    /// Use this to gate any placeholder UI (spinner or error icon) that should be
+    /// visible whenever the live preview layer is not yet ready, regardless of reason.
+    var cameraPlaceholderPending: Bool {
+        self.isCameraActive && self.previewHandle == nil
+    }
+
+    /// True while a camera device is selected but the preview session has not yet started,
+    /// and no terminal failure has been recorded.
     ///
     /// `previewHandle` is cleared at the top of `managePreview` (via `stopCurrentPreview`) and
     /// set only after `source.start()` returns, so this is `true` during both initial activation
     /// and the switch window between devices (1-3 s for slow sources such as Continuity Camera).
+    /// Becomes `false` when `previewFailed` is set — the error placeholder is shown instead.
     var isCameraConnecting: Bool {
-        self.isCameraActive && self.previewHandle == nil
+        self.cameraPlaceholderPending && !self.previewFailed
     }
 
     // MARK: - Camera picker selection (#224)
@@ -326,6 +337,13 @@ final class MainViewModel {
     /// The `SessionHandle` for the live camera preview, or `nil` for placeholder.
     /// Internal (not private) so `MainViewModel+Preview.swift` extension can write it.
     var previewHandle: SessionHandle?
+
+    /// True when the last camera preview startup attempt failed terminally (no suitable format
+    /// or `source.start()` threw). The spinner overlay is suppressed; a static error placeholder
+    /// is shown instead. Reset to `false` at the start of each new `managePreview` invocation
+    /// so re-selecting a different camera clears the prior failure.
+    /// Internal (not private) so `MainViewModel+Preview.swift` extension can write it.
+    var previewFailed = false
 
     /// Bumped on each camera change; drives `.id()` on the `NSViewRepresentable` wrapper
     /// to force recreation of `CameraPreviewView` (its `init` wires the layer, `updateNSView` is no-op).

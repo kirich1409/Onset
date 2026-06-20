@@ -270,6 +270,27 @@ struct MainViewModelTests {
         #expect(sut.selectedCameraID == nil)
     }
 
+    // MARK: - cameraPlaceholderPending
+
+    /// `cameraPlaceholderPending` is `true` for both the connecting state (previewFailed = false)
+    /// and the failed state (previewFailed = true), as long as the camera is active and the
+    /// handle has not arrived.
+    @Test("cameraPlaceholderPending is true while active, handle nil — regardless of previewFailed")
+    func cameraPlaceholderPending_trueForBothConnectingAndFailed() {
+        let (sut, _) = self.makeSUT()
+        let format = CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30.0, maxFps: 30.0)
+        let device = CameraDevice(uniqueID: "cam-1", formats: [format])
+        sut.cameras = [device]
+        sut.selectedCameraID = device.uniqueID
+
+        // Baseline: active camera, no handle, not failed → pending
+        #expect(sut.cameraPlaceholderPending)
+
+        // Failed state: still pending (handle still nil)
+        sut.previewFailed = true
+        #expect(sut.cameraPlaceholderPending)
+    }
+
     // MARK: - Display label
 
     @Test("Display with refreshHz 0 → label shows name — resolution (no Hz segment)")

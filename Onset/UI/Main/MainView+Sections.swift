@@ -98,6 +98,8 @@ extension MainView {
         // `isCameraActive` reflects whether the picker has a concrete device selected, surfaced
         // via the VM's `isCameraActive` predicate.
         if self.model.isCameraActive {
+            // Hoist once per body pass — used at three sites below.
+            let pending = self.model.cameraPlaceholderPending
             ZStack {
                 // Live preview — always mounted when active so the NSView layer is warm.
                 // `.id(previewGeneration)` forces recreation when the camera device changes;
@@ -105,13 +107,15 @@ extension MainView {
                 CameraPreviewRepresentable(sessionHandle: self.model.previewHandle)
                     .id(self.model.previewGeneration)
                     .accessibilityLabel("Предварительный просмотр камеры")
+                    // Hide the black NSView layer from VoiceOver while the placeholder is shown
+                    // so the user only hears the status label, not both.
+                    .accessibilityHidden(pending)
 
-                // Connecting overlay — shown while `previewHandle == nil` (source not yet started).
-                // Fades out via the ZStack-level `.animation` once the handle becomes non-nil.
-                // `CameraDevice` stores only `{uniqueID, formats}`; no transport flag exists, so
-                // the generic label is used for all devices. Follow-up: add a transport field to
-                // `CameraDevice` to enable an iPhone-specific label (Continuity Camera startup).
-                if self.model.isCameraConnecting {
+                // Placeholder — shown while `previewHandle == nil` (source not yet started or failed).
+                // Fades in/out via the ZStack-level `.animation` driven by `cameraPlaceholderPending`.
+                // Branches internally: spinner while connecting, error icon when `previewFailed`.
+                // Label is iPhone-specific when `isContinuityCamera` via `cameraPlaceholderLabel`.
+                if pending {
                     self.cameraConnectingOverlay
                 }
             }
@@ -126,11 +130,11 @@ extension MainView {
             .clipShape(RoundedRectangle(cornerRadius: Metrics.previewCornerRadius))
             // Center the narrower card within the section's full width.
             .frame(maxWidth: .infinity)
-            // Crossfade between connecting and live states. Scoped to `isCameraConnecting`
+            // Crossfade between placeholder and live states. Scoped to `cameraPlaceholderPending`
             // so it does NOT animate the `.id()`-driven NSView recreation.
             .animation(
                 .easeInOut(duration: Metrics.connectingCrossfadeDuration),
-                value: self.model.isCameraConnecting
+                value: pending
             )
             // `.task` sits on the ZStack container, not on the representable, so generation
             // bumps (`.id` on the inner view) do not cancel and re-fire `managePreview`.
@@ -140,26 +144,38 @@ extension MainView {
         }
     }
 
-    /// Placeholder shown while the preview session is starting.
+    /// Visible and accessibility label for the camera placeholder — iPhone-specific when applicable.
+    private var cameraPlaceholderLabel: String {
+        let isPhone = self.model.activeCamera?.isContinuityCamera == true
+        if self.model.previewFailed {
+            return isPhone ? "Не удалось подключить iPhone" : "Не удалось подключить камеру"
+        }
+        return isPhone ? "Подключение iPhone…" : "Подключение камеры…"
+    }
+
+    /// Placeholder shown while the preview session is starting or has failed.
     ///
     /// Occupies the same box as the live preview (sized by the parent ZStack) so no layout
     /// jump occurs. Background matches the card surface (`controlBackgroundColor`).
+    /// Branches on `previewFailed`: spinner + label while connecting, error icon + label on failure.
     private var cameraConnectingOverlay: some View {
         ZStack {
             Color(nsColor: .controlBackgroundColor)
             VStack(spacing: Metrics.connectingSpinnerSpacing) {
-                ProgressView()
-                    .progressViewStyle(.circular)
-                    .controlSize(.small)
-                let connectingLabel = model.activeCamera?.isContinuityCamera == true
-                    ? "Подключение iPhone…"
-                    : "Подключение камеры…"
-                Text(connectingLabel)
+                if self.model.previewFailed {
+                    Image(systemName: "exclamationmark.triangle")
+                        .imageScale(.medium)
+                } else {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .controlSize(.small)
+                }
+                Text(self.cameraPlaceholderLabel)
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.primary)
             }
         }
-        .accessibilityLabel("Подключение камеры")
+        .accessibilityLabel(self.cameraPlaceholderLabel)
         .accessibilityAddTraits(.updatesFrequently)
     }
 
