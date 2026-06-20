@@ -7,8 +7,8 @@
 // recording files. These tests assert the report text contains the expected sections and values for
 // both a degraded session and a clean (zero-drop) session.
 //
-@testable import Onset
 import Foundation
+@testable import Onset
 import Testing
 
 // MARK: - DropReportFormatter Tests
