@@ -206,7 +206,10 @@ TCC-разрешения, политика записи, запись MP4.
 - Stop из меню-бара (AC-9) → `MenuBarMenu.recordingMenu` → `coordinator.stop()`; hotkey ⌘⌥⌃R виден в меню через `.keyboardShortcut` (#242).
 - Старт без окна (#242) → `activateRecording()` вызывает `notifier.notifyRecordingStarted()`; окно открывается вручную через «Открыть окно записи».
 - Lifecycle превью камеры → `MainViewModel+Preview.swift`
-  (`previewGeneration` + `.task(id:)`).
+  (`previewGeneration` + `.task(id:)`). Пока кадров нет — плейсхолдер в
+  `cameraConnectingOverlay` (`MainView+Sections.swift`): спиннер «Подключение
+  iPhone…/камеры…» (`isCameraConnecting`) или, при сбое старта, статичная
+  ошибка (`previewFailed`); `cameraPlaceholderPending` — общий гейт показа.
 - Форматирование таймера (mm:ss / h:mm:ss) → `ElapsedFormatter.string(from:)` —
   без `String(format:)` из-за `SWIFT_STRICT_MEMORY_SAFETY`.
 
