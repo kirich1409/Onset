@@ -145,20 +145,14 @@ extension MainView {
     }
 
     /// Visible and accessibility label for the camera placeholder — iPhone-specific when applicable.
+    ///
+    /// Thin wrapper over `CameraPreviewLabel.text` so the visible label and the VoiceOver
+    /// announcement (`previewAnnouncement`) read the SAME source (#256). `nil` only for `.live`,
+    /// where the placeholder is not shown; the connecting copy is the safe fallback.
     private var cameraPlaceholderLabel: String {
         let isPhone = self.model.activeCamera?.isContinuityCamera == true
-        if self.model.previewFailed {
-            return isPhone ? "Не удалось подключить iPhone" : "Не удалось подключить камеру"
-        }
-        // #255 slow-connect: keep the spinner but carry recovery guidance (what to do), not just
-        // status — a "soft" timeout must be actionable. Placeholder copy; final wording needs a
-        // user brief (UI copy is not finalized by agents).
-        if self.model.previewIsConnectingSlow {
-            return isPhone
-                ? "Подключение занимает больше обычного. Разбудите iPhone или поднесите ближе."
-                : "Подключение занимает больше обычного. Проверьте, что камера включена и подключена."
-        }
-        return isPhone ? "Подключение iPhone…" : "Подключение камеры…"
+        return CameraPreviewLabel.text(for: self.model.previewState, isContinuity: isPhone)
+            ?? (isPhone ? "Подключение iPhone…" : "Подключение камеры…")
     }
 
     /// Placeholder shown while the preview session is starting or has failed.
@@ -183,8 +177,10 @@ extension MainView {
                     .foregroundStyle(.primary)
             }
         }
+        // `.accessibilityLabel` gives the on-demand current-state read; the frequent-updates
+        // trait was removed (#256) — it re-spoke the label for a focused user on top of the
+        // explicit VoiceOver announcement (double speech).
         .accessibilityLabel(self.cameraPlaceholderLabel)
-        .accessibilityAddTraits(.updatesFrequently)
     }
 
     // MARK: - Microphone section

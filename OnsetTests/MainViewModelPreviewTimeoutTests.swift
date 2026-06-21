@@ -186,7 +186,12 @@ struct MainViewModelPreviewTimeoutTests {
     @Test("connectingSlow + late handle → live (late-handle promotion)")
     func connectingSlow_lateHandle_becomesLive() async {
         let handle = Self.makeHandle()
-        let sut = self.makeSUT { _ in handle }.sut
+        // Hoisted into a typed `let` (not a trailing closure): a bare trailing closure on `makeSUT`
+        // forward-scans to `connectSleep` (SE-0286) and mis-binds, leaving `startPreviewSource` at its
+        // nil default; the explicit seam type pins the binding to `startPreviewSource`. Also dodges
+        // SwiftLint `trailing_closure`, which would otherwise push the call back to the broken form.
+        let startSource: @Sendable (CameraSource) async throws -> SessionHandle? = { _ in handle }
+        let sut = self.makeSUT(startPreviewSource: startSource).sut
         sut.previewAttempt = 1
         sut.previewState = .connectingSlow
         let camera = Self.makeCamera()
@@ -207,10 +212,14 @@ struct MainViewModelPreviewTimeoutTests {
         // A's handle must then be rejected by BOTH the identity gate (`previewSource === sourceB`,
         // not `sourceA`) and the attempt gate (1 != 2).
         let box = SeamBox()
-        let sut = self.makeSUT { @MainActor _ in
+        // Hoisted into a typed `let` (not a trailing closure): the explicit seam type pins the
+        // closure's return type so inference can't collapse it to `Void`, and `@MainActor` is
+        // required because the body synchronously mutates MainActor-isolated SUT state via `box`.
+        let startA: @Sendable @MainActor (CameraSource) async throws -> SessionHandle? = { _ in
             box.applySwitch?()
             return handleA
-        }.sut
+        }
+        let sut = self.makeSUT(startPreviewSource: startA).sut
         let sourceB = sut.makeCameraSource(cameraB, cameraB.formats[0], nil, .mvpDefault)
         box.applySwitch = {
             sut.previewSource = sourceB
@@ -280,6 +289,12 @@ struct MainViewModelPreviewTimeoutTests {
                 return handle
             }
         ).sut
+        // `makeSUT` only injects `discoverCameras`; `self.cameras` is populated solely by
+        // `loadDevices`. Without this, `managePreview` hits the hot-unplug guard
+        // (`cameras.first(where:)` → nil) and returns before bumping `previewAttempt`. The
+        // auto-selected `selectedCameraID` is inert here — the test drives `managePreview`
+        // directly, not via `.task(id:)`.
+        await sut.loadDevices()
 
         // Drive A and B as separate manual tasks so neither is auto-cancelled (mirrors two
         // `.task(id:)` re-entries without SwiftUI cancellation interfering).

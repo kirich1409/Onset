@@ -1,3 +1,5 @@
+import Accessibility
+import Foundation
 import os
 
 // MARK: - Preview park constants
@@ -25,6 +27,37 @@ private enum MainViewModelPreviewConstants {
 // MARK: - MainViewModel — Preview lifecycle
 
 extension MainViewModel {
+    // MARK: - State assignment + VoiceOver announcement (#256)
+
+    /// Assigns `previewState` and posts a VoiceOver announcement for the transition (#256).
+    ///
+    /// This is the ONLY place `previewState` is written, so every transition is announced by the
+    /// pure `previewAnnouncement` policy. The decision of *whether* to assign stays at the call
+    /// sites (identity / `attempt` / `if case` gates) — this helper only fires the announcement
+    /// when an assignment actually happens. `previewAnnouncement` returns `nil` for `→ .idle` /
+    /// `→ .connecting`, so routing those through here is a harmless no-op.
+    func setPreviewState(_ newState: CameraPreviewState) {
+        let old = self.previewState
+        let isContinuity = self.activeCamera?.isContinuityCamera == true
+        self.previewState = newState
+        if let announcement = previewAnnouncement(from: old, to: newState, isContinuity: isContinuity) {
+            Self.postAnnouncement(announcement)
+        }
+    }
+
+    /// Posts a VoiceOver announcement via the Accessibility framework (#256).
+    ///
+    /// Uses `AttributedString.accessibilitySpeechAnnouncementPriority` (Accessibility framework,
+    /// macOS 14+) to set priority — the supported route SwiftUI does not surface — then
+    /// `AccessibilityNotification.Announcement(_:).post()`. High priority interrupts current
+    /// speech; normal priority queues. The text is user-facing UI (== the visible label), never
+    /// logged — no device name reaches `os.Logger`.
+    static func postAnnouncement(_ announcement: PreviewAnnouncement) {
+        var attributed = AttributedString(announcement.text)
+        attributed.accessibilitySpeechAnnouncementPriority = announcement.isHighPriority ? .high : .default
+        AccessibilityNotification.Announcement(attributed).post()
+    }
+
     /// Manages the camera preview for `cameraID`. Call via `.task(id: activeCamera?.uniqueID)`.
     ///
     /// Stops any existing `previewSource` first (device contention), then creates, starts,
@@ -36,7 +69,7 @@ extension MainViewModel {
         // sets `.idle` only when there is a live source, but a sticky `.failed` (set with
         // `previewSource == nil`) would otherwise survive re-selection. Reset here so
         // re-selecting a camera clears the error placeholder.
-        self.previewState = .idle
+        self.setPreviewState(.idle)
 
         guard let cameraID else {
             // Normal deselect (camera toggle off or no cameras available). State stays `.idle`.
@@ -49,7 +82,7 @@ extension MainViewModel {
             // Selection stays set but no handle can be established — mark as failed
             // so the error placeholder is shown rather than spinning indefinitely.
             mainViewModelLogger.warning("Camera preview skipped — selected device not in available list")
-            self.previewState = .failed
+            self.setPreviewState(.failed)
             self.previewGeneration += 1
             return
         }
@@ -61,7 +94,7 @@ extension MainViewModel {
         // before attempt A captures it (#255).
         self.previewAttempt += 1
         let attempt = self.previewAttempt
-        self.previewState = .connecting
+        self.setPreviewState(.connecting)
 
         // Compute the threshold BEFORE the task group so `camera` is not captured inside the
         // `@Sendable` child task — only the value-typed `threshold`/`attempt` cross into it (#255).
@@ -83,7 +116,7 @@ extension MainViewModel {
         guard let source else {
             // Build failed: gate so a stale attempt cannot stamp `.failed` over a newer one.
             if attempt == self.previewAttempt {
-                self.previewState = .failed
+                self.setPreviewState(.failed)
             }
             return
         }
@@ -95,7 +128,7 @@ extension MainViewModel {
         await source.stop()
         if self.previewSource === source {
             self.previewSource = nil
-            self.previewState = .idle
+            self.setPreviewState(.idle)
             self.previewGeneration += 1
         }
         mainViewModelLogger.debug("Camera preview stopped")
@@ -116,7 +149,7 @@ extension MainViewModel {
             return
         }
         guard attempt == self.previewAttempt, case .connecting = self.previewState else { return }
-        self.previewState = .connectingSlow
+        self.setPreviewState(.connectingSlow)
     }
 
     /// Stops the current preview source (if any) and clears handles.
@@ -124,7 +157,7 @@ extension MainViewModel {
         guard let old = self.previewSource else { return }
         await old.stop()
         self.previewSource = nil
-        self.previewState = .idle
+        self.setPreviewState(.idle)
     }
 
     /// Creates, starts, and exposes a camera preview source.
@@ -171,7 +204,7 @@ extension MainViewModel {
         // promotion (`.connectingSlow → .live`) still passes: the slow-but-no-switch path does
         // not bump a new attempt, so both gates hold.
         if let handle, self.previewSource === source, attempt == self.previewAttempt {
-            self.previewState = .live(handle)
+            self.setPreviewState(.live(handle))
         }
         self.previewGeneration += 1
         mainViewModelLogger.debug("Camera preview started")

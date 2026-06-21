@@ -76,6 +76,11 @@ struct MainViewModelTests {
         MicrophoneDevice(uniqueID: id)
     }
 
+    /// A `SessionHandle` over a fresh `AVCaptureSession` for `.live(_)` fixtures (no hardware).
+    private static func makeHandle() -> SessionHandle {
+        SessionHandle(session: AVCaptureSession())
+    }
+
     // MARK: - AC-1: Auto-select when exactly one display
 
     @Test("One display → selectedDisplayID auto-set after loadDevices (AC-1)")
@@ -344,6 +349,111 @@ struct MainViewModelTests {
         await sut.managePreview(for: nil)
 
         #expect(!sut.previewFailed)
+    }
+
+    // MARK: - VoiceOver announcement policy (#256)
+
+    /// Posting policy table: from × to × isContinuity → text / priority / nil.
+    /// Covers the anti-spam contract (`→ .connecting` → nil, single `→ .live` announcement).
+    @Test("previewAnnouncement posting policy — per-transition text/priority/nil (#256)")
+    func previewAnnouncement_policy() {
+        // → .connecting : nil (anti-spam — never announce the start)
+        #expect(previewAnnouncement(from: .idle, to: .connecting, isContinuity: false) == nil)
+        #expect(previewAnnouncement(from: .idle, to: .connecting, isContinuity: true) == nil)
+
+        // → .idle : nil
+        #expect(previewAnnouncement(from: .live(Self.makeHandle()), to: .idle, isContinuity: false) == nil)
+
+        // connecting → live : a SINGLE "connected" announcement, normal priority (no pair, since
+        // connecting was never spoken).
+        let live = previewAnnouncement(from: .connecting, to: .live(Self.makeHandle()), isContinuity: false)
+        #expect(live?.text == "Камера подключена")
+        #expect(live?.isHighPriority == false)
+
+        // → .connectingSlow : status + recovery guidance, normal priority; device-specific copy.
+        let slowBuiltIn = previewAnnouncement(from: .connecting, to: .connectingSlow, isContinuity: false)
+        #expect(slowBuiltIn?.isHighPriority == false)
+        #expect(slowBuiltIn?.text.contains("больше обычного") == true)
+        let slowPhone = previewAnnouncement(from: .connecting, to: .connectingSlow, isContinuity: true)
+        #expect(slowPhone?.text.contains("iPhone") == true)
+        #expect(slowPhone?.text != slowBuiltIn?.text)
+
+        // → .failed : visible failure label, HIGH priority (interrupts a hanging slow notice).
+        let failedBuiltIn = previewAnnouncement(from: .connectingSlow, to: .failed, isContinuity: false)
+        #expect(failedBuiltIn?.text == "Не удалось подключить камеру")
+        #expect(failedBuiltIn?.isHighPriority == true)
+        let failedPhone = previewAnnouncement(from: .connectingSlow, to: .failed, isContinuity: true)
+        #expect(failedPhone?.text == "Не удалось подключить iPhone")
+        #expect(failedPhone?.isHighPriority == true)
+    }
+
+    /// The announcement text equals the visible placeholder label (single source, #256):
+    /// `previewAnnouncement` and `CameraPreviewLabel` must agree for `.failed`/`.connectingSlow`.
+    @Test("Announcement text matches the visible placeholder label — single source (#256)")
+    func previewAnnouncement_matchesVisibleLabel() {
+        for isContinuity in [false, true] {
+            let failed = previewAnnouncement(from: .connecting, to: .failed, isContinuity: isContinuity)
+            #expect(failed?.text == CameraPreviewLabel.text(for: .failed, isContinuity: isContinuity))
+
+            let slow = previewAnnouncement(from: .connecting, to: .connectingSlow, isContinuity: isContinuity)
+            #expect(slow?.text == CameraPreviewLabel.text(for: .connectingSlow, isContinuity: isContinuity))
+        }
+    }
+
+    /// `CameraPreviewLabel` branching: `.live` has no placeholder; `.idle`/`.connecting` share the
+    /// connecting copy; device-specific strings differ.
+    @Test("CameraPreviewLabel text per state — 1:1 with prior view logic (#256)")
+    func cameraPreviewLabel_text() {
+        // .live → no placeholder text
+        #expect(CameraPreviewLabel.text(for: .live(Self.makeHandle()), isContinuity: false) == nil)
+
+        // .idle and .connecting collapse to the same "connecting" copy
+        #expect(
+            CameraPreviewLabel.text(for: .idle, isContinuity: false)
+                == CameraPreviewLabel.text(for: .connecting, isContinuity: false)
+        )
+        #expect(CameraPreviewLabel.text(for: .connecting, isContinuity: false) == "Подключение камеры…")
+        #expect(CameraPreviewLabel.text(for: .connecting, isContinuity: true) == "Подключение iPhone…")
+
+        // .failed device-specific
+        #expect(CameraPreviewLabel.text(for: .failed, isContinuity: false) == "Не удалось подключить камеру")
+        #expect(CameraPreviewLabel.text(for: .failed, isContinuity: true) == "Не удалось подключить iPhone")
+    }
+
+    // MARK: - Camera disconnect announcement (#256)
+
+    /// Session-live unplug (`hasObservedPresentCamera == true`) → high-priority announcement.
+    @Test("disconnect_sessionLive_announces — high-priority notice when camera was seen present (#256)")
+    func disconnect_sessionLive_announces() {
+        let announcement = cameraDisconnectAnnouncement(name: "Тестовая камера", hasObservedPresentCamera: true)
+        #expect(announcement != nil)
+        #expect(announcement?.isHighPriority == true)
+        #expect(announcement?.text.contains("Тестовая камера") == true)
+    }
+
+    /// Launch with a saved-but-absent camera (flag still `false`) → no spurious announcement.
+    @Test("initialLoadWithAbsentSavedCamera_doesNotAnnounce — flag false at startup → nil (#256)")
+    func initialLoadWithAbsentSavedCamera_doesNotAnnounce() {
+        let announcement = cameraDisconnectAnnouncement(name: "Тестовая камера", hasObservedPresentCamera: false)
+        #expect(announcement == nil)
+    }
+
+    /// `hasObservedPresentCamera` starts `false` and is armed by `loadCamerasAndMicrophones`
+    /// only once a present camera is resolved (restore or auto-select).
+    @Test("hasObservedPresentCamera armed after a present camera is loaded (#256)")
+    func hasObservedPresentCamera_armedAfterPresentLoad() {
+        let (sut, _) = self.makeSUT(cameras: [Self.makeCamera()])
+        #expect(!sut.hasObservedPresentCamera)
+        sut.loadCamerasAndMicrophones()
+        #expect(sut.hasObservedPresentCamera)
+    }
+
+    /// No camera present at load → flag stays `false` (no spurious disconnect announce later).
+    @Test("hasObservedPresentCamera stays false when no camera is present at load (#256)")
+    func hasObservedPresentCamera_falseWhenNoCamera() {
+        let (sut, _) = self.makeSUT(cameras: [])
+        sut.loadCamerasAndMicrophones()
+        #expect(!sut.hasObservedPresentCamera)
     }
 
     // MARK: - Display label

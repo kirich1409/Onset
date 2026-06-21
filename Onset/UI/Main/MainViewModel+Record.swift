@@ -116,7 +116,7 @@ extension MainViewModel {
         if let preview = self.previewSource {
             await preview.stop()
             self.previewSource = nil
-            self.previewState = .idle
+            self.setPreviewState(.idle)
         }
 
         let request = RecordingRequest(

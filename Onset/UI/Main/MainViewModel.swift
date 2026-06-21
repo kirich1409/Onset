@@ -161,6 +161,14 @@ final class MainViewModel {
     /// or `nil` when the microphone is present or was never selected.
     var disconnectedMicName: String?
 
+    /// `true` once a selected camera has been observed present/active this session (#256).
+    ///
+    /// Gates the live-disconnect VoiceOver announcement so launching with a saved-but-absent
+    /// camera (flag still `false`) does not speak a spurious "…отключена". Set in
+    /// `loadCamerasAndMicrophones` where a camera is resolved present; never reset.
+    @ObservationIgnored
+    var hasObservedPresentCamera = false
+
     // MARK: - User selections (ID-typed for Hashable Picker compatibility)
 
     /// The `CGDirectDisplayID` of the selected display, or `nil` when no selection.
