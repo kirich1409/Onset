@@ -1,4 +1,3 @@
-import Accessibility
 import Foundation
 import os
 
@@ -41,21 +40,8 @@ extension MainViewModel {
         let isContinuity = self.activeCamera?.isContinuityCamera == true
         self.previewState = newState
         if let announcement = previewAnnouncement(from: old, to: newState, isContinuity: isContinuity) {
-            Self.postAnnouncement(announcement)
+            self.postAnnouncementSeam(announcement)
         }
-    }
-
-    /// Posts a VoiceOver announcement via the Accessibility framework (#256).
-    ///
-    /// Uses `AttributedString.accessibilitySpeechAnnouncementPriority` (Accessibility framework,
-    /// macOS 14+) to set priority — the supported route SwiftUI does not surface — then
-    /// `AccessibilityNotification.Announcement(_:).post()`. High priority interrupts current
-    /// speech; normal priority queues. The text is user-facing UI (== the visible label), never
-    /// logged — no device name reaches `os.Logger`.
-    static func postAnnouncement(_ announcement: PreviewAnnouncement) {
-        var attributed = AttributedString(announcement.text)
-        attributed.accessibilitySpeechAnnouncementPriority = announcement.isHighPriority ? .high : .default
-        AccessibilityNotification.Announcement(attributed).post()
     }
 
     /// Manages the camera preview for `cameraID`. Call via `.task(id: activeCamera?.uniqueID)`.

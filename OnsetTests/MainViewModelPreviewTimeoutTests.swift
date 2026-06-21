@@ -5,13 +5,14 @@ import Testing
 
 // MARK: - MainViewModelPreviewTimeoutTests (#255)
 
-// swiftlint:disable type_body_length opening_brace
+// swiftlint:disable type_body_length opening_brace file_length
 // Rationale: covers the full soft-connect watchdog surface (state-gate, attempt-gate,
-// identity-gate, late-handle promotion) plus the one concurrent A→B device-switch path;
-// splitting would scatter closely related #255 ACs (type_body_length). `opening_brace`:
-// `makeSUT`'s closure-default params make SwiftFormat (`wrapMultilineStatementBraces`) wrap the
-// function brace onto its own line — SwiftFormat is the formatting source of truth, so the
-// SwiftLint rule is suppressed for this file rather than fighting the formatter.
+// identity-gate, late-handle promotion) plus the one concurrent A→B device-switch path
+// and the #256 announcement-posting integration; splitting would scatter closely related
+// #255/#256 ACs (type_body_length, file_length). `opening_brace`: `makeSUT`'s closure-default
+// params make SwiftFormat (`wrapMultilineStatementBraces`) wrap the function brace onto its own
+// line — SwiftFormat is the formatting source of truth, so the SwiftLint rule is suppressed for
+// this file rather than fighting the formatter.
 
 /// Deterministic L2 coverage of the #255 soft-connect timeout.
 ///
@@ -88,7 +89,8 @@ struct MainViewModelPreviewTimeoutTests {
     private func makeSUT(
         cameras: [CameraDevice] = [],
         connectSleep: @escaping @Sendable (Duration) async throws -> Void = { _ in },
-        startPreviewSource: @escaping @Sendable (CameraSource) async throws -> SessionHandle? = { _ in nil }
+        startPreviewSource: @escaping @Sendable (CameraSource) async throws -> SessionHandle? = { _ in nil },
+        postAnnouncementSeam: @escaping @Sendable @MainActor (PreviewAnnouncement) -> Void = { _ in }
     )
         -> (sut: MainViewModel, perms: FakePermissionsService)
     {
@@ -104,9 +106,21 @@ struct MainViewModelPreviewTimeoutTests {
             makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) },
             makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: defaults) },
             connectSleep: connectSleep,
-            startPreviewSource: startPreviewSource
+            startPreviewSource: startPreviewSource,
+            postAnnouncementSeam: postAnnouncementSeam
         )
         return (sut, perms)
+    }
+
+    /// MainActor recorder for posted announcements. A `@MainActor` class is implicitly `Sendable`,
+    /// so the injected `@Sendable @MainActor` seam can capture it and append synchronously.
+    @MainActor
+    private final class AnnouncementRecorder {
+        private(set) var posted: [(text: String, isHighPriority: Bool)] = []
+
+        func record(_ announcement: PreviewAnnouncement) {
+            self.posted.append((announcement.text, announcement.isHighPriority))
+        }
     }
 
     private static func makeCamera(id: String = "cam-1", isContinuity: Bool = false) -> CameraDevice {
@@ -267,6 +281,72 @@ struct MainViewModelPreviewTimeoutTests {
         #expect(sut.connectTimeout(isContinuity: true) > sut.connectTimeout(isContinuity: false))
     }
 
+    // MARK: - Announcement posting integration (#256)
+
+    @Test("connecting → live drive → exactly one 'Камера подключена', normal priority (no connecting announce)")
+    func connectingToLive_postsSingleConnectedAnnouncement() async {
+        let recorder = AnnouncementRecorder()
+        let handle = Self.makeHandle()
+        let startSource: @Sendable (CameraSource) async throws -> SessionHandle? = { _ in handle }
+        let record: @Sendable @MainActor (PreviewAnnouncement) -> Void = { recorder.record($0) }
+        let sut = self.makeSUT(startPreviewSource: startSource, postAnnouncementSeam: record).sut
+        // Mirror managePreview's pre-build state: a real .connecting attempt in flight.
+        sut.previewAttempt = 1
+        sut.setPreviewState(.connecting)
+        let camera = Self.makeCamera()
+
+        _ = await sut.buildAndStartPreview(for: camera, attempt: 1)
+
+        // Anti-spam: .connecting is silent, only the .live transition speaks — exactly one post.
+        #expect(recorder.posted.count == 1)
+        #expect(recorder.posted.first?.text == "Камера подключена")
+        #expect(recorder.posted.first?.isHighPriority == false)
+    }
+
+    @Test("connecting → connectingSlow drive → posts the slow text, normal priority")
+    func connectingToSlow_postsSlowText() async {
+        let recorder = AnnouncementRecorder()
+        let record: @Sendable @MainActor (PreviewAnnouncement) -> Void = { recorder.record($0) }
+        let sut = self.makeSUT(postAnnouncementSeam: record).sut
+        sut.previewAttempt = 1
+        sut.setPreviewState(.connecting)
+        // connectSleep default returns immediately → threshold "elapsed", flips to .connectingSlow.
+        await sut.runConnectWatchdog(threshold: .seconds(5), attempt: 1)
+
+        let expected = CameraPreviewLabel.text(for: .connectingSlow, isContinuity: false)
+        #expect(sut.previewIsConnectingSlow)
+        #expect(recorder.posted.map(\.text) == [expected])
+        #expect(recorder.posted.last?.isHighPriority == false)
+    }
+
+    @Test("transition → failed → posts the failed label, HIGH priority")
+    func transitionToFailed_postsFailedHighPriority() {
+        let recorder = AnnouncementRecorder()
+        let record: @Sendable @MainActor (PreviewAnnouncement) -> Void = { recorder.record($0) }
+        let sut = self.makeSUT(postAnnouncementSeam: record).sut
+        sut.previewAttempt = 1
+        sut.setPreviewState(.connecting)
+        sut.setPreviewState(.failed)
+
+        // No active camera selected → isContinuity false → built-in failed copy.
+        let expected = CameraPreviewLabel.text(for: .failed, isContinuity: false)
+        #expect(recorder.posted.map(\.text) == [expected])
+        #expect(recorder.posted.last?.isHighPriority == true)
+    }
+
+    @Test("transition → idle / plain connecting → posts NOTHING (anti-spam)")
+    func transitionToIdleOrConnecting_postsNothing() {
+        let recorder = AnnouncementRecorder()
+        let record: @Sendable @MainActor (PreviewAnnouncement) -> Void = { recorder.record($0) }
+        let sut = self.makeSUT(postAnnouncementSeam: record).sut
+        sut.previewAttempt = 1
+        sut.setPreviewState(.connecting)
+        sut.setPreviewState(.idle)
+        sut.setPreviewState(.connecting)
+
+        #expect(recorder.posted.isEmpty)
+    }
+
     // MARK: - Full concurrent managePreview A→B (attempt-gate, not cancellation)
 
     @Test("stale watchdog A after device switch to B does not mutate B's state (attempt-gate, not cancellation)")
@@ -330,4 +410,4 @@ struct MainViewModelPreviewTimeoutTests {
     }
 }
 
-// swiftlint:enable type_body_length opening_brace
+// swiftlint:enable type_body_length opening_brace file_length

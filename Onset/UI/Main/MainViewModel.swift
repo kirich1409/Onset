@@ -1,4 +1,5 @@
 // swiftlint:disable file_length
+import Accessibility
 import AppKit
 import AVFoundation
 import os
@@ -123,6 +124,19 @@ final class MainViewModel {
     /// production unchanged). Throwing maps to the `.failed` path; a `nil` handle leaves the gate untouched.
     @ObservationIgnored
     let startPreviewSource: @Sendable (CameraSource) async throws -> SessionHandle?
+
+    /// Sink for VoiceOver announcements (#256) — injectable for tests.
+    ///
+    /// The live default posts via the Accessibility framework: builds an `AttributedString`, sets
+    /// `accessibilitySpeechAnnouncementPriority` (the supported priority route SwiftUI does not
+    /// surface — high interrupts current speech, normal queues), and calls
+    /// `AccessibilityNotification.Announcement(_:).post()`. `@MainActor` because the AX post runs on
+    /// the main actor (this type's default isolation) — bare `@Sendable` would strip that and move
+    /// where the post runs. The text is user-facing UI (== the visible label), never logged — no
+    /// device name reaches `os.Logger`. Tests inject a recorder to assert the policy deterministically
+    /// without VoiceOver.
+    @ObservationIgnored
+    let postAnnouncementSeam: @Sendable @MainActor (PreviewAnnouncement) -> Void
 
     // MARK: - Device lists
 
@@ -604,6 +618,14 @@ final class MainViewModel {
         startPreviewSource: @escaping @Sendable (CameraSource) async throws -> SessionHandle? = { source in
             try await source.start(anchoredTo: HostTimeAnchor.now())
             return source.sessionHandle()
+        },
+        postAnnouncementSeam: @escaping @Sendable @MainActor (PreviewAnnouncement) -> Void = { announcement in
+            // Live default: post via the Accessibility framework. Priority uses
+            // `accessibilitySpeechAnnouncementPriority` (the supported route SwiftUI does not surface);
+            // high interrupts current speech, normal queues. Text is user-facing UI, never logged.
+            var attributed = AttributedString(announcement.text)
+            attributed.accessibilitySpeechAnnouncementPriority = announcement.isHighPriority ? .high : .default
+            AccessibilityNotification.Announcement(attributed).post()
         }
     ) {
         self.permissions = permissions
@@ -617,6 +639,7 @@ final class MainViewModel {
         self.screenChangeEvents = screenChangeEvents
         self.connectSleep = connectSleep
         self.startPreviewSource = startPreviewSource
+        self.postAnnouncementSeam = postAnnouncementSeam
 
         // Create the store once; the same instance is reused in outputDirectoryURL.didSet.
         self.outputFolderStore = makeOutputFolderStore()

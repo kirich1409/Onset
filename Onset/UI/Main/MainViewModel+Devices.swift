@@ -166,7 +166,7 @@ extension MainViewModel {
                 hasObservedPresentCamera: self.hasObservedPresentCamera
             )
             if wasConnected, let announcement {
-                Self.postAnnouncement(announcement)
+                self.postAnnouncementSeam(announcement)
             }
 
         case .noSavedSelection:
