@@ -9,4 +9,5 @@
 - [ ] T-4 — Гейты и PR
 
 ## Learnings
-<!-- Append one line per completed task: surprises, gotchas, decisions taken during implementation. -->
+- T-1: план ошибочно считал `:36` reset «поглощённым» `stopCurrentPreview→.idle` — но тот early-return'ит при `previewSource==nil`, sticky `.failed` пережил бы. Восстановлено 1:1 явным `.idle` после stopCurrentPreview + дискриминатор-тест `managePreviewNil_afterFailure_clearsFailed`.
+- T-1: `.failed ⟹ previewSource==nil` (failed ставится только после нилинга source) → teardown/Record:118 `.idle` не теряет живой handle. Get-only мосты не бэкают SwiftUI Binding (нет `$preview*`).

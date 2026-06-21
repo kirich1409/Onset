@@ -334,16 +334,32 @@ final class MainViewModel {
 
     // MARK: - Preview state
 
+    /// Single source of truth for the camera preview connection progress.
+    /// Internal (not private) so `MainViewModel+Preview.swift`/`+Record.swift` extensions can write it.
+    /// Observed (no `@ObservationIgnored`) — the preview UI reacts to its changes.
+    var previewState: CameraPreviewState = .idle
+
     /// The `SessionHandle` for the live camera preview, or `nil` for placeholder.
-    /// Internal (not private) so `MainViewModel+Preview.swift` extension can write it.
-    var previewHandle: SessionHandle?
+    /// Get-only bridge over `previewState`; uses `if case` (the enum is not `Equatable`).
+    var previewHandle: SessionHandle? {
+        if case let .live(handle) = self.previewState { handle } else { nil }
+    }
 
     /// True when the last camera preview startup attempt failed terminally (no suitable format
     /// or `source.start()` threw). The spinner overlay is suppressed; a static error placeholder
-    /// is shown instead. Reset to `false` at the start of each new `managePreview` invocation
-    /// so re-selecting a different camera clears the prior failure.
-    /// Internal (not private) so `MainViewModel+Preview.swift` extension can write it.
-    var previewFailed = false
+    /// is shown instead.
+    /// Get-only bridge over `previewState`; uses `if case` (the enum is not `Equatable`).
+    var previewFailed: Bool {
+        if case .failed = self.previewState { true } else { false }
+    }
+
+    /// True while the preview is taking longer than the soft-connect threshold (#255) but is
+    /// still attempting. Lets the view distinguish the slow path from a plain `connecting`
+    /// (both otherwise collapse to `previewHandle == nil && !previewFailed`).
+    /// Get-only bridge over `previewState`; uses `if case` (the enum is not `Equatable`).
+    var previewIsConnectingSlow: Bool {
+        if case .connectingSlow = self.previewState { true } else { false }
+    }
 
     /// Bumped on each camera change; drives `.id()` on the `NSViewRepresentable` wrapper
     /// to force recreation of `CameraPreviewView` (its `init` wires the layer, `updateNSView` is no-op).

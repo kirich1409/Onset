@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreGraphics
 import Foundation
 @testable import Onset
@@ -289,8 +290,60 @@ struct MainViewModelTests {
         #expect(sut.cameraPlaceholderPending)
 
         // Failed state: still pending (handle still nil)
-        sut.previewFailed = true
+        sut.previewState = .failed
         #expect(sut.cameraPlaceholderPending)
+    }
+
+    // MARK: - Preview state bridges (#254)
+
+    @Test("previewState computed bridges map each case to handle/failed/slow correctly")
+    func previewState_bridges() {
+        let (sut, _) = self.makeSUT()
+
+        // live → handle non-nil, not failed, not slow
+        let session = AVCaptureSession()
+        sut.previewState = .live(SessionHandle(session: session))
+        #expect(sut.previewHandle != nil)
+        #expect(sut.previewHandle?.session === session)
+        #expect(!sut.previewFailed)
+        #expect(!sut.previewIsConnectingSlow)
+
+        // failed → previewFailed true, handle nil, not slow
+        sut.previewState = .failed
+        #expect(sut.previewFailed)
+        #expect(sut.previewHandle == nil)
+        #expect(!sut.previewIsConnectingSlow)
+
+        // idle → handle nil, not failed, not slow
+        sut.previewState = .idle
+        #expect(sut.previewHandle == nil)
+        #expect(!sut.previewFailed)
+        #expect(!sut.previewIsConnectingSlow)
+
+        // connecting → handle nil, not failed, not slow
+        sut.previewState = .connecting
+        #expect(sut.previewHandle == nil)
+        #expect(!sut.previewFailed)
+        #expect(!sut.previewIsConnectingSlow)
+
+        // connectingSlow → previewIsConnectingSlow true, handle nil, not failed
+        sut.previewState = .connectingSlow
+        #expect(sut.previewIsConnectingSlow)
+        #expect(sut.previewHandle == nil)
+        #expect(!sut.previewFailed)
+    }
+
+    @Test("managePreview(nil) after a failed attempt clears the failure (1:1 with old unconditional reset)")
+    func managePreviewNil_afterFailure_clearsFailed() async {
+        let (sut, _) = self.makeSUT()
+        // Simulate a prior terminal failure recorded with no live preview source.
+        sut.previewState = .failed
+
+        // Deselecting the camera must clear the sticky failure, mirroring the old
+        // unconditional `previewFailed = false` at the top of managePreview.
+        await sut.managePreview(for: nil)
+
+        #expect(!sut.previewFailed)
     }
 
     // MARK: - Display label

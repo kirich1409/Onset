@@ -32,11 +32,14 @@ extension MainViewModel {
     /// view disappears), stops the source and clears the handle.
     func managePreview(for cameraID: String?) async {
         await self.stopCurrentPreview()
-        // Reset any prior failure so re-selecting a camera clears the error placeholder.
-        self.previewFailed = false
+        // Mirror the old unconditional `previewFailed = false` reset: `stopCurrentPreview`
+        // sets `.idle` only when there is a live source, but a sticky `.failed` (set with
+        // `previewSource == nil`) would otherwise survive re-selection. Reset here so
+        // re-selecting a camera clears the error placeholder.
+        self.previewState = .idle
 
         guard let cameraID else {
-            // Normal deselect (camera toggle off or no cameras available).
+            // Normal deselect (camera toggle off or no cameras available). State stays `.idle`.
             self.previewGeneration += 1
             return
         }
@@ -46,13 +49,17 @@ extension MainViewModel {
             // Selection stays set but no handle can be established — mark as failed
             // so the error placeholder is shown rather than spinning indefinitely.
             mainViewModelLogger.warning("Camera preview skipped — selected device not in available list")
-            self.previewFailed = true
+            self.previewState = .failed
             self.previewGeneration += 1
             return
         }
 
+        // Valid camera in hand: enter the connecting state. Set AFTER the guards (not at the
+        // top of managePreview) so deselect/hot-unplug never leave `.connecting` without a camera.
+        self.previewState = .connecting
+
         guard let source = await self.buildAndStartPreview(for: camera) else {
-            self.previewFailed = true
+            self.previewState = .failed
             return
         }
 
@@ -63,7 +70,7 @@ extension MainViewModel {
         await source.stop()
         if self.previewSource === source {
             self.previewSource = nil
-            self.previewHandle = nil
+            self.previewState = .idle
             self.previewGeneration += 1
         }
         mainViewModelLogger.debug("Camera preview stopped")
@@ -74,8 +81,7 @@ extension MainViewModel {
         guard let old = self.previewSource else { return }
         await old.stop()
         self.previewSource = nil
-        self.previewHandle = nil
-        self.previewFailed = false
+        self.previewState = .idle
     }
 
     /// Creates, starts, and exposes a camera preview source.
@@ -109,7 +115,9 @@ extension MainViewModel {
             return nil
         }
 
-        self.previewHandle = await source.sessionHandle()
+        if let handle = await source.sessionHandle() {
+            self.previewState = .live(handle)
+        }
         self.previewGeneration += 1
         mainViewModelLogger.debug("Camera preview started")
         return source
