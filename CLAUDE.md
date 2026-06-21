@@ -60,7 +60,7 @@ xcodebuild test -scheme Onset -destination 'platform=macOS' -configuration Debug
   ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
 
 # Lint — CI "Lint" job runs BOTH; check both before push
-swiftformat . --lint --config .swiftformat
+swiftformat --lint .  # CI-exact; do NOT add --config (changes rule resolution → false wrapAttributes errors)
 swiftlint lint --strict --config .swiftlint.yml   # version pinned 0.63.3 via Mintfile
 ```
 

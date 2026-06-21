@@ -1,6 +1,6 @@
 # SwiftFormat configuration — Onset (Swift 6, macOS 26.4)
-# Run: swiftformat . --config .swiftformat
-# CI: swiftformat . --lint --config .swiftformat
+# Run: swiftformat .          (auto-discovers this config — do NOT pass --config)
+# CI:  swiftformat --lint .   (no --config: it changes rule resolution and emits false wrapAttributes errors)
 
 --swiftversion 6.0
 --minversion 0.54.0
