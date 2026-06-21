@@ -150,8 +150,14 @@ actor VideoEncoder {
     private var lastPixelBuffer: CVPixelBuffer?
 
     /// Backpressure counter (`DropReason.encoderBackpressureDrops`). SEPARATE from the
-    /// normalizer's `cfrNormalizationDrops`.
+    /// normalizer's `cfrNormalizationDrops`. Counts ONLY real-content frames dropped at the gate.
     private var encoderBackpressureDrops = 0
+
+    /// Synthetic-hold drop counter (`DropReason.encoderHoldDrops`). SEPARATE from
+    /// `encoderBackpressureDrops`: counts catch-up hold frames (repeats of `lastPixelBuffer`)
+    /// dropped at the gate during a post-stall/sleep batch. A dropped hold loses no user content,
+    /// so it must never feed the degraded latch or the user-facing dropped-frames count (#200).
+    private var encoderHoldDrops = 0
 
     /// Source-silence threshold (seconds): the clock waits this long after a slot's midpoint
     /// before synthesising a hold. A hold is emitted only when no real frame has arrived by
@@ -294,9 +300,15 @@ actor VideoEncoder {
     }
 
     /// Encoder-backpressure drop count (`DropReason.encoderBackpressureDrops`). Separate
-    /// from `cfrNormalizationDropCount`.
+    /// from `cfrNormalizationDropCount`. Counts ONLY real-content frame gate drops.
     var backpressureDropCount: Int {
         self.encoderBackpressureDrops
+    }
+
+    /// Synthetic-hold gate-drop count (`DropReason.encoderHoldDrops`). Separate from
+    /// `backpressureDropCount` — these are dropped catch-up holds and carry no user content (#200).
+    var holdDropCount: Int {
+        self.encoderHoldDrops
     }
 
     /// Test-only observation accessor for telemetry accounting; not part of the encoder's
@@ -561,9 +573,12 @@ actor VideoEncoder {
             self.aggregator.recordCatchupBatch(size: emission.slots.count)
         }
         for slot in emission.slots {
-            // All slots from catchUpHolds are isHold==true by contract.
+            // All slots from catchUpHolds are isHold==true by contract — synthetic repeats of
+            // lastPixelBuffer. A gate-drop here is `.encoderHoldDrops`, not a degradation (#200).
             let pts = self.anchoredPTS(slotIndex: slot.slotIndex)
-            self.submit(pixelBuffer: lastPixelBuffer, slotIndex: slot.slotIndex, pts: pts, detectedAt: pts)
+            self.submit(
+                pixelBuffer: lastPixelBuffer, slotIndex: slot.slotIndex, pts: pts, detectedAt: pts, isHold: true
+            )
             self.aggregator.recordHold()
         }
     }
@@ -639,7 +654,9 @@ actor VideoEncoder {
                     continue
                 }
                 let holdPTS = self.anchoredPTS(slotIndex: slot.slotIndex)
-                self.submit(pixelBuffer: holdBuffer, slotIndex: slot.slotIndex, pts: holdPTS, detectedAt: holdPTS)
+                self.submit(
+                    pixelBuffer: holdBuffer, slotIndex: slot.slotIndex, pts: holdPTS, detectedAt: holdPTS, isHold: true
+                )
                 self.aggregator.recordHold()
                 holdCount += 1
             } else {
@@ -651,7 +668,8 @@ actor VideoEncoder {
                     pixelBuffer: frame.pixelBuffer,
                     slotIndex: slot.slotIndex,
                     pts: realPTS,
-                    detectedAt: frame.ptsHostTime
+                    detectedAt: frame.ptsHostTime,
+                    isHold: false
                 )
                 self.aggregator.recordEncodedReal()
             }
@@ -686,10 +704,23 @@ actor VideoEncoder {
     /// The caller is responsible for computing `pts` via `anchoredPTS(slotIndex:)` — this
     /// avoids redundant computation when holds are submitted from `submitEmission`.
     ///
-    /// Backpressure gate (OpAC-4.4): pending >= maxPendingFrames → the frame is dropped as
-    /// `encoderBackpressureDrops` and a `DropEvent` is emitted. This counter is SEPARATE
-    /// from the normalizer's `cfrNormalizationDrops`.
-    private func submit(pixelBuffer: CVPixelBuffer, slotIndex: Int, pts: CMTime, detectedAt: CMTime) {
+    /// Backpressure gate (OpAC-4.4): pending >= maxPendingFrames → the frame is dropped and a
+    /// `DropEvent` is emitted. The drop reason branches on `isHold`:
+    /// - `isHold == false` (real captured content) → `.encoderBackpressureDrops`, increments
+    ///   `encoderBackpressureDrops`. This is the only counter that drives the degraded latch.
+    /// - `isHold == true` (synthetic catch-up repeat) → `.encoderHoldDrops`, increments
+    ///   `encoderHoldDrops`. A dropped hold loses no user content, so it must NOT degrade (#200).
+    /// Both counters are SEPARATE from the normalizer's `cfrNormalizationDrops`.
+    ///
+    /// - Parameter isHold: Whether the submitted buffer is a synthetic hold (catch-up repeat of
+    ///   `lastPixelBuffer`) rather than a freshly captured frame. The caller classifies this.
+    private func submit(
+        pixelBuffer: CVPixelBuffer,
+        slotIndex: Int,
+        pts: CMTime,
+        detectedAt: CMTime,
+        isHold: Bool
+    ) {
         guard let session = self.session else { return }
 
         let pendingQueryStart = ContinuousClock.now
@@ -698,10 +729,19 @@ actor VideoEncoder {
         self.aggregator.recordPendingValue(pending)
 
         if pending >= self.maxPendingFrames {
-            self.encoderBackpressureDrops += 1
             self.aggregator.recordGateDrop()
+            let reason: DropReason
+            if isHold {
+                // Synthetic hold dropped — no user content lost; never drives the degraded latch.
+                self.encoderHoldDrops += 1
+                reason = .encoderHoldDrops
+            } else {
+                // Real captured frame dropped — this is the degradation signal (OpAC-4.3/4.4).
+                self.encoderBackpressureDrops += 1
+                reason = .encoderBackpressureDrops
+            }
             self.dropsContinuation.yield(
-                DropEvent(reason: .encoderBackpressureDrops, source: .encode, count: 1, detectedAt: detectedAt)
+                DropEvent(reason: reason, source: .encode, count: 1, detectedAt: detectedAt)
             )
             return
         }

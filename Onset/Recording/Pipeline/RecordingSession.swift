@@ -57,6 +57,16 @@ actor RecordingSession {
     nonisolated let recordingStateStream: AsyncStream<RecordingState>
     private let stateContinuation: AsyncStream<RecordingState>.Continuation
 
+    // MARK: - Capture-active stream (UI gate — #171)
+
+    /// Screen-capture activation signal: yields once when the first real screen frame arrives,
+    /// then finishes. See `RecordingControlling.captureActiveStream` for the full contract.
+    ///
+    /// Created at `init` so the coordinator can subscribe before `start()` is called. Finished
+    /// in BOTH `performStop()` and `teardownAfterFailedStart()` so a subscriber never hangs.
+    nonisolated let captureActiveStream: AsyncStream<Void>
+    private let captureActiveContinuation: AsyncStream<Void>.Continuation
+
     // MARK: - Revocation stream (UI surface — #39 / AC-12)
 
     /// Graceful-revocation notifications for the UI (`RecordingRevocation`).
@@ -91,6 +101,25 @@ actor RecordingSession {
     private let cameraFormat: CameraFormat?
     private let micDevice: MicrophoneDevice?
     private let config: RecordingConfiguration
+
+    // MARK: - Session directory
+
+    /// The session-scoped subdirectory where both output files are written.
+    ///
+    /// Computed once in `init` from `config.baseOutputDirectory` + session-start timestamp so
+    /// both pipelines share the same parent directory. Unique-collision-avoidance (` (N)` suffix)
+    /// is applied at the **directory** level here; individual file names inside are stable.
+    /// The directory is created lazily in `start()` after capability checks pass.
+    ///
+    /// `nonisolated` because `URL` is a value type and the property is set once in `init`.
+    nonisolated let sessionDirectory: URL
+
+    /// Session-start timestamp shared by both output files and the technical report file name.
+    ///
+    /// Captured once in `init` (the same `Date` used to derive `sessionDirectory` and the file
+    /// names), so the report header and file name match the recording files. `nonisolated` because
+    /// `Date` is a value type set once in `init`.
+    nonisolated let sessionStartDate: Date
 
     // MARK: - Seams
 
@@ -178,6 +207,16 @@ actor RecordingSession {
         // Capture the session-start timestamp once. Both URL providers below close over this
         // value so screen and camera files always share an identical timestamp segment (#198).
         let startDate = Date()
+        self.sessionStartDate = startDate
+
+        // Compute the session subdirectory from the base output directory and the start timestamp.
+        // Collision avoidance (` (N)` suffix) is applied at the directory level so both files
+        // inside the folder carry stable, unsuffixed names (#225).
+        let sessionDir = OutputDirectoryNaming.uniqueSessionDirectory(
+            in: config.baseOutputDirectory,
+            timestamp: startDate
+        )
+        self.sessionDirectory = sessionDir
 
         // UI state stream + its continuation, created here so a subscriber can iterate before
         // start() builds the DropMonitor whose transitions are forwarded into this continuation.
@@ -191,14 +230,29 @@ actor RecordingSession {
         self.sourceRevocationStream = revocationStream
         self.revocationContinuation = revocationContinuation
 
+        // Capture-active stream + its continuation (#171 UI gate), created here so the coordinator
+        // can subscribe before start() is called. Yields once on first real screen frame, then
+        // finishes. Finished in both performStop() and teardownAfterFailedStart() so subscribers
+        // never hang regardless of how the session ends.
+        // Relies on the DEFAULT .unbounded buffering: a yield that fires before the coordinator
+        // subscribes is retained in the buffer. A .bufferingNewest/Oldest(1) policy would silently
+        // drop it and leave the coordinator hanging until the 30 s timeout.
+        let (captureActiveStream, captureActiveContinuation) = AsyncStream.makeStream(of: Void.self)
+        self.captureActiveStream = captureActiveStream
+        self.captureActiveContinuation = captureActiveContinuation
+
         // Default live probe: classify against the resolved display + camera format.
         self.probe = probe ?? { CapabilityProbe.probe(display: display, cameraFormat: cameraFormat, config: config) }
 
-        // Default live writer factory: place both files in the configured output directory.
-        // Both kinds close over `startDate` — not a fresh Date() per call — so the pair of files
-        // for one session is guaranteed to share the same timestamp component (#198).
+        // Default live writer factory: place both files in the session subdirectory (#225).
+        // Both kinds close over `startDate` and `sessionDir` — not a fresh Date() / new URL per
+        // call — so the pair of files for one session shares the same timestamp and parent folder.
         self.writerFactory = writerFactory ?? LiveWriterFactory(configuration: config) { kind in
-            RecordingSession.defaultOutputURL(for: kind, config: config, date: startDate)
+            let fileKind: RecordingFileKind = switch kind {
+            case .screen: .screen
+            case .camera: .camera
+            }
+            return RecordingOutput.uniqueOutputURL(in: sessionDir, timestamp: startDate, kind: fileKind)
         }
     }
 
@@ -236,14 +290,21 @@ actor RecordingSession {
         try self.runCapabilityPreflight() // 1. AC-6
         let startPlan = try self.resolvePlan(permissions: permissions) // 2. AC-11
 
-        // Ensure the output directory exists before any FileWriter is constructed.
+        // Create the session subdirectory before any FileWriter is constructed (#225).
         // Placed after resolvePlan so the directory is only created when recording will
         // actually proceed, and before the T0 anchor capture so filesystem I/O does not
         // perturb the timing-critical window.
+        // The directory name (not its full path) is safe to log — it contains only the
+        // session timestamp, never the user's home path (issue #188).
         do {
-            try RecordingOutput.ensureDirectory(self.config.outputDirectory)
+            try RecordingOutput.ensureDirectory(self.sessionDirectory)
+            self.logger.info(
+                "Session directory created: \(self.sessionDirectory.lastPathComponent)"
+            )
         } catch {
-            self.logger.error("Output directory unavailable: \(self.config.outputDirectory.path) — \(error)")
+            self.logger.error(
+                "Session directory unavailable: \(self.sessionDirectory.lastPathComponent) — \(error)"
+            )
             throw RecordingError.outputDirectoryUnavailable(error)
         }
 
@@ -367,12 +428,23 @@ actor RecordingSession {
 
     /// Starts the sources, anchored to the shared anchor (frames with host-time < T0 are dropped
     /// by the sources' existing gate).
+    ///
+    /// When a screen pipeline is present, the first real screen frame triggers `captureActiveStream`
+    /// (#171 — `SCStream.startCapture()` returns before consent on macOS 26). When there is NO
+    /// screen pipeline (camera-only), the stream is yielded immediately after sources start because
+    /// there is no consent gate to wait for.
     private func startSources(anchor: HostTimeAnchor) async throws {
         if let screen = self.screenPipeline {
             try await screen.source.start(anchoredTo: anchor)
         }
         if let camera = self.cameraPipeline {
             try await camera.source.start(anchoredTo: anchor)
+        }
+        // Camera-only path: no screen pipeline means no first-frame hook will fire. Signal the
+        // coordinator immediately so the UI is not gated on a frame that will never come.
+        if self.screenPipeline == nil {
+            self.captureActiveContinuation.yield(())
+            self.captureActiveContinuation.finish()
         }
     }
 
@@ -392,9 +464,9 @@ actor RecordingSession {
 
     // MARK: - UI state surface (#36/#37)
 
-    /// The session's current drop health snapshot, polled by the UI (`RecordingCoordinator`) for
-    /// the recording-window drop pill. Returns a zero / never-degraded snapshot before `start()`
-    /// builds the monitor or after `performStop()` tears it down.
+    /// The session's current drop health snapshot, polled ~1 Hz by the UI (`RecordingCoordinator`)
+    /// to keep `RecordingCoordinator.drops` current during recording. Returns a zero / never-degraded
+    /// snapshot before `start()` builds the monitor or after `performStop()` tears it down.
     func currentDrops() async -> DropHealthSnapshot {
         await self.dropMonitor?.snapshot()
             ?? DropHealthSnapshot(
@@ -423,7 +495,24 @@ actor RecordingSession {
         await monitor.observe(source.drops)
         await monitor.observe(encoder.drops)
 
-        let framesTask = Self.makeFramesTask(source: source, encoder: encoder)
+        // Capture the continuation (not self) in the first-frame hook so the task does not
+        // retain the session actor. Yield once + finish immediately: the coordinator only
+        // needs the "first real frame arrived" signal, extra yields are not consumed.
+        let captureActiveContinuation = self.captureActiveContinuation
+        let framesTask = Self.makeFramesTask(
+            source: source,
+            encoder: encoder,
+            onFirstFrame: {
+                captureActiveContinuation.yield(())
+                captureActiveContinuation.finish()
+            },
+            // Fix #1: when the frames stream ends without a first frame (consent denied or
+            // terminal stop), finish the continuation so awaitCaptureActivation returns
+            // promptly rather than waiting the full 30-second timeout.
+            onEndWithoutFirstFrame: {
+                captureActiveContinuation.finish()
+            }
+        )
         let routeVideoTask = Self.makeRouteVideoTask(encoder: encoder, kind: .screen, stage: stage)
 
         self.screenPipeline = Pipeline(
@@ -484,15 +573,31 @@ actor RecordingSession {
         }
     }
 
-    /// frames → `encoder.ingest`. Static so the closure captures only the two sendable actors.
+    /// frames → `encoder.ingest`. Static so the closure captures only the two sendable actors plus
+    /// the optional first-frame hook. `onFirstFrame` is called (once) when the first frame is
+    /// delivered; `nil` for the camera pipeline (consent is not required for camera).
     private static func makeFramesTask(
         source: any VideoFrameSource,
-        encoder: any EncoderControlling
+        encoder: any EncoderControlling,
+        onFirstFrame: (@Sendable () -> Void)? = nil,
+        onEndWithoutFirstFrame: (@Sendable () -> Void)? = nil
     )
     -> Task<Void, Never> {
         Task {
+            var firstFrameSeen = false
             for await frame in source.frames {
+                if !firstFrameSeen {
+                    firstFrameSeen = true
+                    onFirstFrame?()
+                }
                 await encoder.ingest(frame)
+            }
+            // If the stream ended without ever delivering a frame (consent denied / terminal stop),
+            // signal the coordinator so it can revert promptly instead of waiting for the full timeout.
+            // finish() on the captureActiveContinuation is idempotent: calling it after onFirstFrame
+            // already ran is a safe no-op (AsyncStream silently drops the extra finish).
+            if !firstFrameSeen {
+                onEndWithoutFirstFrame?()
             }
         }
     }
@@ -715,6 +820,16 @@ actor RecordingSession {
                 sessionEverDegraded: false,
                 dominantCause: .notDegraded
             )
+        // Per-source breakdown is read here (before the monitor is released) so the technical report
+        // below can include the source-level detail in addition to the reason-level snapshot.
+        let breakdown = await self.dropMonitor?.breakdownSnapshot()
+            ?? DropBreakdown(
+                captureScreen: 0,
+                captureCameraVideo: 0,
+                captureCameraAudio: 0,
+                encode: 0,
+                writer: 0
+            )
         self.dropMonitor = nil
 
         // End the UI state forwarding: dropMonitor.stop() already finished the monitor's state
@@ -729,20 +844,66 @@ actor RecordingSession {
         // terminates. No task to cancel — the session yields directly from handleSourceEvent.
         self.revocationContinuation.finish()
 
+        // End the capture-active stream. If the first-frame hook already finished it (normal path:
+        // consent was granted), this is a no-op. If stop() is called before the first frame arrives
+        // (stop during consent wait), finishing here unblocks the coordinator's activation wait so it
+        // can detect the empty finish and revert cleanly (#171).
+        self.captureActiveContinuation.finish()
+
         let sessionOutput = SessionOutput(screen: finishResults[.screen], camera: finishResults[.camera])
         let result: RecordingResult = if let output = sessionOutput {
             .completed(output, healthSnapshot)
         } else {
             .empty(healthSnapshot)
         }
+
+        // Persist the per-session technical report next to the recording files. Frame-loss is no
+        // longer surfaced in the UI (no live drop pill, no post-stop warning alert) — it lives on
+        // disk as a plain-text report instead. Written only for sessions that produced output
+        // (`.completed`): the `.empty` path created no files (and possibly no session directory), so
+        // there is nothing to attach a report to.
+        if case .completed = result {
+            self.writeTechnicalReport(snapshot: healthSnapshot, breakdown: breakdown)
+        }
+
+        let warn = result.degradedWarning(threshold: self.config.postStopDropWarningThreshold)
         self.logger.info(
             // swiftlint:disable:next line_length
-            "RecordingSession stopped — files=\(result.outputURLs.count) warn=\(result.sessionEverDegraded) cause=\(String(describing: result.dominantCause))"
+            "RecordingSession stopped — files=\(result.outputURLs.count) warn=\(warn) cause=\(String(describing: result.dominantCause))"
         )
         return result
     }
 
     // swiftlint:enable function_body_length
+
+    // MARK: - Technical report
+
+    /// Formats and writes the per-session technical report into the session directory.
+    ///
+    /// Formatting (pure) is delegated to `DropReportFormatter`; the file write + POSIX permissions
+    /// (impure) live in `RecordingOutput.writeReport`. A write failure is logged and swallowed — the
+    /// report is a diagnostic artifact and must never fail the stop path or mask the recording result.
+    private func writeTechnicalReport(snapshot: DropHealthSnapshot, breakdown: DropBreakdown) {
+        let text = DropReportFormatter.report(
+            timestamp: self.sessionStartDate,
+            counters: snapshot.counters,
+            breakdown: breakdown,
+            sessionEverDegraded: snapshot.sessionEverDegraded,
+            dominantCause: snapshot.dominantCause
+        )
+        do {
+            try RecordingOutput.writeReport(text, in: self.sessionDirectory, timestamp: self.sessionStartDate)
+            self.logger.info(
+                "Technical report written: \(RecordingOutput.reportFileName(timestamp: self.sessionStartDate))"
+            )
+        } catch {
+            // Diagnostic-only artifact: never fail stop on a report-write error. Log the directory
+            // name (not the full path) to avoid logging the user's home path (#188).
+            self.logger.error(
+                "Technical report write failed in \(self.sessionDirectory.lastPathComponent) — \(error)"
+            )
+        }
+    }
 
     // MARK: - Failure teardown
 
@@ -771,33 +932,16 @@ actor RecordingSession {
         self.stateContinuation.finish()
         // Finish the revocation stream too, so a subscriber's loop ends after a failed start.
         self.revocationContinuation.finish()
-        await self.dropMonitor?.stop()
+        // Finish the capture-active stream so a waiting coordinator unblocks and reverts (#171).
+        self.captureActiveContinuation.finish()
+        // Cancel (not drain) the monitor's observe tasks: this path does NOT call stage.finishAll(),
+        // so if a writer was created and its drops observed just before the start threw, that stream
+        // may still be open. DropMonitor.stop() drains and would hang on an unfinished stream (#202);
+        // cancelObservation() ends the observe tasks regardless. Tail accuracy is irrelevant on a
+        // failed start — no RecordingResult reads these counters.
+        await self.dropMonitor?.cancelObservation()
         self.dropMonitor = nil
         self.stage = nil
-    }
-
-    // MARK: - Default output URL
-
-    /// Builds the default output URL for a pipeline under the configured output directory.
-    ///
-    /// Delegates to `RecordingOutput.uniqueOutputURL` for spec-compliant naming (§135) and
-    /// collision avoidance. The `date` parameter is the session-start timestamp shared by
-    /// both pipelines in the same session so screen and camera files carry identical timestamps.
-    private static func defaultOutputURL(
-        for kind: RecordingPipelineKind,
-        config: RecordingConfiguration,
-        date: Date
-    )
-    -> URL {
-        let fileKind: RecordingFileKind = switch kind {
-        case .screen: .screen
-        case .camera: .camera
-        }
-        return RecordingOutput.uniqueOutputURL(
-            in: config.outputDirectory,
-            timestamp: date,
-            kind: fileKind
-        )
     }
 }
 

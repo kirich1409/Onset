@@ -32,6 +32,8 @@ extension MainViewModel {
     /// view disappears), stops the source and clears the handle.
     func managePreview(for cameraID: String?) async {
         await self.stopCurrentPreview()
+        // Reset any prior failure so re-selecting a camera clears the error placeholder.
+        self.previewFailed = false
 
         guard let cameraID else {
             // Normal deselect (camera toggle off or no cameras available).
@@ -41,12 +43,18 @@ extension MainViewModel {
 
         guard let camera = self.cameras.first(where: { $0.uniqueID == cameraID }) else {
             // Camera was removed from the available list (hot-unplug race).
+            // Selection stays set but no handle can be established — mark as failed
+            // so the error placeholder is shown rather than spinning indefinitely.
             mainViewModelLogger.warning("Camera preview skipped — selected device not in available list")
+            self.previewFailed = true
             self.previewGeneration += 1
             return
         }
 
-        guard let source = await self.buildAndStartPreview(for: camera) else { return }
+        guard let source = await self.buildAndStartPreview(for: camera) else {
+            self.previewFailed = true
+            return
+        }
 
         // Park until cancelled (view disappears or camera selection changes).
         await MainViewModelPreviewConstants.parkUntilCancelled()
@@ -67,6 +75,7 @@ extension MainViewModel {
         await old.stop()
         self.previewSource = nil
         self.previewHandle = nil
+        self.previewFailed = false
     }
 
     /// Creates, starts, and exposes a camera preview source.

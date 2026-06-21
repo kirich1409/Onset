@@ -1,4 +1,18 @@
+import AVFoundation
 import os
+
+// MARK: - Constants
+
+/// Constants for device-change handling, extracted outside the class because
+/// `nonisolated` static lets are not available directly inside `@Observable` classes
+/// without `@ObservationIgnored`.
+private enum MainViewModelDeviceConstants {
+    // Debounce before reloading after a device-change event. A lid close fires a burst
+    // of KVO + notification events; combined with the stream's `.bufferingNewest(1)`
+    // policy this bounds a burst to at most two cheap, idempotent reloads.
+    // swiftlint:disable:next no_magic_numbers
+    static let deviceChangeDebounce: Duration = .milliseconds(300)
+}
 
 // MARK: - MainViewModel — Device loading
 
@@ -25,20 +39,59 @@ extension MainViewModel {
         }
     }
 
+    /// Subscribes to display-configuration changes for the lifetime of the caller's structured
+    /// task. Should be called once from a `.task` modifier (alongside `loadDevices`);
+    /// the task is automatically cancelled — and the subscription torn down — when the view
+    /// disappears.
+    ///
+    /// On each event, re-runs display discovery and applies `DisplaySelectionReconciler` to
+    /// preserve or heal the current selection.  Does NOT debounce: events arrive infrequently
+    /// (human-scale hardware operations) and discovery is idempotent.
+    func subscribeToDisplayChanges() async {
+        for await _ in self.screenChangeEvents() {
+            await self.loadDisplays()
+        }
+    }
+
     func loadDisplays() async {
         let authorized = self.permissions.screenStatus == .authorized
         do {
             let found = try await self.discoverDisplays(authorized)
-            self.displays = found
-            // AC-1: auto-select when exactly one display
-            if found.count == 1 {
-                self.selectedDisplayID = found[0].displayID
-            }
+            self.applyDisplays(found)
             mainViewModelLogger.info("Displays loaded — count: \(found.count)")
         } catch {
             mainViewModelLogger.error("Display discovery failed: \(String(describing: error))")
             self.displays = []
             self.recordError = "Не удалось загрузить список дисплеев"
+        }
+    }
+
+    /// Applies a freshly-discovered display list, reconciling the current selection.
+    ///
+    /// Separated from `loadDisplays()` so `DisplaySelectionReconciler` can be tested
+    /// directly without going through the async discovery path.
+    ///
+    /// - Parameter newDisplays: The complete, up-to-date list from device discovery.
+    func applyDisplays(_ newDisplays: [Display]) {
+        let outcome = DisplaySelectionReconciler.reconcile(
+            selected: self.selectedDisplayID,
+            newDisplays: newDisplays
+        )
+        self.displays = newDisplays
+        switch outcome {
+        case let .keepExisting(id):
+            self.selectedDisplayID = id
+
+        case let .fallbackToFirst(id):
+            mainViewModelLogger.info("Selected display gone — falling back to first available")
+            self.selectedDisplayID = id
+
+        case let .autoSelectSingle(id):
+            // AC-1: exactly one display available; auto-select it.
+            self.selectedDisplayID = id
+
+        case .noSelection:
+            self.selectedDisplayID = nil
         }
     }
 
@@ -51,6 +104,13 @@ extension MainViewModel {
 
         let foundCameras = self.discoverCameras(cameraAuthorized)
         self.cameras = foundCameras
+        // Build the name cache once per load so ForEach renders use O(1) dictionary lookups
+        // instead of a synchronous AVCaptureDevice(uniqueID:) call per item per render pass.
+        self.cameraDisplayNames = Dictionary(
+            uniqueKeysWithValues: foundCameras.map { camera in
+                (camera.uniqueID, AVCaptureDevice(uniqueID: camera.uniqueID)?.localizedName ?? "Камера")
+            }
+        )
 
         let foundMics = self.discoverMicrophones(micAuthorized)
         self.microphones = foundMics
@@ -114,6 +174,30 @@ extension MainViewModel {
         mainViewModelLogger.info(
             "Capture devices loaded — cameras: \(foundCameras.count), mics: \(foundMics.count)"
         )
+    }
+
+    // MARK: - Live device-change observation
+
+    /// Re-runs camera/microphone loading on every device topology change (connect,
+    /// disconnect, `isSuspended` flip — e.g. notebook lid closed/opened) while the main
+    /// window is open.
+    ///
+    /// Call after `loadDevices()` from MainView's `.task`; the loop runs until the task
+    /// is cancelled (view disappears), which terminates the stream and tears down the
+    /// underlying `DeviceAvailabilityObserver` via its `onTermination` hook.
+    ///
+    /// Reload safety: `loadCamerasAndMicrophones()` is idempotent — repeated runs re-resolve
+    /// the persisted selection (`.disconnected` notice when the device vanished, `.restore`
+    /// when it came back) without clobbering the saved record.
+    func observeDeviceChanges() async {
+        for await _ in self.makeDeviceChangeStream() {
+            // Coalesce bursts: the sleep absorbs trailing events into the stream's
+            // 1-slot buffer, so a burst costs at most two reloads.
+            try? await Task.sleep(for: MainViewModelDeviceConstants.deviceChangeDebounce)
+            guard !Task.isCancelled else { return }
+            self.loadCamerasAndMicrophones()
+            mainViewModelLogger.debug("Device change handled — capture device lists reloaded")
+        }
     }
 }
 

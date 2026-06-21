@@ -307,10 +307,11 @@ struct RecordingOutputUniqueURLTests {
     // MARK: - Counter exhaustion fallback
 
     /// When the base file plus every suffixed candidate `(2)`…`(999)` already exist,
-    /// `uniqueOutputURL` returns the unsuffixed base name and lets `AVAssetWriter` surface
-    /// the error — the documented fallback (spec §uniqueOutputURL, implementation comment).
-    @Test("uniqueOutputURL returns base name when all counters 2…999 are exhausted")
-    func counterExhaustion_returnsBaseName() throws {
+    /// When all 998 numbered slots (2…999) are occupied, `uniqueOutputURL` must fall back
+    /// to a UUID-suffixed URL that does not equal the base name and does not exist on disk.
+    /// This prevents silent overwrite of the occupied base file.
+    @Test("uniqueOutputURL falls back to UUID suffix when all counters 2…999 are exhausted")
+    func counterExhaustion_returnsUUIDSuffixedURL() throws {
         try FileManager.default.createDirectory(at: self.tempDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: self.tempDir) }
 
@@ -333,9 +334,18 @@ struct RecordingOutputUniqueURLTests {
         }
 
         let url = RecordingOutput.uniqueOutputURL(in: self.tempDir, timestamp: self.testDate, kind: .screen)
+
+        // The result must differ from the occupied base file.
         #expect(
-            url.lastPathComponent == baseName,
-            "exhausted counters must fall back to the base name, got: \(url.lastPathComponent)"
+            url.lastPathComponent != baseName,
+            "exhausted counters must NOT return the occupied base name, got: \(url.lastPathComponent)"
         )
+        // The result must not exist on disk — UUID fallback is always free.
+        #expect(
+            !FileManager.default.fileExists(atPath: url.path(percentEncoded: false)),
+            "UUID fallback path must not yet exist, got: \(url.lastPathComponent)"
+        )
+        // The result must still be an .mp4 file.
+        #expect(url.pathExtension == "mp4", "fallback must retain .mp4 extension")
     }
 }

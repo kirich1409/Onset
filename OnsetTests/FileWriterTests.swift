@@ -9,6 +9,7 @@
 //     - audio input carries AAC output settings.
 //     - movieFragmentInterval is set before startWriting (testable via a subclass seam).
 //     - appendVideo with isReadyForMoreMediaData == false → emits DropEvent.
+//     - keyframe-aware whole-GOP drop window (#150): window open/close/recovery invariants.
 //   L5 — integration (real VideoEncoder + real AVAssetWriter, hardware required):
 //     - full pipeline: VideoEncoder → FileWriter → AVAsset hvc1 track.
 //
@@ -30,6 +31,7 @@ import AVFoundation
 import CoreMedia
 import CoreVideo
 @testable import Onset
+import os
 import Testing
 import VideoToolbox
 
@@ -467,6 +469,257 @@ struct FileWriterDropTests {
     }
 }
 
+// MARK: - FileWriterGopDropTests (L2, stub seam)
+
+//
+// Verifies keyframe-aware whole-GOP drop logic (#150).
+// All cases are driven by scripted `StubWriterInput.ready` sequences and a synthetic GOP
+// (keyframe, delta, delta, keyframe, ...) built with `makeGopSample(ptsSeconds:isKeyframe:)`.
+// Assertions target `stub.appendedBuffers` (what reached the writer) AND the emitted
+// `DropEvent` sequence — both together constitute "no torn GOP".
+
+@Suite("FileWriter — keyframe-aware GOP-drop window (#150, L2)")
+struct FileWriterGopDropTests {
+    private let tempDir: URL = FileManager.default.temporaryDirectory
+        .appending(path: "FileWriterGopDropTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+
+    /// Makes a minimal `EncodedSample` with the specified keyframe flag.
+    ///
+    /// No actual encoded data — GOP-drop tests exercise the readiness/window gate only,
+    /// not the buffer content. The `isKeyframe` flag drives the fix logic directly.
+    private func makeGopSample(ptsSeconds: Double, isKeyframe: Bool) throws -> EncodedSample {
+        let pts = CMTime(seconds: ptsSeconds, preferredTimescale: 600)
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: Int32(testFps)),
+            presentationTimeStamp: pts,
+            decodeTimeStamp: .invalid
+        )
+        let hint = try makeHEVCFormatDescription()
+        var sampleBuffer: CMSampleBuffer?
+        let status = CMSampleBufferCreate(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: nil,
+            dataReady: false,
+            makeDataReadyCallback: nil,
+            refcon: nil,
+            formatDescription: hint,
+            sampleCount: 1,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleSizeEntryCount: 0,
+            sampleSizeArray: nil,
+            sampleBufferOut: &sampleBuffer
+        )
+        guard status == noErr, let sampleBuffer else {
+            throw TestError.sampleBufferFailed(status)
+        }
+        return EncodedSample(sampleBuffer: sampleBuffer, ptsHostTime: pts, isKeyframe: isKeyframe)
+    }
+
+    /// Shared writer factory — creates a bare FileWriter.
+    ///
+    /// Callers inject the video seam separately via `writer.injectVideoInputForTesting(stub)`
+    /// because injection is actor-isolated (`async`), which cannot be expressed in a synchronous factory.
+    private func makeWriter() throws -> FileWriter {
+        try FileManager.default.createDirectory(at: self.tempDir, withIntermediateDirectories: true)
+        let url = self.tempDir.appending(path: "test-gop-\(UUID().uuidString).mp4")
+        let hint = try makeHEVCFormatDescription()
+        return try FileWriter(
+            outputURL: url,
+            configuration: .mvpDefault,
+            includeAudio: false,
+            sourceFormatHint: hint
+        )
+    }
+
+    // MARK: P1: not-ready on a delta opens the window; all subsequent frames drop until ready keyframe
+
+    @Test("not-ready delta opens GOP-drop window; deltas keep dropping; ready keyframe closes it")
+    func notReadyDelta_opensWindow_deltasDropped_keyframeClosesAndAppends() async throws {
+        // Setup: stub starts not-ready, then becomes ready before the closing keyframe.
+        let stub = StubWriterInput(ready: false)
+        let writer = try makeWriter()
+        defer { try? FileManager.default.removeItem(at: self.tempDir) }
+        await writer.injectVideoInputForTesting(stub)
+
+        // Collect all drop events until the stream is finished.
+        let dropCollector = Task { () -> [DropEvent] in
+            var events: [DropEvent] = []
+            for await event in await writer.drops {
+                events.append(event)
+            }
+            return events
+        }
+
+        // Frame 0 — not-ready DELTA: opens the window. Expect drop, window stays open.
+        let delta0 = try makeGopSample(ptsSeconds: 0.0, isKeyframe: false)
+        await writer.appendVideo(delta0)
+        let windowOpen = await writer.droppingUntilKeyframeForTesting
+        #expect(windowOpen, "not-ready delta must open the GOP-drop window")
+
+        // Frame 1 — still not-ready DELTA: window active, drop.
+        let delta1 = try makeGopSample(ptsSeconds: 0.033, isKeyframe: false)
+        await writer.appendVideo(delta1)
+
+        // Frame 2 — still not-ready KEYFRAME: window stays open (not-ready takes precedence).
+        let keyframeNotReady = try makeGopSample(ptsSeconds: 0.066, isKeyframe: true)
+        await writer.appendVideo(keyframeNotReady)
+        let stillOpen = await writer.droppingUntilKeyframeForTesting
+        #expect(stillOpen, "a not-ready keyframe must NOT close the window (cannot append while not-ready)")
+
+        // Frame 3 — input becomes ready. DELTA: window active, still drops (ready delta must not re-tear).
+        stub.ready = true
+        let delta3 = try makeGopSample(ptsSeconds: 0.1, isKeyframe: false)
+        await writer.appendVideo(delta3)
+        let stillOpenAfterReadyDelta = await writer.droppingUntilKeyframeForTesting
+        #expect(stillOpenAfterReadyDelta, "a ready delta inside the window must NOT close it")
+
+        // Frame 4 — ready KEYFRAME: closes the window and is appended.
+        let keyframeReady = try makeGopSample(ptsSeconds: 0.133, isKeyframe: true)
+        await writer.appendVideo(keyframeReady)
+        let windowClosed = await writer.droppingUntilKeyframeForTesting
+        #expect(!windowClosed, "a ready keyframe must close the GOP-drop window")
+
+        // Drain drops.
+        await writer.finishDropsForTesting()
+        let events = await dropCollector.value
+
+        // Frames 0–3 are dropped; frame 4 is appended — 4 drop events expected.
+        #expect(events.count == 4, "frames 0–3 must each emit a DropEvent; frame 4 is appended")
+        #expect(
+            events.allSatisfy { $0.reason == .encoderBackpressureDrops },
+            "all GOP-window drops must carry .encoderBackpressureDrops reason"
+        )
+        #expect(
+            events.allSatisfy { $0.source == .writer },
+            "all GOP-window drops must carry .writer source"
+        )
+
+        // Only the closing keyframe (frame 4) must reach the writer.
+        #expect(stub.appendedBuffers.count == 1, "only the ready keyframe must be appended")
+    }
+
+    // MARK: P1: not-ready on a keyframe also drops the whole GOP it opens
+
+    @Test("not-ready keyframe opens GOP-drop window; next ready keyframe resumes")
+    func notReadyKeyframe_wholeGopDropped_resumesOnNextReadyKeyframe() async throws {
+        let stub = StubWriterInput(ready: false)
+        let writer = try makeWriter()
+        defer { try? FileManager.default.removeItem(at: self.tempDir) }
+        await writer.injectVideoInputForTesting(stub)
+
+        let dropCollector = Task { () -> [DropEvent] in
+            var events: [DropEvent] = []
+            for await event in await writer.drops {
+                events.append(event)
+            }
+            return events
+        }
+
+        // Frame 0 — not-ready KEYFRAME: opens the window.
+        let keyframe0 = try makeGopSample(ptsSeconds: 0.0, isKeyframe: true)
+        await writer.appendVideo(keyframe0)
+        let windowOpen = await writer.droppingUntilKeyframeForTesting
+        #expect(windowOpen, "not-ready keyframe must open the drop window")
+
+        // Frame 1 — not-ready DELTA: still dropping.
+        let delta1 = try makeGopSample(ptsSeconds: 0.033, isKeyframe: false)
+        await writer.appendVideo(delta1)
+
+        // Input becomes ready. Frame 2 — ready KEYFRAME: closes window and is appended.
+        stub.ready = true
+        let keyframe2 = try makeGopSample(ptsSeconds: 0.066, isKeyframe: true)
+        await writer.appendVideo(keyframe2)
+        let windowClosed = await writer.droppingUntilKeyframeForTesting
+        #expect(!windowClosed, "second ready keyframe must close the window")
+
+        await writer.finishDropsForTesting()
+        let events = await dropCollector.value
+
+        #expect(events.count == 2, "frames 0 and 1 must be dropped")
+        #expect(stub.appendedBuffers.count == 1, "only the second keyframe must be appended")
+    }
+
+    // MARK: P3: no drop window when input is always ready
+
+    @Test("no GOP-drop window when input is always ready")
+    func alwaysReady_noWindowOpened() async throws {
+        let stub = StubWriterInput(ready: true)
+        let writer = try makeWriter()
+        defer { try? FileManager.default.removeItem(at: self.tempDir) }
+        await writer.injectVideoInputForTesting(stub)
+
+        let dropCollector = Task { () -> [DropEvent] in
+            var events: [DropEvent] = []
+            for await event in await writer.drops {
+                events.append(event)
+            }
+            return events
+        }
+
+        // A full GOP: keyframe then two deltas.
+        let keyframe = try makeGopSample(ptsSeconds: 0.0, isKeyframe: true)
+        let delta1 = try makeGopSample(ptsSeconds: 0.033, isKeyframe: false)
+        let delta2 = try makeGopSample(ptsSeconds: 0.066, isKeyframe: false)
+        await writer.appendVideo(keyframe)
+        await writer.appendVideo(delta1)
+        await writer.appendVideo(delta2)
+
+        let windowNeverOpened = await writer.droppingUntilKeyframeForTesting
+        #expect(!windowNeverOpened, "GOP-drop window must not be open when input is always ready")
+
+        await writer.finishDropsForTesting()
+        let events = await dropCollector.value
+
+        #expect(events.isEmpty, "no drops must occur when input is always ready")
+        #expect(stub.appendedBuffers.count == 3, "all three frames must be appended")
+    }
+
+    // MARK: P3: recovery — window closes exactly on the ready keyframe, not before
+
+    @Test("window closes on ready keyframe; subsequent deltas pass through normally")
+    func window_closesOnReadyKeyframe_subsequentDeltasPassThrough() async throws {
+        let stub = StubWriterInput(ready: false)
+        let writer = try makeWriter()
+        defer { try? FileManager.default.removeItem(at: self.tempDir) }
+        await writer.injectVideoInputForTesting(stub)
+
+        let dropCollector = Task { () -> [DropEvent] in
+            var events: [DropEvent] = []
+            for await event in await writer.drops {
+                events.append(event)
+            }
+            return events
+        }
+
+        // Open the window: not-ready delta.
+        let delta0 = try makeGopSample(ptsSeconds: 0.0, isKeyframe: false)
+        await writer.appendVideo(delta0)
+
+        // Input becomes ready. Closing keyframe.
+        stub.ready = true
+        let keyframe1 = try makeGopSample(ptsSeconds: 0.033, isKeyframe: true)
+        await writer.appendVideo(keyframe1)
+
+        // Post-recovery: two more deltas with ready input — must append normally.
+        let delta2 = try makeGopSample(ptsSeconds: 0.066, isKeyframe: false)
+        let delta3 = try makeGopSample(ptsSeconds: 0.1, isKeyframe: false)
+        await writer.appendVideo(delta2)
+        await writer.appendVideo(delta3)
+
+        await writer.finishDropsForTesting()
+        let events = await dropCollector.value
+
+        // Only delta0 is dropped.
+        #expect(events.count == 1, "only the window-opening delta must be dropped")
+        // keyframe1, delta2, delta3 must all be appended.
+        #expect(stub.appendedBuffers.count == 3, "keyframe + two post-recovery deltas must be appended")
+
+        let windowClosed = await writer.droppingUntilKeyframeForTesting
+        #expect(!windowClosed, "window must be closed after recovery")
+    }
+}
+
 // MARK: - FileWriterAudioTests (L2, stub seam)
 
 @Suite("FileWriter — appendAudio paths (L2)")
@@ -629,6 +882,99 @@ struct FileWriterAudioTests {
         #expect(events.isEmpty, "audio hard failure must not emit a DropEvent")
         let faulted = await writer.isFaultedForTesting
         #expect(faulted, "append()==false on audio must mark the writer faulted")
+    }
+}
+
+// MARK: - FileWriterChmodTests (L2, stub seam)
+
+//
+// Regression for #204: a `setOwnerOnly` (chmod 0o600) failure must NOT abort `start()`.
+// chmod is best-effort hardening, not a recording invariant — when it throws, recording
+// continues with default file permissions and the AVAssetWriter is never orphaned.
+
+@Suite("FileWriter — setOwnerOnly failure is non-fatal (#204, L2)")
+struct FileWriterChmodTests {
+    private let tempDir: URL = FileManager.default.temporaryDirectory
+        .appending(path: "FileWriterChmodTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+
+    private struct ChmodError: Error {}
+
+    /// Cross-isolation flag (the override closure runs inside the actor; the test reads it after).
+    private final class ChmodRanFlag: Sendable {
+        private let lock = OSAllocatedUnfairLock(initialState: false)
+
+        func markRan() {
+            self.lock.withLock { $0 = true }
+        }
+
+        var didRun: Bool {
+            self.lock.withLock { $0 }
+        }
+    }
+
+    private func makeEncodedKeyframe(ptsSeconds: Double) throws -> EncodedSample {
+        let pts = CMTime(seconds: ptsSeconds, preferredTimescale: 600)
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: Int32(testFps)),
+            presentationTimeStamp: pts,
+            decodeTimeStamp: .invalid
+        )
+        let hint = try makeHEVCFormatDescription()
+        var sampleBuffer: CMSampleBuffer?
+        let status = CMSampleBufferCreate(
+            allocator: kCFAllocatorDefault,
+            dataBuffer: nil,
+            dataReady: false,
+            makeDataReadyCallback: nil,
+            refcon: nil,
+            formatDescription: hint,
+            sampleCount: 1,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleSizeEntryCount: 0,
+            sampleSizeArray: nil,
+            sampleBufferOut: &sampleBuffer
+        )
+        guard status == noErr, let sampleBuffer else {
+            throw TestError.sampleBufferFailed(status)
+        }
+        return EncodedSample(sampleBuffer: sampleBuffer, ptsHostTime: pts, isKeyframe: true)
+    }
+
+    @Test("setOwnerOnly throws → start does not throw and the writer stays usable")
+    func setOwnerOnlyFails_startDoesNotThrow_writerStaysUsable() async throws {
+        try FileManager.default.createDirectory(at: self.tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: self.tempDir) }
+
+        let url = self.tempDir.appending(path: "test-chmod-fail.mp4")
+        let hint = try makeHEVCFormatDescription()
+        let writer = try FileWriter(
+            outputURL: url,
+            configuration: .mvpDefault,
+            includeAudio: false,
+            sourceFormatHint: hint
+        )
+
+        // Force the chmod seam to fail. The override must actually run and throw, otherwise
+        // "start did not throw" would pass vacuously — proven below via the failing flag.
+        let chmodRan = ChmodRanFlag()
+        await writer.setOwnerOnlyOverrideForTesting { _ in
+            chmodRan.markRan()
+            throw ChmodError()
+        }
+
+        // start() must tolerate the chmod failure (a thrown error fails this test — that is
+        // the assertion).
+        try await writer.start(atSourceTime: .zero)
+        #expect(chmodRan.didRun, "the chmod seam must have been invoked and thrown")
+
+        // The writer must remain usable: a ready keyframe appended after start() reaches the
+        // input — proving the pipeline survived the degraded chmod, not just that start() returned.
+        let stub = StubWriterInput(ready: true)
+        await writer.injectVideoInputForTesting(stub)
+        let keyframe = try self.makeEncodedKeyframe(ptsSeconds: 0.0)
+        await writer.appendVideo(keyframe)
+        #expect(!stub.appendedBuffers.isEmpty, "writer must keep appending after a non-fatal chmod failure")
     }
 }
 

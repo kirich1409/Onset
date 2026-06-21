@@ -482,6 +482,100 @@ struct DualFileOutputStageLazyTests {
     }
 }
 
+// MARK: - Never-created revoke + warning throttle (#201)
+
+@Suite("DualFileOutputStage — never-created revoke frees pending audio (#201)")
+struct DualFileOutputStageDeadKindsTests {
+    @Test("revoking a never-created pipeline releases pending audio (no unbounded growth)")
+    func neverCreatedRevoke_freesPendingAudio() async throws {
+        let factory = FakeWriterFactory()
+        // Expected {screen, camera}; camera is revoked BEFORE any camera frame, screen survives.
+        let stage = makeStage(factory: factory, expected: [.screen, .camera], includeAudio: true)
+
+        // Screen writer exists; camera writer does NOT (no camera frame ever arrives).
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
+
+        // Early audio arrives while camera writer is still pending: screen gets it live, and it is
+        // buffered for the not-yet-created camera writer.
+        let early = try SampleFactory.audioSample(
+            originalFirstPTS: CMTime(value: 1, timescale: 48000),
+            ptsHostTime: CMTime(value: 210_000, timescale: 600)
+        )
+        await stage.routeAudio(early)
+        #expect(factory.screenWriter.appendedAudioBuffers.count == 1, "survivor receives early audio")
+
+        // Camera revoked before it ever created a writer (AC-12 camera-disconnect before first frame).
+        await stage.finalizePipeline(.camera)
+
+        // Flood far past the 256 cap AFTER the revoke. WITHOUT the fix the camera still blocks
+        // `allWritersCreated()`, so every one of these is buffered and (past the cap) dropped,
+        // driving `pendingAudioDropped` up. WITH the fix the effective expected set is satisfied
+        // (only screen, which exists), so nothing is buffered and nothing is dropped.
+        let flood = 300
+        for index in 0..<flood {
+            let audio = try SampleFactory.audioSample(
+                originalFirstPTS: CMTime(value: Int64(index), timescale: 48000),
+                ptsHostTime: CMTime(value: Int64(220_000 + index), timescale: 600)
+            )
+            await stage.routeAudio(audio)
+        }
+
+        // Red-green discriminator: zero drops means pending audio is no longer buffered for the
+        // dead camera pipeline. Without the fix this would be flood - cap = 44.
+        #expect(await stage.pendingAudioDropped == 0, "dead pipeline must not buffer/drop pending audio")
+        // Audio-not-lost guarantee for the survivor: the early sample + all flood samples reached
+        // the screen writer (1 early + 300 flood).
+        #expect(
+            factory.screenWriter.appendedAudioBuffers.count == 1 + flood,
+            "survivor must receive every audio sample (early + post-revoke)"
+        )
+    }
+
+    @Test("screen-only survives when camera was never expected (audio flows, nothing dropped)")
+    func screenOnly_audioFlowsNoDrops() async throws {
+        let factory = FakeWriterFactory()
+        // Only screen expected — sanity that the effective-set logic does not regress the
+        // single-pipeline case: pending audio is released once the screen writer exists.
+        let stage = makeStage(factory: factory, expected: [.screen], includeAudio: true)
+
+        try await stage.routeVideo(SampleFactory.encodedSample(ptsSeconds: 1.0, kind: .screen), from: .screen)
+        let total = 300
+        for index in 0..<total {
+            let audio = try SampleFactory.audioSample(
+                originalFirstPTS: CMTime(value: Int64(index), timescale: 48000),
+                ptsHostTime: CMTime(value: Int64(200_000 + index), timescale: 600)
+            )
+            await stage.routeAudio(audio)
+        }
+
+        #expect(await stage.pendingAudioDropped == 0, "single live pipeline must not buffer pending audio")
+        #expect(factory.screenWriter.appendedAudioBuffers.count == total, "screen receives all audio")
+    }
+
+    @Test("drop counter is exact past the cap; warning is throttled (counter is the proxy)")
+    func dropCounter_isExactPastCap() async throws {
+        let factory = FakeWriterFactory()
+        // Both expected, neither writer created → all audio is buffered, cap drops the oldest.
+        let stage = makeStage(factory: factory, expected: [.screen, .camera], includeAudio: true)
+
+        // Overflow by a known amount: cap + overflow buffers routed → exactly `overflow` drops.
+        // The os.Logger warning throttle is not directly observable in a unit test (no logger seam
+        // is injected — adding one would be production surface for a log line); `pendingAudioDropped`
+        // is the proxy that proves no drop is lost while the warning itself is rate-limited.
+        let cap = 256
+        let overflow = 50
+        for index in 0..<(cap + overflow) {
+            let audio = try SampleFactory.audioSample(
+                originalFirstPTS: CMTime(value: Int64(index), timescale: 48000),
+                ptsHostTime: CMTime(value: Int64(200_000 + index), timescale: 600)
+            )
+            await stage.routeAudio(audio)
+        }
+
+        #expect(await stage.pendingAudioDropped == overflow, "every overflow sample is counted (none lost)")
+    }
+}
+
 // MARK: - Finish independence (AC-9)
 
 @Suite("DualFileOutputStage — finish independence (AC-9)")

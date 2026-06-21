@@ -49,6 +49,13 @@ struct MainViewModelRecordTests {
     /// `startBehavior` replaces `coordinator.start(_:)` so tests exercise the dispatch path
     /// without starting a real `RecordingSession`. `loadDevices()` is called so device lists
     /// and auto-selections match what the live app sees on first appear.
+    ///
+    /// Both persistence stores are backed by a per-SUT `InMemoryUserDefaults` so tests never
+    /// touch the real `~/Library/Preferences/` domain. Without this, the output-directory
+    /// tests persisted `/tmp/onset-nonexistent-…` into the shared standard defaults, which
+    /// every later `MainViewModel.init` read back — `record()` then failed its directory
+    /// validation before reaching `startBehavior`, breaking the valid-path tests and
+    /// deadlocking the re-entrancy test (it awaits a signal yielded inside `startBehavior`).
     private func makeSUT(
         screen: PermissionStatus = .authorized,
         camera: PermissionStatus = .notDetermined,
@@ -61,12 +68,15 @@ struct MainViewModelRecordTests {
         -> MainViewModel
     { // swiftlint:disable:this opening_brace
         let perms = FakePermissionsService(screen: screen, camera: camera, microphone: microphone)
+        let defaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: perms,
             coordinator: RecordingCoordinator(),
             discoverDisplays: { _ in displays },
             discoverCameras: { _ in cameras },
-            discoverMicrophones: { _ in microphones }
+            discoverMicrophones: { _ in microphones },
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) },
+            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: defaults) }
         )
         sut.startSessionOverride = startBehavior
         await sut.loadDevices()
@@ -162,6 +172,54 @@ struct MainViewModelRecordTests {
         await first
 
         #expect(startCount == 1, "only one coordinator.start must be invoked under concurrent record() calls")
+    }
+
+    // MARK: - Output-directory validation
+
+    @Test("record() — non-existent output directory → outputDirectoryError set, no coordinator start")
+    func record_nonExistentOutputDirectory_errorSet() async {
+        var startCalled = false
+        let sut = await self.makeSUT(startBehavior: { _ in startCalled = true })
+        // Point to a path that cannot exist at test runtime.
+        sut.outputDirectoryURL = URL(
+            filePath: "/tmp/onset-nonexistent-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+
+        await sut.record()
+
+        #expect(
+            !startCalled,
+            "coordinator.start must NOT be called when the output directory does not exist"
+        )
+        #expect(
+            sut.outputDirectoryError != nil,
+            "outputDirectoryError must be set for a missing output directory"
+        )
+    }
+
+    @Test("record() — outputDirectoryError reset and re-set on second call after external clear")
+    func record_secondCallAfterExternalClear_errorReSet() async {
+        let sut = await self.makeSUT()
+        let missingURL = URL(
+            filePath: "/tmp/onset-nonexistent-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        sut.outputDirectoryURL = missingURL
+
+        // First call: error is set.
+        await sut.record()
+        #expect(sut.outputDirectoryError != nil, "outputDirectoryError must be set on first call")
+
+        // Simulate alert dismissal resetting the error (what the view's Binding does on OK tap).
+        sut.outputDirectoryError = nil
+
+        // Second call with the same missing directory: error must be set again.
+        await sut.record()
+        #expect(
+            sut.outputDirectoryError != nil,
+            "outputDirectoryError must be re-set on a second call after external clear"
+        )
     }
 }
 

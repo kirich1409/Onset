@@ -1,3 +1,5 @@
+// swiftlint:disable file_length
+import AppKit
 import AVFoundation
 import os
 import SwiftUI
@@ -20,10 +22,14 @@ nonisolated let mainViewModelLogger = Logger(
 /// - (c) mic unavailable → record without audio, «без звука» indicator
 /// - (d) screen permission denied → empty state (return to onboarding)
 ///
-/// ### Camera toggle
-/// `cameraEnabled` (default `true`) lets the user switch camera recording on/off (#77, #76).
-/// `activeCamera` is the unified single predicate: non-nil iff `cameraEnabled == true` AND a
-/// real camera is selected. Camera is NOT a factor in `canRecord` — screen is always required.
+/// ### Camera selection
+/// `cameraPickerSelection` is the single source of truth for the camera device picker (#224).
+/// `nil` represents "Выключена" (camera disabled); a non-nil `String` is the `uniqueID` of the
+/// selected device. Setting it drives both `cameraEnabled` and `selectedCameraID`.
+/// `cameraEnabled` remains a stored `var` for internal use by persistence, restore logic, and
+/// `activeCamera`. `activeCamera` is the unified single predicate: non-nil iff `cameraEnabled`
+/// is `true` AND a real camera is selected. Camera is NOT a factor in `canRecord` — screen is
+/// always required.
 ///
 /// ### Preview lifecycle
 /// A generation counter (`previewGeneration`) drives `.id()` on `CameraPreviewRepresentable`
@@ -37,6 +43,7 @@ nonisolated let mainViewModelLogger = Logger(
 /// `RecordingSession` has no screen-skip branch. Screen capture is mandatory in MVP.
 @Observable
 @MainActor
+// swiftlint:disable:next type_body_length
 final class MainViewModel {
     // MARK: - Injectable seams
 
@@ -58,6 +65,14 @@ final class MainViewModel {
     @ObservationIgnored
     let discoverMicrophones: (Bool) -> [MicrophoneDevice]
 
+    /// Closure seam for the device-change event stream — injectable for tests.
+    ///
+    /// The live default builds a `DeviceAvailabilityObserver` whose lifetime is tied to
+    /// the returned stream: its `onTermination` tears the observer down when the consuming
+    /// task is cancelled (main window disappears). See `observeDeviceChanges()`.
+    @ObservationIgnored
+    let makeDeviceChangeStream: @MainActor () -> AsyncStream<DeviceChangeEvent>
+
     /// Factory seam for `CameraSource` — injectable for tests to avoid hardware calls.
     ///
     /// The default closure builds a `.preview`-role source (no data output, no telemetry);
@@ -74,6 +89,16 @@ final class MainViewModel {
     @ObservationIgnored
     let makeStore: () -> any DeviceSelectionPersisting
 
+    @ObservationIgnored
+    private let outputFolderStore: any OutputFolderPersisting
+
+    /// Closure seam for display-configuration-change events — injectable for tests.
+    ///
+    /// Live default yields `Void` on each `NSApplication.didChangeScreenParametersNotification`.
+    /// Tests inject a stream driven by `AsyncStream.makeStream` for deterministic reloads.
+    @ObservationIgnored
+    let screenChangeEvents: () -> AsyncStream<Void>
+
     /// Test seam: when non-nil, replaces `coordinator.start(_:)` in `startRecording`.
     ///
     /// Injected by `MainViewModelTests` to spy on coordinator invocations without constructing
@@ -87,6 +112,13 @@ final class MainViewModel {
     var displays: [Display] = []
     var cameras: [CameraDevice] = []
     var microphones: [MicrophoneDevice] = []
+
+    /// Cache of `uniqueID → localizedName` for camera devices, built once per `loadCamerasAndMicrophones`
+    /// call. Avoids a synchronous `AVCaptureDevice(uniqueID:)` lookup on every ForEach render pass.
+    ///
+    /// PII note: names shown in UI, never logged.
+    @ObservationIgnored
+    var cameraDisplayNames: [String: String] = [:]
 
     // MARK: - Persistence state
 
@@ -146,6 +178,19 @@ final class MainViewModel {
         }
     }
 
+    // MARK: - Output folder (#225)
+
+    /// The user-selected base output directory, or `~/Movies/Onset/` when no selection was saved.
+    ///
+    /// UI reads this to display the current path and offer "Show in Finder". The setter persists
+    /// the new path immediately via `outputFolderStore`. Backed by `UserDefaults` (no sandbox,
+    /// no security-scoped bookmark needed — Onset runs as Developer ID / direct distribution).
+    var outputDirectoryURL: URL {
+        didSet {
+            self.outputFolderStore.saveBaseDirectory(self.outputDirectoryURL)
+        }
+    }
+
     /// Whether the camera is enabled for recording (#77, #76).
     ///
     /// When `false`: `activeCamera` is nil, no preview is shown, camera is excluded from
@@ -153,6 +198,10 @@ final class MainViewModel {
     /// available camera is auto-selected so the user gets a working default immediately.
     var cameraEnabled = true {
         didSet {
+            // Skip when the value did not actually change — avoids a redundant persist
+            // when `cameraPickerSelection` sets `selectedCameraID` then `cameraEnabled`
+            // in sequence and the camera was already enabled.
+            guard oldValue != self.cameraEnabled else { return }
             // Auto-select first camera when re-enabling with no prior selection.
             if self.cameraEnabled {
                 self.selectFirstCameraIfNeeded()
@@ -185,6 +234,85 @@ final class MainViewModel {
         self.activeCamera != nil
     }
 
+    /// `true` while a camera is active but the preview handle is not yet available —
+    /// covers both the connecting state and the failed state.
+    ///
+    /// Use this to gate any placeholder UI (spinner or error icon) that should be
+    /// visible whenever the live preview layer is not yet ready, regardless of reason.
+    var cameraPlaceholderPending: Bool {
+        self.isCameraActive && self.previewHandle == nil
+    }
+
+    /// True while a camera device is selected but the preview session has not yet started,
+    /// and no terminal failure has been recorded.
+    ///
+    /// `previewHandle` is cleared at the top of `managePreview` (via `stopCurrentPreview`) and
+    /// set only after `source.start()` returns, so this is `true` during both initial activation
+    /// and the switch window between devices (1-3 s for slow sources such as Continuity Camera).
+    /// Becomes `false` when `previewFailed` is set — the error placeholder is shown instead.
+    var isCameraConnecting: Bool {
+        self.cameraPlaceholderPending && !self.previewFailed
+    }
+
+    // MARK: - Camera picker selection (#224)
+
+    /// Single source of truth for the camera device picker.
+    ///
+    /// Maps the two-field `(cameraEnabled, selectedCameraID)` state onto a single `String?`:
+    /// - `nil` — camera is disabled ("Выключена" picker row is selected).
+    /// - non-nil — camera is enabled and the value is the `uniqueID` of the selected device.
+    ///
+    /// Disconnected state (`cameraEnabled == true`, `selectedCameraID == nil`) also maps to `nil`
+    /// so the picker reflects "no selection"; the disconnected notice is surfaced separately via
+    /// `disconnectedCameraName`.
+    ///
+    /// ### Setter semantics
+    /// - `nil` → disables the camera. `selectedCameraID` is unchanged so re-enabling restores the
+    ///   previous device automatically.
+    /// - non-nil id → enables the camera and selects the device via `enableCamera(deviceID:)`.
+    ///
+    /// Use `$model.cameraPickerSelection` as the `Picker` binding; tag the "Выключена" row with
+    /// `String?.none` and device rows with `Optional(camera.uniqueID)`.
+    var cameraPickerSelection: String? {
+        get {
+            self.cameraEnabled ? self.selectedCameraID : nil
+        }
+        set {
+            if let id = newValue {
+                self.enableCamera(deviceID: id)
+            } else {
+                // nil: disable the camera. selectedCameraID is intentionally preserved
+                // so re-enabling via cameraEnabled = true restores the prior selection.
+                // Clear any stale disconnected notice — explicit "Выключена" selection
+                // removes the warning that belongs to the involuntary-disconnect flow.
+                self.cameraEnabled = false
+                self.disconnectedCameraName = nil
+            }
+        }
+    }
+
+    /// Selects a specific device and ensures the camera is enabled.
+    ///
+    /// Sets `selectedCameraID` before `cameraEnabled` so `selectFirstCameraIfNeeded()` (called
+    /// from `cameraEnabled.didSet`) exits early — preventing a redundant intermediate persist.
+    ///
+    /// When the device ID is no longer in `cameras` (race: picker rendered before hot-unplug
+    /// event arrived), the selection is rejected and `disconnectedCameraName` is set so the UI
+    /// shows `CameraUnavailableRow`. This surfaces feedback to the user instead of silently
+    /// rolling back the picker without explanation.
+    private func enableCamera(deviceID: String) {
+        assert(!deviceID.isEmpty, "enableCamera called with empty deviceID")
+        guard self.cameras.contains(where: { $0.uniqueID == deviceID }) else {
+            mainViewModelLogger.info("Camera selection ignored — device no longer available (id=\(deviceID))")
+            // Surface the stale selection as a disconnected-device notice so the picker
+            // roll-back is explained to the user via CameraUnavailableRow.
+            self.disconnectedCameraName = self.cameraDisplayNames[deviceID] ?? "Камера"
+            return
+        }
+        self.selectedCameraID = deviceID
+        self.cameraEnabled = true
+    }
+
     // MARK: - Error state
 
     /// Non-nil when the most recent `record()` call failed, a validation error occurred,
@@ -192,6 +320,13 @@ final class MainViewModel {
     /// Internal (not private) so `MainViewModel+Record.swift` and `MainViewModel+Devices.swift`
     /// extensions can write it.
     var recordError: String?
+
+    /// Non-nil when `validateOutputDirectory()` detected a missing or non-writable folder.
+    ///
+    /// Surfaced as a modal alert in `MainView` (output-directory errors originate in the ВЫВОД
+    /// section, which is visually distant from the Record button — a footer caption is easily missed).
+    /// Written exclusively by `MainViewModel+Record.swift`; reset at each `record()` call.
+    var outputDirectoryError: String?
 
     /// `true` while a `record()` call is in flight.
     /// Internal (not private) so `MainViewModel+Record.swift` extension can write it.
@@ -202,6 +337,13 @@ final class MainViewModel {
     /// The `SessionHandle` for the live camera preview, or `nil` for placeholder.
     /// Internal (not private) so `MainViewModel+Preview.swift` extension can write it.
     var previewHandle: SessionHandle?
+
+    /// True when the last camera preview startup attempt failed terminally (no suitable format
+    /// or `source.start()` threw). The spinner overlay is suppressed; a static error placeholder
+    /// is shown instead. Reset to `false` at the start of each new `managePreview` invocation
+    /// so re-selecting a different camera clears the prior failure.
+    /// Internal (not private) so `MainViewModel+Preview.swift` extension can write it.
+    var previewFailed = false
 
     /// Bumped on each camera change; drives `.id()` on the `NSViewRepresentable` wrapper
     /// to force recreation of `CameraPreviewView` (its `init` wires the layer, `updateNSView` is no-op).
@@ -302,11 +444,16 @@ final class MainViewModel {
 
     // MARK: - Device display names (resolved at UI layer via AVCaptureDevice)
 
-    /// Human-readable label for a camera device, resolved via `AVCaptureDevice(uniqueID:)`.
+    /// Human-readable label for a camera device.
+    ///
+    /// Returns the cached name built during `loadCamerasAndMicrophones`; falls back to a
+    /// live `AVCaptureDevice` lookup for devices not yet in the cache (e.g. before first load).
     ///
     /// PII note: device names are shown in UI but never logged. Log counts only.
     func cameraLabel(for device: CameraDevice) -> String {
-        AVCaptureDevice(uniqueID: device.uniqueID)?.localizedName ?? "Камера"
+        self.cameraDisplayNames[device.uniqueID]
+            ?? AVCaptureDevice(uniqueID: device.uniqueID)?.localizedName
+            ?? "Камера"
     }
 
     /// Human-readable label for a microphone device, resolved via `AVCaptureDevice(uniqueID:)`.
@@ -364,6 +511,9 @@ final class MainViewModel {
         discoverMicrophones: @escaping (Bool) -> [MicrophoneDevice] = { authorized in
             DeviceDiscovery.microphones(microphoneAuthorized: authorized)
         },
+        makeDeviceChangeStream: @escaping @MainActor () -> AsyncStream<DeviceChangeEvent> = {
+            DeviceAvailabilityObserver().events()
+        },
         makeCameraSource: @escaping (
             CameraDevice, CameraFormat, MicrophoneDevice?, RecordingConfiguration
         )
@@ -372,6 +522,23 @@ final class MainViewModel {
             },
         makeStore: @escaping () -> any DeviceSelectionPersisting = {
             UserDefaultsDeviceSelectionStore()
+        },
+        makeOutputFolderStore: @escaping () -> any OutputFolderPersisting = {
+            UserDefaultsOutputFolderStore()
+        },
+        screenChangeEvents: @escaping () -> AsyncStream<Void> = {
+            // Bridges didChangeScreenParametersNotification as a Void signal.
+            // Async-sequence form avoids a non-Sendable observer token in @Sendable closure.
+            AsyncStream { continuation in
+                let task = Task {
+                    let center = NotificationCenter.default
+                    let name = NSApplication.didChangeScreenParametersNotification
+                    for await _ in center.notifications(named: name) {
+                        continuation.yield()
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
+            }
         }
     ) {
         self.permissions = permissions
@@ -379,7 +546,16 @@ final class MainViewModel {
         self.discoverDisplays = discoverDisplays
         self.discoverCameras = discoverCameras
         self.discoverMicrophones = discoverMicrophones
+        self.makeDeviceChangeStream = makeDeviceChangeStream
         self.makeCameraSource = makeCameraSource
         self.makeStore = makeStore
+        self.screenChangeEvents = screenChangeEvents
+
+        // Create the store once; the same instance is reused in outputDirectoryURL.didSet.
+        self.outputFolderStore = makeOutputFolderStore()
+
+        // Restore the persisted base directory, falling back to ~/Movies/Onset/.
+        // `RecordingOutput.directory()` is the single authoritative source for the default path.
+        self.outputDirectoryURL = self.outputFolderStore.loadBaseDirectory() ?? RecordingOutput.directory()
     }
 }

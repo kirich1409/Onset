@@ -32,9 +32,12 @@ import os
 /// Cumulative, never-reset drop tallies for the UI (#37) and the AC-9 end-of-session warning.
 ///
 /// Each counter accumulates `DropEvent.count` over the whole session and is NEVER reset — these
-/// are distinct from the sliding window that drives `RecordingState`. The three fields map 1-to-1
-/// with `DropReason`.
-nonisolated struct DropCounters {
+/// are distinct from the sliding window that drives `RecordingState`. Three fields cover the
+/// degradation-relevant `DropReason` cases: `.captureDrop` and `.captureBackpressureDrops` fold
+/// into `captureDrops`; only `.encoderBackpressureDrops` feeds the degraded-state window.
+/// `.encoderHoldDrops` (synthetic catch-up holds, #200) is intentionally NOT represented here —
+/// it carries no user content and is tracked privately by `DropMonitor` for diagnostics only.
+nonisolated struct DropCounters: Equatable {
     /// Total `DropReason.encoderBackpressureDrops` seen this session. Also the only reason that
     /// feeds the degraded-state window.
     nonisolated let encoderBackpressureDrops: Int
@@ -60,23 +63,13 @@ nonisolated struct DropCounters {
 ///
 /// `dominantCause` identifies the backpressure stage that accumulated the most drops (see
 /// `DropCause` tie-break order). `.notDegraded` when the session was never degraded.
-nonisolated struct DropHealthSnapshot {
+nonisolated struct DropHealthSnapshot: Equatable {
     /// Cumulative per-reason drop tallies (same data as `DropCounters`).
     nonisolated let counters: DropCounters
     /// `true` when the session transitioned to `.degraded` at least once (live HUD flashed).
     nonisolated let sessionEverDegraded: Bool
     /// The backpressure stage that accumulated the most drops, or `.notDegraded` if never degraded.
     nonisolated let dominantCause: DropCause
-}
-
-// swiftformat:disable:next redundantEquatable
-extension DropHealthSnapshot: Equatable {
-    /// Manual `nonisolated` implementation (mirrors `DropCounters`).
-    nonisolated static func == (lhs: DropHealthSnapshot, rhs: DropHealthSnapshot) -> Bool {
-        lhs.counters == rhs.counters
-            && lhs.sessionEverDegraded == rhs.sessionEverDegraded
-            && lhs.dominantCause == rhs.dominantCause
-    }
 }
 
 // MARK: - DropBreakdown
@@ -87,7 +80,7 @@ extension DropHealthSnapshot: Equatable {
 /// maps to `DropSource` and is used EXCLUSIVELY for the single `.notice` log line emitted
 /// at session stop. It does not affect UI counters, `RecordingState`, or the degraded-state
 /// window — diagnostic only.
-nonisolated struct DropBreakdown {
+nonisolated struct DropBreakdown: Equatable {
     /// Drops detected by `ScreenSource` (SCStream video overflow).
     nonisolated let captureScreen: Int
     /// Drops detected by `CameraSource` video path (AVCapture video overflow).
@@ -109,31 +102,6 @@ nonisolated struct DropBreakdown {
             " capture-camera-audio=\(self.captureCameraAudio)" +
             " encode=\(self.encode)" +
             " writer=\(self.writer)"
-    }
-}
-
-// swiftformat:disable:next redundantEquatable
-extension DropBreakdown: Equatable {
-    /// Manual `nonisolated` implementation (mirrors `DropCounters`).
-    nonisolated static func == (lhs: DropBreakdown, rhs: DropBreakdown) -> Bool {
-        lhs.captureScreen == rhs.captureScreen
-            && lhs.captureCameraVideo == rhs.captureCameraVideo
-            && lhs.captureCameraAudio == rhs.captureCameraAudio
-            && lhs.encode == rhs.encode
-            && lhs.writer == rhs.writer
-    }
-}
-
-// The synthesised `==` would be inferred `@MainActor` under `InferIsolatedConformances` because
-// the conformance is declared in an extension; the manual `nonisolated` witness is required so
-// `DropCounters` is comparable from `nonisolated` code (mirrors `RecordingState` / `DropReason`).
-// swiftformat:disable:next redundantEquatable
-extension DropCounters: Equatable {
-    /// Manual `nonisolated` implementation (mirrors `DropReason`).
-    nonisolated static func == (lhs: DropCounters, rhs: DropCounters) -> Bool {
-        lhs.encoderBackpressureDrops == rhs.encoderBackpressureDrops
-            && lhs.captureDrops == rhs.captureDrops
-            && lhs.cfrNormalizationDrops == rhs.cfrNormalizationDrops
     }
 }
 
@@ -243,6 +211,7 @@ nonisolated struct BackpressureDegradationWindow {
 ///   (the only reason that can trigger `.degraded`).
 /// - `.captureDrop` → cumulative `captureDrops` only (never triggers).
 /// - `.cfrNormalizationDrops` → cumulative `cfrNormalizationDrops` only (never triggers).
+/// - `.encoderHoldDrops` → private `encoderHoldDrops` only, diagnostic (never triggers; #200).
 ///
 /// ### Degraded = Live with recovery (user decision)
 /// The window goes `.degraded` when backpressure drops in the last `degradedWindowSeconds` exceed
@@ -251,10 +220,14 @@ nonisolated struct BackpressureDegradationWindow {
 /// even when no new drops arrive. `RecordingState` is emitted on `state` only on TRANSITIONS.
 ///
 /// ### Lifecycle / teardown
-/// `stop()` is the primary terminator: it cancels and awaits the tick task, cancels the observe
-/// child tasks, and finishes the `state` stream (mirrors `VideoEncoder.stop()`'s finish-always
-/// discipline). `deinit` is a best-effort safety net — it can only cancel tasks and `finish()` the
-/// continuation (both thread-safe, no `await`).
+/// `stop()` is the primary (graceful) terminator: it cancels+awaits the tick task, then **drains**
+/// (awaits without cancelling) the observe child tasks so the buffered `DropEvent` tail is ingested
+/// before the counters are read (#202), then finishes the `state` stream. It assumes every observed
+/// `drops` stream is already finished. `cancelObservation()` is the abnormal-teardown terminator
+/// (failed start): it **cancels** the observe tasks instead of draining, so it cannot hang on an
+/// unfinished stream — at the cost of truncating the tail, which does not matter on a failed start.
+/// `deinit` is a best-effort safety net — it can only cancel tasks and `finish()` the continuation
+/// (both thread-safe, no `await`).
 actor DropMonitor {
     // MARK: - Logging
 
@@ -285,6 +258,13 @@ actor DropMonitor {
     private var encoderBackpressureDrops = 0
     private var captureDrops = 0
     private var cfrNormalizationDrops = 0
+
+    /// Total `DropReason.encoderHoldDrops` seen this session (#200). Deliberately NOT exposed on
+    /// `DropCounters` / `DropHealthSnapshot`: a dropped synthetic catch-up hold carries no user
+    /// content, so it must never feed the user-facing dropped-frames count, the degraded-state
+    /// window, or the `sessionEverDegraded` latch. Tracked only for the diagnostic debug log; its
+    /// per-source visibility comes from `breakdownEncode` via the source-accounting switch below.
+    private var encoderHoldDrops = 0
 
     // MARK: - Degradation latch (never reset within a session)
 
@@ -380,10 +360,12 @@ actor DropMonitor {
         self.observeTasks.append(task)
     }
 
-    // swiftlint:disable cyclomatic_complexity
+    // swiftlint:disable cyclomatic_complexity function_body_length
     /// Routes a single drop event: bumps the cumulative counter for its reason, and — for
-    /// backpressure only — feeds the window and recomputes `RecordingState`. Also accumulates
-    /// the per-source diagnostic breakdown (independent path, no effect on reason counters).
+    /// encoder backpressure only — feeds the window and recomputes `RecordingState`. Also
+    /// accumulates the per-source diagnostic breakdown (independent path, no effect on reason
+    /// counters). Capture-overflow drops (`.captureBackpressureDrops`) fold into `captureDrops`
+    /// and never drive the degraded-state window — capture overflow is not encoder/disk pressure.
     private func ingest(_ event: DropEvent) {
         // Reason accounting: drives UI counters and degraded-state window.
         switch event.reason {
@@ -392,9 +374,12 @@ actor DropMonitor {
             let detectedAtSeconds = CMTimeGetSeconds(event.detectedAt)
             let degraded = self.window.record(atSeconds: detectedAtSeconds, count: event.count)
             self.applyDegraded(degraded)
+            let sourceDesc = String(describing: event.source)
+            self.logger.debug("Drop [encoder-backpressure] source=\(sourceDesc) count=\(event.count)")
 
             // Backpressure-only per-source tally: incremented exclusively inside this branch so
-            // captureDrop and cfrNormalizationDrops events never misattribute dominant cause.
+            // captureDrop, captureBackpressureDrops, and cfrNormalizationDrops events never
+            // misattribute dominant cause.
             switch event.source {
             case .captureScreen:
                 self.bpCaptureScreen += event.count
@@ -412,13 +397,34 @@ actor DropMonitor {
                 self.bpWriter += event.count
             }
 
-        case .captureDrop:
-            // Counted for the AC-9 end-of-session warning; never a degraded-state trigger.
+        case .captureBackpressureDrops:
+            // Capture-layer overflow: the capture→encoder AsyncStream buffer was full.
+            // Folds into captureDrops — never drives the degraded-state window so that
+            // encoder-backpressure alert is not falsely triggered by capture overflow.
             self.captureDrops += event.count
+            let capBpDesc = String(describing: event.source)
+            self.logger.debug("Drop [capture-backpressure] source=\(capBpDesc) count=\(event.count)")
+
+        case .captureDrop:
+            // Hardware or SCStream delivery drop; never a degraded-state trigger.
+            self.captureDrops += event.count
+            let capDesc = String(describing: event.source)
+            self.logger.debug("Drop [capture] source=\(capDesc) count=\(event.count)")
 
         case .cfrNormalizationDrops:
-            // Counted for the AC-9 end-of-session warning; never a degraded-state trigger.
+            // CFR normalizer hold-repeat eviction; never a degraded-state trigger.
             self.cfrNormalizationDrops += event.count
+            let cfrDesc = String(describing: event.source)
+            self.logger.debug("Drop [cfr-normalization] source=\(cfrDesc) count=\(event.count)")
+
+        case .encoderHoldDrops:
+            // Synthetic catch-up hold dropped at the encoder gate (#200): no user content lost.
+            // Routed like .cfrNormalizationDrops — a separate counter + debug log that never
+            // touches the window, applyDegraded, or the sessionEverDegraded latch. Per-source
+            // visibility still comes from breakdownEncode via the source-accounting switch below.
+            self.encoderHoldDrops += event.count
+            let holdDesc = String(describing: event.source)
+            self.logger.debug("Drop [encoder-hold] source=\(holdDesc) count=\(event.count)")
         }
 
         // Source accounting: diagnostic only — independent of reason accounting above.
@@ -440,7 +446,7 @@ actor DropMonitor {
         }
     }
 
-    // swiftlint:enable cyclomatic_complexity
+    // swiftlint:enable cyclomatic_complexity function_body_length
 
     // MARK: - Recovery tick
 
@@ -496,7 +502,7 @@ actor DropMonitor {
 
     /// Current drop health snapshot for the session, combining cumulative counters with the
     /// degradation latch and dominant backpressure cause. Used by `RecordingSession.stop()`
-    /// to assemble `RecordingResult` and by `currentDrops()` (polled by the live drop pill).
+    /// to assemble `RecordingResult` (and the on-disk technical report) and by `currentDrops()`.
     func snapshot() -> DropHealthSnapshot {
         DropHealthSnapshot(
             counters: DropCounters(
@@ -541,16 +547,63 @@ actor DropMonitor {
 
     // MARK: - Lifecycle
 
-    /// Primary terminator: cancels and awaits the recovery tick, cancels and awaits the observe
-    /// child tasks, then finishes the `state` stream. Idempotent — finishing an already-finished
-    /// continuation is a no-op. Awaiting the observe tasks before finishing the continuation
-    /// ensures deterministic teardown: any in-flight `ingest(_:)` call that holds the actor
-    /// completes before the stream is closed, eliminating reliance on yield-after-finish being a
-    /// no-op. Mirrors `VideoEncoder.stop()`'s finish-always discipline.
+    /// Primary terminator for the graceful stop path: cancels and awaits the recovery tick, then
+    /// **drains** (awaits without cancelling) the observe child tasks, then finishes the `state`
+    /// stream. Idempotent — finishing an already-finished continuation is a no-op.
+    ///
+    /// ### Why drain, not cancel (#202)
+    /// Each observe task runs `for await event in drops { ingest(event) }`. Cancelling the task
+    /// would truncate that iteration immediately, discarding any `DropEvent` still buffered in the
+    /// source's `drops` stream (buffer depth 8) — so the final `breakdownSnapshot()` / `snapshot()`
+    /// would under-count the tail. Awaiting *without* cancelling lets each task read its buffered
+    /// tail and end naturally when its stream finishes, so every drop is ingested before the
+    /// counters are read.
+    ///
+    /// The tick task is the exception: it is an infinite recovery loop that never ends on its own,
+    /// so it MUST be cancelled (then awaited) — it observes no `DropEvent`s, so cancelling it
+    /// truncates nothing.
+    ///
+    /// ### Precondition — all observed `drops` streams are finished before this call
+    /// Drain-only termination relies on every observed stream already being finished: an observe
+    /// task only ends once its `drops` stream finishes. The graceful caller
+    /// (`RecordingSession.performStop()`) guarantees this by ordering teardown so each observed
+    /// stream is finished first — `source.stop()` finishes source.drops, `encoder.stop()` finishes
+    /// encoder.drops, and `stage.finishAll()` → `FileWriter.markFinished()` finishes each
+    /// writer.drops — all before `dropMonitor.stop()`. If `stop()` were ever called with an
+    /// unfinished observed stream, this drain would hang forever; the abnormal teardown path
+    /// (failed start) must use `cancelObservation()` instead, which cancels rather than drains.
     ///
     /// Emits a single `.notice` per-source diagnostic summary after all observe tasks drain —
     /// counts are final at this point and survive in release `log show` output (AC-8).
     func stop() async {
+        self.tickTask?.cancel()
+        await self.tickTask?.value
+        self.tickTask = nil
+        // Drain without cancelling: each task ends when its (already-finished) stream is fully
+        // read, ingesting the buffered tail. See the precondition above — cancelling here would
+        // truncate that tail (#202).
+        for task in self.observeTasks {
+            await task.value
+        }
+        self.observeTasks.removeAll()
+        let breakdown = self.breakdownSnapshot()
+        self.logger.notice("\(breakdown.summaryLine, privacy: .public)")
+        self.stateContinuation.finish()
+    }
+
+    /// Abnormal-teardown terminator for the failed-start path: **cancels** the recovery tick and
+    /// the observe child tasks (rather than draining them), then finishes the `state` stream.
+    ///
+    /// Unlike `stop()`, this does NOT assume the observed `drops` streams are finished.
+    /// `teardownAfterFailedStart()` does not call `stage.finishAll()`, so if a writer was created
+    /// (and its `drops` observed) just before the start threw, that writer's stream may still be
+    /// open. Draining it would hang; cancelling ends each observe task immediately regardless of
+    /// stream state. Tail accuracy does not matter on a failed start — no `RecordingResult` reads
+    /// these counters — so truncating the buffered tail here is acceptable.
+    ///
+    /// Mirrors the `deinit` safety net but is awaitable, so the failed-start caller can deterministically
+    /// join the cancelled tasks before tearing down the rest of the session.
+    func cancelObservation() async {
         self.tickTask?.cancel()
         await self.tickTask?.value
         self.tickTask = nil
@@ -561,8 +614,6 @@ actor DropMonitor {
             await task.value
         }
         self.observeTasks.removeAll()
-        let breakdown = self.breakdownSnapshot()
-        self.logger.notice("\(breakdown.summaryLine, privacy: .public)")
         self.stateContinuation.finish()
     }
 }

@@ -17,7 +17,8 @@
 | `ScreenSource` | `ScreenSource.swift` | Актор: захват дисплея через ScreenCaptureKit, обрабатывает hot-plug отключение |
 | `CameraDevice` | `CaptureDeviceModels.swift` | Иммутабельный снапшот камеры (uniqueID + форматы), без живых ссылок на `AVCaptureDevice` |
 | `Display` | `CaptureDeviceModels.swift` | Иммутабельный снапшот дисплея: `CGDirectDisplayID`, размеры, частота |
-| `DeviceDiscovery` | `DeviceDiscovery+Displays.swift`, `DeviceDiscovery+CaptureDevices.swift` | Nonisolated-перечисление устройств с чистыми мапперами для тестов |
+| `DeviceDiscovery` | `DeviceDiscovery+Displays.swift`, `DeviceDiscovery+CaptureDevices.swift` | Nonisolated-перечисление устройств с чистыми мапперами для тестов; suspended-устройства (`isSuspended`, например FaceTime-камера при закрытой крышке) исключаются из результатов |
+| `DeviceAvailabilityObserver` | `DeviceAvailabilityObserver.swift` | Поток событий топологии устройств (`DeviceChangeEvent`): NotificationCenter connect/disconnect + KVO `isSuspended`; время жизни привязано к стриму (teardown через `onTermination`) |
 | `ScreenStreamConfigurationBuilder` | `ScreenStreamConfigurationBuilder.swift` | Чистый билдер `ResolvedRecordingPlan` → `SCStreamConfiguration` |
 
 Где искать:
@@ -119,9 +120,13 @@ TCC-разрешения, политика записи, запись MP4.
 | `EffectivePermissions` | `Permissions/EffectivePermissions.swift` | Чистый расчёт доступных режимов записи из трёх статусов |
 | `AppRouter` | `Permissions/AppRouter.swift` | Чистый роутинг стартового экрана (onboarding/allSet/main) из статусов и аргументов relaunch |
 | `AppRelauncher` | `Permissions/AppRelauncher.swift` | Self-relaunch при гранте screen recording; анти-луп флаг в UserDefaults, аргумент `--post-screen-grant` |
+| `RecordingStartNotifying` / `LiveRecordingStartNotifier` | `Permissions/RecordingStartNotifier.swift` | Тонкий сервис подтверждения старта (#242): протокол + live-реализация на `UNUserNotificationCenter`; lazy-auth (authorized → post; notDetermined → request → post; denied → silent fallback) |
 | `RecordingConfiguration` | `Configuration/RecordingConfiguration.swift` | Иммутабельная политика: HEVC-настройки, таблица VBR-битрейтов, границы fps, бюджет |
+| `OutputFolderKeys` | `Configuration/OutputFolderKeys.swift` | UserDefaults-ключ для персистирования базовой папки вывода (#225) |
 | `FileWriter` | `Storage/FileWriter.swift` | Актор: мультиплексирование HEVC+AAC в MP4 (passthrough); телеметрия drop/fault |
-| `RecordingOutput` | `Storage/RecordingOutput.swift` | Чистые утилиты: пути файлов, `~/Movies/Onset/`, POSIX-права 0600/0700 |
+| `RecordingOutput` | `Storage/RecordingOutput.swift` | Чистые утилиты: пути файлов внутри подпапки сессии, `~/Movies/Onset/` (дефолт базовой папки), POSIX-права 0600/0700 |
+| `OutputFolderStore` / `OutputFolderPersisting` | `Storage/OutputFolderStore.swift` | Персистирование пользовательской базовой папки вывода в UserDefaults; injectable для тестов (#225). Под тест-раном привязка к `UserDefaults.standard` падает через `assertionFailure` (`isRunningUnderXCTest`, `TestRunDetection.swift`) — fail-fast против засорения реальных defaults (#227); та же защита в `UserDefaultsDeviceSelectionStore` |
+| `OutputDirectoryNaming` / `OutputDirectoryValidation` | `Storage/OutputDirectoryNaming.swift` | Чистые утилиты: имя подпапки сессии (`"Onset YYYY-MM-DD HH.mm.ss"`), collision avoidance с суффиксом ` (N)`, валидация записываемости базовой папки (#225) |
 
 Где искать:
 
@@ -134,6 +139,7 @@ TCC-разрешения, политика записи, запись MP4.
   → `Configuration/RecordingPolicyTypes.swift`.
 - Ошибки writer'а и шов входа → `Storage/FileWriterTypes.swift`
   (`WriterInputSeam`, `FinishResult`, `FileWriterError`).
+- Выбор и персистирование базовой папки вывода → `OutputFolderStore` / `OutputFolderKeys`; имя подпапки сессии и валидация → `OutputDirectoryNaming`.
 
 Конвенции:
 
@@ -147,6 +153,32 @@ TCC-разрешения, политика записи, запись MP4.
   `AppRouter`) не импортируют AVFoundation; маппинг во framework-константы — на
   уровне кодера/writer'а/обёрток.
 
+## Диагностика — `Onset/Diagnostics/`
+
+Экспорт журнала событий приложения для поддержки (#164).
+
+| Тип | Файл | Роль |
+|---|---|---|
+| `DiagnosticLogEntry` | `Diagnostics/DiagnosticLogEntry.swift` | Чистый value-тип: одна запись журнала (date, subsystem, category, level, message) |
+| `LogExportFormatter` | `Diagnostics/LogExportFormatter.swift` | Чистый nonisolated enum: форматирование записей в text-файл, генерация имени файла |
+| `LogEntryProviding` | `Diagnostics/LogEntryProviding.swift` | DI-шов: `entries(since:) async throws -> [DiagnosticLogEntry]` |
+| `OSLogEntryProvider` | `Diagnostics/DiagnosticsExportService.swift` | Живая реализация `LogEntryProviding` через `OSLogStore(scope: .currentProcessIdentifier)` |
+| `DiagnosticsSaveCoordinator` | `Diagnostics/DiagnosticsSaveCoordinator.swift` | `@MainActor @Observable`: оркестрирует сбор → NSSavePanel → запись → reveal в Finder |
+
+Где искать:
+
+- Кнопка «Экспортировать диагностику» → `MenuBarMenu.idleMenu`.
+- Настройки временного окна (30 мин) → `DiagnosticsSaveCoordinator.defaultLookBackInterval`.
+- Инструкции для пользователей (включая crash-логи `.ips`) → `docs/support/diagnostics.md`.
+
+Конвенции:
+
+- `OSLogStore(scope: .currentProcessIdentifier)` — читает только записи текущего процесса,
+  специальный entitlement не нужен (macOS 12.0+). Исключительно локальный: сетевых соединений
+  нет, инвариант `check-no-network.sh` соблюдён.
+- `Task.detached` в `OSLogEntryProvider` — блокирующий disk I/O OSLogStore вынесен с
+  вызывающего актора в пул кооперативных потоков.
+
 ## UI — `Onset/UI/`
 
 Три поверхности (главное окно, окно записи, онбординг) + меню-бар и хоткей,
@@ -155,12 +187,14 @@ TCC-разрешения, политика записи, запись MP4.
 | Тип | Файл | Роль |
 |---|---|---|
 | `RecordingCoordinator` | `UI/RecordingCoordinator.swift` | Единственный владелец состояния записи (phase, recordingState, drops, elapsed) и единственный подписчик стримов сессии |
-| `MainViewModel` | `UI/Main/MainViewModel.swift` | Выбор устройств и enable-логика кнопки Record (AC-2: экран обязателен, камера опциональна, guard невыбранного микрофона) |
+| `MainViewModel` | `UI/Main/MainViewModel.swift` | Выбор устройств и enable-логика кнопки Record (AC-2: экран обязателен, камера опциональна, guard невыбранного микрофона); список камер/микрофонов обновляется вживую через `observeDeviceChanges()` (`MainViewModel+Devices.swift`); выбор и персистирование базовой папки вывода (#225) |
+| `outputSection` / `OutputFolderRow` | `UI/Main/MainView+Sections.swift` | Секция «ВЫВОД» главного окна: строка с текущей базовой папкой (путь сокращён через `~`) и кнопка выбора через `NSOpenPanel` (#225) |
 | `OnboardingViewModel` | `UI/Onboarding/OnboardingViewModel.swift` | Статусы карточек разрешений из `PermissionsProviding`; поллинг TCC экрана |
 | `RecordingControlling` | `UI/RecordingControlling.swift` | Nonisolated-протокол над `RecordingSession` для координатора — юнит-тесты без железа |
-| `RecordingView` | `UI/Recording/RecordingView.swift` | Тонкий reader состояния координатора; логика статуса/drop-pill в `RecordingDisplayMapper` |
+| `RecordingView` | `UI/Recording/RecordingView.swift` | Тонкий reader состояния координатора; логика статуса (индикатор деградации) в `RecordingDisplayMapper`. Drop-pill удалён — потери кадров пишутся в технический отчёт на диске |
+| `DropReportFormatter` | `Recording/Pipeline/DropReportFormatter.swift` | Чистый nonisolated-форматтер per-session технического отчёта о потерях кадров (русский plain-text); запись файла — в `RecordingOutput.writeReport` |
 | `GlobalHotKeyMonitor` | `UI/HotKey/GlobalHotKeyMonitor.swift` | Системный хоткей ⌘⌥⌃R через Carbon `RegisterEventHotKey`; зовёт `coordinator.stop()` |
-| `MenuBarLabelMapper` | `UI/MenuBar/MenuBarLabelMapper.swift` | Чистый enum: phase+state → дескриптор лейбла меню-бара (красная/жёлтая точка, таймер) |
+| `MenuBarLabelMapper` | `UI/MenuBar/MenuBarLabelMapper.swift` | Чистый enum: phase+state → дескриптор лейбла меню-бара (красная/жёлтая точка, таймер, accessibilityLabel) |
 | `PermissionCardView` | `UI/Onboarding/PermissionCardView.swift` | Переиспользуемая карточка онбординга: иконка, статус-чип, кнопка, инструкции |
 
 Где искать:
@@ -169,9 +203,13 @@ TCC-разрешения, политика записи, запись MP4.
   `RecordingChecklist`, `SourceLiveness` в `RecordingCoordinator.swift`.
 - Гварды кнопки Record → `MainViewModel.canRecord`, `recordDisabledReason`,
   `validateRecordGuards`.
-- Stop из меню-бара (AC-9) → `MenuBarMenu.recordingMenu` → `coordinator.stop()`.
+- Stop из меню-бара (AC-9) → `MenuBarMenu.recordingMenu` → `coordinator.stop()`; hotkey ⌘⌥⌃R виден в меню через `.keyboardShortcut` (#242).
+- Старт без окна (#242) → `activateRecording()` вызывает `notifier.notifyRecordingStarted()`; окно открывается вручную через «Открыть окно записи».
 - Lifecycle превью камеры → `MainViewModel+Preview.swift`
-  (`previewGeneration` + `.task(id:)`).
+  (`previewGeneration` + `.task(id:)`). Пока кадров нет — плейсхолдер в
+  `cameraConnectingOverlay` (`MainView+Sections.swift`): спиннер «Подключение
+  iPhone…/камеры…» (`isCameraConnecting`) или, при сбое старта, статичная
+  ошибка (`previewFailed`); `cameraPlaceholderPending` — общий гейт показа.
 - Форматирование таймера (mm:ss / h:mm:ss) → `ElapsedFormatter.string(from:)` —
   без `String(format:)` из-за `SWIFT_STRICT_MEMORY_SAFETY`.
 
@@ -182,7 +220,8 @@ TCC-разрешения, политика записи, запись MP4.
 - Чистые nonisolated-мапперы (`MenuBarLabelMapper`, `RecordingDisplayMapper`) в паре
   с тонкими `@MainActor`-view.
 - DI через closure-швы: `discoverDisplays`/`discoverCameras`/`discoverMicrophones`/
-  `makeCameraSource` на `MainViewModel`, `startSessionOverride` для шпионажа в тестах.
+  `makeDeviceChangeStream`/`makeCameraSource` на `MainViewModel`, `startSessionOverride`
+  для шпионажа в тестах.
 - `@State` + передача параметрами (никаких `@EnvironmentObject`).
 
 ## Тесты — `OnsetTests/`

@@ -19,6 +19,7 @@ nonisolated private let menuBarMenuLogger = Logger(
 /// - «Открыть Onset» — opens and focuses the main window.
 /// - «Начать запись» — dispatches `coordinator.menuBarRecordIntent` when the main window is
 ///   mounted (intent installed by `MainView.onAppear`), or opens the main window as fallback.
+/// - «Экспортировать диагностику» — collects recent OS log entries and presents NSSavePanel.
 /// - «Версия X.Y.Z (N)» — non-interactive build attribution label for beta feedback (#166).
 /// - «Выход»
 ///
@@ -26,10 +27,11 @@ nonisolated private let menuBarMenuLogger = Logger(
 /// - «Остановить» — calls `coordinator.stop()` (the AC-9 menu-bar stop path).
 /// - «Открыть окно записи» — focuses the recording window.
 ///
-/// Pure reader of `coordinator` — no own state.
+/// Pure reader of `coordinator` and `diagnosticsCoordinator` — no own state.
 @MainActor
 struct MenuBarMenu: View {
     let coordinator: RecordingCoordinator
+    let diagnosticsCoordinator: DiagnosticsSaveCoordinator
 
     @Environment(\.openWindow)
     private var openWindow
@@ -64,6 +66,13 @@ struct MenuBarMenu: View {
 
         Divider()
 
+        Button("Экспортировать диагностику") {
+            self.diagnosticsCoordinator.export()
+        }
+        .disabled(self.diagnosticsCoordinator.isExporting)
+
+        Divider()
+
         // Version label for beta feedback attribution (#166). Non-interactive.
         Text("Версия \(AppVersionFormatter.bundleVersionDisplay)")
             .font(.caption)
@@ -86,6 +95,9 @@ struct MenuBarMenu: View {
             // coordinator's isStopping guard handles concurrent calls).
             Task { await self.coordinator.stop() }
         }
+        // ⌘⌥⌃R — mirrors the global Carbon hotkey in OnsetApp.swift (AC-9, #242).
+        // Carbon and SwiftUI .keyboardShortcut are separate event paths; no double-trigger guard needed.
+        .keyboardShortcut(KeyEquivalent("r"), modifiers: [.command, .option, .control])
 
         Button("Открыть окно записи") {
             self.openWindow(id: WindowID.recording)

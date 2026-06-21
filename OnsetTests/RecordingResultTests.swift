@@ -67,7 +67,7 @@ struct RecordingResultTests {
         #expect(result.screen == nil)
         #expect(result.camera == nil)
         #expect(result.outputURLs.isEmpty)
-        #expect(result.degradedWarning == false)
+        #expect(result.degradedWarning(threshold: 5) == false)
         #expect(result.hasWriteFailure == false)
         #expect(result.writeFailureReason == nil)
     }
@@ -85,48 +85,86 @@ struct RecordingResultTests {
         #expect(result.drops == health.counters)
     }
 
-    // MARK: degradedWarning
+    // MARK: degradedWarning — threshold boundary (AC-9 #132)
 
-    @Test("degradedWarning is false when sessionEverDegraded is false (even with backpressure drops)")
-    func degradedWarning_falseWhenNotEverDegraded() {
-        // The key regression test: high backpressureDrops but sessionEverDegraded == false
-        // means the drops were too sparse to cross the sliding-window threshold — no warning.
+    // The post-stop warning fires when cumulative encoderBackpressureDrops >= threshold (AC-9).
+    // This is deliberately separate from the live AC-8 sliding-window which uses strict >.
+
+    @Test("degradedWarning is false when encoderBackpressureDrops is 0 (any threshold)")
+    func degradedWarning_falseWhenNoBackpressure() {
         let result = RecordingResult.completed(
             .screenOnly(.completed(url: self.screenURL)),
             DropHealthSnapshot(
-                counters: DropCounters(encoderBackpressureDrops: 128, captureDrops: 0, cfrNormalizationDrops: 0),
+                counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 10, cfrNormalizationDrops: 5),
                 sessionEverDegraded: false,
                 dominantCause: .notDegraded
             )
         )
-        #expect(result.degradedWarning == false)
+        #expect(result.degradedWarning(threshold: 5) == false)
     }
 
-    @Test("degradedWarning is true when sessionEverDegraded is true")
-    func degradedWarning_trueWhenSessionEverDegraded() {
+    @Test("degradedWarning is false when drops are below threshold")
+    func degradedWarning_falseWhenBelowThreshold() {
+        // threshold=5: 4 drops must not trigger the alert
         let result = RecordingResult.completed(
             .screenOnly(.completed(url: self.screenURL)),
             DropHealthSnapshot(
-                counters: DropCounters(encoderBackpressureDrops: 1, captureDrops: 0, cfrNormalizationDrops: 0),
-                sessionEverDegraded: true,
-                dominantCause: .encode
-            )
-        )
-        #expect(result.degradedWarning == true)
-    }
-
-    @Test("degradedWarning is false for .empty when sessionEverDegraded is false (stop-before-start no-op path)")
-    func degradedWarning_falseForEmpty_neverDegraded() {
-        // In the stop-before-start no-op specifically, sessionEverDegraded is always false
-        // because nothing ran; the instant-stop path also carries the real latch value.
-        let result = RecordingResult.empty(
-            DropHealthSnapshot(
-                counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
+                counters: DropCounters(encoderBackpressureDrops: 4, captureDrops: 0, cfrNormalizationDrops: 0),
                 sessionEverDegraded: false,
                 dominantCause: .notDegraded
             )
         )
-        #expect(result.degradedWarning == false)
+        #expect(result.degradedWarning(threshold: 5) == false)
+    }
+
+    @Test("degradedWarning is true at exactly the threshold (>= is inclusive)")
+    func degradedWarning_trueAtThreshold() {
+        // threshold=5: exactly 5 drops must trigger the alert
+        let result = RecordingResult.completed(
+            .screenOnly(.completed(url: self.screenURL)),
+            DropHealthSnapshot(
+                counters: DropCounters(encoderBackpressureDrops: 5, captureDrops: 0, cfrNormalizationDrops: 0),
+                sessionEverDegraded: false,
+                dominantCause: .notDegraded
+            )
+        )
+        #expect(result.degradedWarning(threshold: 5) == true)
+    }
+
+    @Test("degradedWarning is true when drops exceed threshold")
+    func degradedWarning_trueWhenAboveThreshold() {
+        // threshold=5: 10 drops must trigger the alert
+        let result = RecordingResult.completed(
+            .screenOnly(.completed(url: self.screenURL)),
+            DropHealthSnapshot(
+                counters: DropCounters(encoderBackpressureDrops: 10, captureDrops: 0, cfrNormalizationDrops: 0),
+                sessionEverDegraded: false,
+                dominantCause: .notDegraded
+            )
+        )
+        #expect(result.degradedWarning(threshold: 5) == true)
+    }
+
+    @Test("degradedWarning ignores captureDrops and cfrNormalizationDrops")
+    func degradedWarning_ignoresNonBackpressureDrops() {
+        // Only encoderBackpressureDrops count; high capture/CFR drops must not trigger the alert.
+        let result = RecordingResult.completed(
+            .screenOnly(.completed(url: self.screenURL)),
+            DropHealthSnapshot(
+                counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 100, cfrNormalizationDrops: 50),
+                sessionEverDegraded: false,
+                dominantCause: .notDegraded
+            )
+        )
+        #expect(result.degradedWarning(threshold: 5) == false)
+    }
+
+    @Test("degradedWarning is false for .empty with zero drops (stop-before-start no-op path)")
+    func degradedWarning_falseForEmpty_zeroDrops() {
+        // In the stop-before-start no-op specifically, drops are all-zero because nothing
+        // ran; the instant-stop path carries real drops — see empty_carriesRealCaptureDrops.
+        let result = RecordingResult.empty(self.zeroDrops)
+        #expect(result.degradedWarning(threshold: 5) == false)
     }
 
     @Test(".empty is a transparent DropHealthSnapshot carrier — non-zero captureDrops pass through")
@@ -221,5 +259,75 @@ struct RecordingResultTests {
         )
         #expect(result.hasWriteFailure == true)
         #expect(result.writeFailureReason == "The disk is full.")
+    }
+}
+
+// MARK: - writeFailureDiagnostic — PII-free logging (#188)
+
+/// Regression lock for #188: `writeFailureDiagnostic` must never embed the output path.
+///
+/// `writeFailureReason` produces `localizedDescription` for user-facing alerts; that string
+/// may embed `~/Movies/Onset/<username>/…`. `writeFailureDiagnostic` must use only
+/// `(error as NSError).domain` and `.code`, which are definitionally path-free.
+@Suite("RecordingResult — writeFailureDiagnostic PII-free logging (#188)")
+struct RecordingResultDiagnosticTests {
+    private let screenURL = URL(filePath: "/tmp/screen.mp4")
+    private let cameraURL = URL(filePath: "/tmp/camera.mp4")
+    private let zeroDrops = DropHealthSnapshot(
+        counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
+        sessionEverDegraded: false,
+        dominantCause: .notDegraded
+    )
+
+    @Test("writeFailureDiagnostic contains domain and code, not the output path")
+    func writeFailureDiagnostic_isPIIFree() {
+        // Construct an error whose localizedDescription embeds a fake user path — the kind
+        // of string AVAssetWriter produces on disk-full or permission errors (#188).
+        let err = NSError(
+            domain: "TestDomain",
+            code: 42,
+            userInfo: [NSLocalizedDescriptionKey: "write failed /Users/secretuser/Movies/Onset/x.mp4"]
+        )
+        let result = RecordingResult.completed(
+            .screenOnly(.failed(url: self.screenURL, error: err)),
+            self.zeroDrops
+        )
+
+        let diagnostic = result.writeFailureDiagnostic
+        let reason = result.writeFailureReason
+
+        // diagnostic must carry the structured error identity
+        #expect(diagnostic?.contains("TestDomain") == true)
+        #expect(diagnostic?.contains("42") == true)
+
+        // diagnostic must NOT embed user-identifiable path fragments
+        #expect(diagnostic?.contains("secretuser") == false)
+        #expect(diagnostic?.contains("/Users/") == false)
+
+        // reason (used for the user-facing alert) still carries the path — proves the
+        // diagnostic is the PII-free variant, not a renamed alias
+        #expect(reason?.contains("secretuser") == true)
+    }
+
+    @Test("writeFailureDiagnostic is nil when no writer failed")
+    func writeFailureDiagnostic_nilWhenNoFailure() {
+        let result = RecordingResult.completed(.screenOnly(.completed(url: self.screenURL)), self.zeroDrops)
+        #expect(result.writeFailureDiagnostic == nil)
+    }
+
+    @Test("writeFailureDiagnostic joins both screen and camera errors when both fail")
+    func writeFailureDiagnostic_joinsBothErrors() {
+        let screenErr = NSError(domain: "ScreenDomain", code: 1, userInfo: nil)
+        let cameraErr = NSError(domain: "CameraDomain", code: 2, userInfo: nil)
+        let result = RecordingResult.completed(
+            .both(
+                screen: .failed(url: self.screenURL, error: screenErr),
+                camera: .failed(url: self.cameraURL, error: cameraErr)
+            ),
+            self.zeroDrops
+        )
+        let diagnostic = result.writeFailureDiagnostic
+        #expect(diagnostic?.contains("ScreenDomain #1") == true)
+        #expect(diagnostic?.contains("CameraDomain #2") == true)
     }
 }

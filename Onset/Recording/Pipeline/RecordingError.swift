@@ -90,6 +90,47 @@ nonisolated enum RecordingError: Error {
     /// surface the path so the user can recover any usable footage (AC-10 crash recovery
     /// intent: `movieFragmentInterval` limits data loss, but the writer may still fail).
     case writerFailed(any Error)
+
+    /// Screen capture did not activate within the allowed window.
+    ///
+    /// On macOS 26 `SCStream.startCapture()` returns before the user responds to the
+    /// screen-recording consent dialog. The coordinator waits for the first real screen
+    /// frame as the activation signal. This error is thrown when:
+    ///
+    /// - the consent dialog is dismissed / denied (the stream emits a terminal stop
+    ///   event and `captureActiveStream` finishes without yielding),
+    /// - macOS silently denies consent without emitting a terminal stop and the
+    ///   bounded timeout (~30 s) elapses, or
+    /// - any other terminal stop occurs before the first frame.
+    ///
+    /// Recording is automatically reverted to the pre-recording state before this error
+    /// propagates to the UI.
+    case captureDidNotActivate
+}
+
+extension RecordingError: LocalizedError {
+    /// Actionable description surfaced to the user.
+    ///
+    /// `captureDidNotActivate` and `outputDirectoryUnavailable` return actionable strings;
+    /// other cases fall through to Swift's default formatting — their callers set explicit
+    /// UI copy at the call site.
+    nonisolated var errorDescription: String? {
+        switch self {
+        case .captureDidNotActivate:
+            // Actionable instruction: tell the user where to grant permission and how to retry.
+            "Не удалось начать запись экрана. " +
+                "Разрешите запись экрана в Системных настройках → " +
+                "Конфиденциальность и безопасность → Запись экрана и попробуйте снова."
+
+        case .outputDirectoryUnavailable:
+            // Actionable instruction: tell the user the folder is missing or not writable.
+            "Не удалось подготовить папку для записи. " +
+                "Проверьте, что выбранная папка существует и доступна для записи."
+
+        default:
+            nil
+        }
+    }
 }
 
 extension RecordingError: Equatable {
@@ -103,7 +144,8 @@ extension RecordingError: Equatable {
         case (.noHardwareEncoder, .noHardwareEncoder),
              (.budgetExceeded, .budgetExceeded),
              (.noVideoSource, .noVideoSource),
-             (.noSuitableCameraFormat, .noSuitableCameraFormat):
+             (.noSuitableCameraFormat, .noSuitableCameraFormat),
+             (.captureDidNotActivate, .captureDidNotActivate):
             true
 
         case let (.captureSetupFailed(lErr), .captureSetupFailed(rErr)),

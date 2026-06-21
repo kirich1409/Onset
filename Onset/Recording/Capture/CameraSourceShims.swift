@@ -255,6 +255,10 @@ final class AudioOutputShim: NSObject, AVCaptureAudioDataOutputSampleBufferDeleg
 /// Internal errors used to wrap `RecordingError.captureSetupFailed`.
 nonisolated enum CameraSourceError: Error {
     case deviceNotFound
+    /// The camera device resolved by `uniqueID` reports `isSuspended == true` (e.g. the
+    /// built-in FaceTime camera while the notebook lid is closed). Starting the session
+    /// would deliver zero frames; refuse setup instead.
+    case deviceSuspended
     case micNotFound
     case cannotAddInput
     case sessionDidNotStart
