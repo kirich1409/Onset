@@ -56,10 +56,35 @@ extension MainViewModel {
 
         // Valid camera in hand: enter the connecting state. Set AFTER the guards (not at the
         // top of managePreview) so deselect/hot-unplug never leave `.connecting` without a camera.
+        // Bump the attempt id exactly once here, then capture it locally. INVARIANT: no `await`
+        // between the bump and the capture, or a re-entrant attempt B could overwrite the id
+        // before attempt A captures it (#255).
+        self.previewAttempt += 1
+        let attempt = self.previewAttempt
         self.previewState = .connecting
 
-        guard let source = await self.buildAndStartPreview(for: camera) else {
-            self.previewState = .failed
+        // Compute the threshold BEFORE the task group so `camera` is not captured inside the
+        // `@Sendable` child task — only the value-typed `threshold`/`attempt` cross into it (#255).
+        let threshold = self.connectTimeout(isContinuity: camera.isContinuityCamera)
+
+        // Structured watchdog: the child runs the soft-connect timer, the main flow builds the
+        // preview, then `cancelAll()` tears the watchdog down. The group is scoped to this
+        // `.task(id:)`, so a camera switch cancels both. Return type `CameraSource?` is inferred
+        // from `return s` (precedent: `+Devices.swift` withTaskGroup).
+        let source = await withTaskGroup(of: Void.self) { group -> CameraSource? in
+            group.addTask {
+                await self.runConnectWatchdog(threshold: threshold, attempt: attempt)
+            }
+            let built = await self.buildAndStartPreview(for: camera, attempt: attempt)
+            group.cancelAll()
+            return built
+        }
+
+        guard let source else {
+            // Build failed: gate so a stale attempt cannot stamp `.failed` over a newer one.
+            if attempt == self.previewAttempt {
+                self.previewState = .failed
+            }
             return
         }
 
@@ -76,6 +101,24 @@ extension MainViewModel {
         mainViewModelLogger.debug("Camera preview stopped")
     }
 
+    /// Soft-connect watchdog (#255): after `threshold` elapses, flip a still-`.connecting`
+    /// preview to `.connectingSlow`. The connection is NOT cancelled — a late handle still
+    /// promotes `.connectingSlow → .live`.
+    ///
+    /// Gates: `attempt == previewAttempt` rejects a stale watchdog from a previous attempt whose
+    /// sleep completed exactly as a camera switch happened (the load-bearing barrier); `if case
+    /// .connecting` avoids overwriting an already-arrived `.live`/`.failed`. A thrown
+    /// `CancellationError` (structured cancellation via `cancelAll()` / `.task(id:)`) exits silently.
+    func runConnectWatchdog(threshold: Duration, attempt: Int) async {
+        do {
+            try await self.connectSleep(threshold)
+        } catch {
+            return
+        }
+        guard attempt == self.previewAttempt, case .connecting = self.previewState else { return }
+        self.previewState = .connectingSlow
+    }
+
     /// Stops the current preview source (if any) and clears handles.
     func stopCurrentPreview() async {
         guard let old = self.previewSource else { return }
@@ -86,7 +129,10 @@ extension MainViewModel {
 
     /// Creates, starts, and exposes a camera preview source.
     /// Returns the started source, or `nil` when setup fails (increments `previewGeneration`).
-    func buildAndStartPreview(for camera: CameraDevice) async -> CameraSource? {
+    ///
+    /// `attempt` gates the `.live`/`.failed` writes so a continuation from a superseded attempt
+    /// cannot mutate the current state (#255).
+    func buildAndStartPreview(for camera: CameraDevice, attempt: Int) async -> CameraSource? {
         let format: CameraFormat
         do {
             format = try CameraFormatSelector.pickBestFormat(
@@ -102,10 +148,13 @@ extension MainViewModel {
         }
 
         let source = self.makeCameraSource(camera, format, nil, .mvpDefault)
+        // INVARIANT: assign `previewSource` BEFORE the connect await so the identity gate below
+        // (and the teardown guard) can compare against the in-flight source.
         self.previewSource = source
 
+        let handle: SessionHandle?
         do {
-            try await source.start(anchoredTo: HostTimeAnchor.now())
+            handle = try await self.startPreviewSource(source)
         } catch {
             mainViewModelLogger.warning(
                 "Camera preview start failed — showing placeholder: \(String(describing: error))"
@@ -115,7 +164,13 @@ extension MainViewModel {
             return nil
         }
 
-        if let handle = await source.sessionHandle() {
+        // Gate `.live` by BOTH identity (`previewSource === source`) — a suspended `start()` of
+        // camera A resuming after a switch to B has `previewSource === sourceB ≠ sourceA` — AND
+        // `attempt == previewAttempt` (closes the narrow window where identity would otherwise
+        // rely on undeclared continuation FIFO order on the `CameraSource` actor). Late-handle
+        // promotion (`.connectingSlow → .live`) still passes: the slow-but-no-switch path does
+        // not bump a new attempt, so both gates hold.
+        if let handle, self.previewSource === source, attempt == self.previewAttempt {
             self.previewState = .live(handle)
         }
         self.previewGeneration += 1

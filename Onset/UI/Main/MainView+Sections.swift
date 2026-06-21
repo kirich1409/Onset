@@ -150,6 +150,14 @@ extension MainView {
         if self.model.previewFailed {
             return isPhone ? "Не удалось подключить iPhone" : "Не удалось подключить камеру"
         }
+        // #255 slow-connect: keep the spinner but carry recovery guidance (what to do), not just
+        // status — a "soft" timeout must be actionable. Placeholder copy; final wording needs a
+        // user brief (UI copy is not finalized by agents).
+        if self.model.previewIsConnectingSlow {
+            return isPhone
+                ? "Подключение занимает больше обычного. Разбудите iPhone или поднесите ближе."
+                : "Подключение занимает больше обычного. Проверьте, что камера включена и подключена."
+        }
         return isPhone ? "Подключение iPhone…" : "Подключение камеры…"
     }
 

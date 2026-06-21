@@ -106,6 +106,24 @@ final class MainViewModel {
     @ObservationIgnored
     var startSessionOverride: (@MainActor (RecordingRequest) async throws -> Void)?
 
+    /// Sleep seam for the preview soft-connect watchdog (#255) — injectable for tests.
+    ///
+    /// The live default sleeps for the requested `Duration`. Tests inject a closure that
+    /// blocks on a signal so the timeout-vs-build ordering in L2 is deterministic rather than
+    /// wall-clock dependent. A thrown `CancellationError` (structured cancellation) makes the
+    /// watchdog exit without flipping state.
+    @ObservationIgnored
+    let connectSleep: @Sendable (Duration) async throws -> Void
+
+    /// Connect seam for the preview build step (#255) — injectable for tests.
+    ///
+    /// The live default starts the source and reads back its `SessionHandle`. `CameraSource` is a
+    /// concrete `actor` whose `start()` needs hardware/TCC, so this seam lets L2 tests control the
+    /// build half of the connect race (the `.live` identity+attempt gate and `.failed` gate stay in
+    /// production unchanged). Throwing maps to the `.failed` path; a `nil` handle leaves the gate untouched.
+    @ObservationIgnored
+    let startPreviewSource: @Sendable (CameraSource) async throws -> SessionHandle?
+
     // MARK: - Device lists
 
     // internal setters — must be settable from MainViewModel+Devices.swift extension
@@ -361,6 +379,22 @@ final class MainViewModel {
         if case .connectingSlow = self.previewState { true } else { false }
     }
 
+    /// Soft-connect timeout for the preview watchdog (#255): Continuity (iPhone) cameras get a
+    /// longer grace period than built-in / USB. Delegates to the pure `CameraPreviewTimeout`.
+    /// `nonisolated` so the `@Sendable` watchdog skeleton can compute it without a MainActor hop.
+    nonisolated func connectTimeout(isContinuity: Bool) -> Duration {
+        CameraPreviewTimeout.threshold(isContinuity: isContinuity)
+    }
+
+    /// Monotonic per-attempt identity for the preview connect (#255). Bumped exactly once at
+    /// the start of each connect attempt (after the camera guards, before `.connecting`), then
+    /// captured locally with NO `await` in between. The watchdog and the `.live`/`.failed` writes
+    /// gate on `attempt == previewAttempt` so a stale watchdog/late continuation from a previous
+    /// attempt cannot mutate the current one. Distinct from `previewGeneration`: the latter has a
+    /// different bump cadence (`stopCurrentPreview` does not bump it) and drives `.id()`.
+    @ObservationIgnored
+    var previewAttempt = 0
+
     /// Bumped on each camera change; drives `.id()` on the `NSViewRepresentable` wrapper
     /// to force recreation of `CameraPreviewView` (its `init` wires the layer, `updateNSView` is no-op).
     /// Internal (not private) so `MainViewModel+Preview.swift` extension can write it.
@@ -555,6 +589,13 @@ final class MainViewModel {
                 }
                 continuation.onTermination = { _ in task.cancel() }
             }
+        },
+        connectSleep: @escaping @Sendable (Duration) async throws -> Void = { duration in
+            try await Task.sleep(for: duration)
+        },
+        startPreviewSource: @escaping @Sendable (CameraSource) async throws -> SessionHandle? = { source in
+            try await source.start(anchoredTo: HostTimeAnchor.now())
+            return source.sessionHandle()
         }
     ) {
         self.permissions = permissions
@@ -566,6 +607,8 @@ final class MainViewModel {
         self.makeCameraSource = makeCameraSource
         self.makeStore = makeStore
         self.screenChangeEvents = screenChangeEvents
+        self.connectSleep = connectSleep
+        self.startPreviewSource = startPreviewSource
 
         // Create the store once; the same instance is reused in outputDirectoryURL.didSet.
         self.outputFolderStore = makeOutputFolderStore()

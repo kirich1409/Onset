@@ -29,3 +29,30 @@ enum CameraPreviewState {
     /// Explicit startup failure / hot-unplug (terminal until the camera is re-selected).
     case failed
 }
+
+// MARK: - Connect-timeout policy (#255)
+
+/// Soft-connect timeout thresholds for the preview watchdog (#255).
+///
+/// Continuity (iPhone) cameras need a longer grace period than built-in / USB cameras:
+/// the iPhone may wake, re-join the network, or re-establish the AirPlay link mid-connect,
+/// so a premature "slow" notice would be misleading. Built-in / USB cameras come up fast,
+/// so a shorter threshold surfaces a genuinely stuck connection sooner.
+///
+/// `nonisolated` pure helper (state-free, no MainActor hop) — mirrors `MenuBarLabelMapper`
+/// / `CFRNormalizer`. The thresholds are orientation values from #255; finalize on L5 with
+/// real Continuity hardware.
+nonisolated enum CameraPreviewTimeout {
+    // swiftlint:disable no_magic_numbers
+    // Threshold seconds are named constants here; the literals are the definition site.
+    /// Grace period before a connecting Continuity (iPhone) preview is flagged as slow.
+    static let continuity: Duration = .seconds(10)
+    /// Grace period before a connecting built-in / USB preview is flagged as slow.
+    static let builtInOrUSB: Duration = .seconds(5)
+    // swiftlint:enable no_magic_numbers
+
+    /// Threshold after which a still-`.connecting` preview flips to `.connectingSlow`.
+    static func threshold(isContinuity: Bool) -> Duration {
+        isContinuity ? self.continuity : self.builtInOrUSB
+    }
+}
