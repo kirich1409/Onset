@@ -72,7 +72,11 @@ extension DeviceDiscovery {
     /// The production entry point. Delegates format mapping to `makeCameraFormat(from:)`.
     nonisolated static func makeCameraDevice(from device: AVCaptureDevice) -> CameraDevice {
         let formats = device.formats.map { Self.makeCameraFormat(from: $0) }
-        return CameraDevice(uniqueID: device.uniqueID, formats: formats)
+        return CameraDevice(
+            uniqueID: device.uniqueID,
+            formats: formats,
+            isContinuityCamera: device.deviceType == .continuityCamera
+        )
     }
 
     /// Maps a live `AVCaptureDevice.Format` to a `CameraFormat` snapshot.

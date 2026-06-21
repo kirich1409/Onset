@@ -46,6 +46,10 @@ struct MainView: View {
         static let previewCornerRadius: CGFloat = 8
         static let accessorySpacing: CGFloat = 8
         static let footerBottomPad: CGFloat = 8
+        /// Crossfade duration for the connecting-overlay ↔ live-preview transition.
+        static let connectingCrossfadeDuration = 0.25
+        /// Vertical spacing between the spinner and the label inside the connecting overlay.
+        static let connectingSpinnerSpacing: CGFloat = 8
         /// Width of the "Папка" label in the output-folder row — wide enough to align
         /// with the icon column while leaving room for the path text.
         static let outputFolderLabelWidth: CGFloat = 48
