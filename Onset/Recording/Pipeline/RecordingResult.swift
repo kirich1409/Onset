@@ -130,14 +130,19 @@ nonisolated enum RecordingResult {
         }
     }
 
-    /// `true` when the live HUD pill actually flashed `.degraded` during the session (AC-9).
+    /// `true` when the session accumulated enough cumulative encoder-backpressure drops to warrant
+    /// the "запись завершена, пропущено N кадров — возможны рывки" post-stop warning (AC-9).
     ///
-    /// Delegates to `sessionEverDegraded` — the one-way latch from `DropMonitor`. This is
-    /// intentionally stricter than the old `drops.encoderBackpressureDrops > 0` check: a
-    /// session whose scattered backpressure drops never exceeded the sliding-window threshold
-    /// did not make the pill flash and should not trigger the post-stop warning.
-    nonisolated var degradedWarning: Bool {
-        self.sessionEverDegraded
+    /// Only `encoderBackpressureDrops` count — capture / CFR-normalization drops do not warn
+    /// (mirrors the `RecordingState.degraded` trigger policy in `DropMonitor`).
+    ///
+    /// Uses `>= threshold` (inclusive), matching AC-9 spec wording "N ≥ порога". This is distinct
+    /// from the live AC-8 sliding-window which uses strict `>` over a short time window — they
+    /// measure different things (rate vs session total) and deliberately use different comparisons.
+    ///
+    /// - Parameter threshold: From `RecordingConfiguration.postStopDropWarningThreshold`.
+    nonisolated func degradedWarning(threshold: Int) -> Bool {
+        self.drops.encoderBackpressureDrops >= threshold
     }
 }
 
@@ -167,10 +172,33 @@ extension RecordingResult {
 
     /// A human-readable description of the write failure(s), joining screen and camera reasons
     /// with a newline when both failed. `nil` when `hasWriteFailure` is `false`.
+    ///
+    /// - Warning: May embed the output path (e.g. `~/Movies/Onset/<username>/…`) from
+    ///   `localizedDescription`. Use this only for user-facing alerts where showing the user
+    ///   their own path is appropriate. For logging, use `writeFailureDiagnostic` instead (#188).
     nonisolated var writeFailureReason: String? {
         guard self.hasWriteFailure else { return nil }
         let reasons = [self.screen?.failureError, self.camera?.failureError]
             .compactMap { $0?.localizedDescription }
         return reasons.joined(separator: "\n")
+    }
+
+    /// PII-free diagnostic string for logging write failure(s).
+    ///
+    /// Produces `"<domain> #<code>"` for each failing writer (screen and/or camera), joined
+    /// with a newline when both failed. `nil` when `hasWriteFailure` is `false`.
+    ///
+    /// Uses only `(error as NSError).domain` and `.code` — definitionally free of file paths
+    /// and user data. Safe to log with `privacy: .public`. For the user-facing error alert
+    /// (where showing the output path is acceptable), use `writeFailureReason` instead (#188).
+    nonisolated var writeFailureDiagnostic: String? {
+        guard self.hasWriteFailure else { return nil }
+        let parts = [self.screen?.failureError, self.camera?.failureError]
+            .compactMap { error -> String? in
+                guard let error else { return nil }
+                let nsError = error as NSError
+                return "\(nsError.domain) #\(nsError.code)"
+            }
+        return parts.joined(separator: "\n")
     }
 }

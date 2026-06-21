@@ -23,9 +23,10 @@ nonisolated private let recordingLogger = Logger(
 /// the layout-only `RecordingContentView`. The coordinator is the *sole* state owner — this view
 /// reads but never subscribes independently or owns its own timer.
 ///
-/// Title-bar close is intercepted via `.onDisappear`: when the window vanishes while recording is
-/// still active, the coordinator's `stop()` is called. The coordinator's `isStopping` guard makes
-/// the double-call safe (Stop button also dismisses the window — the second call is a no-op).
+/// Since #242 (menu-bar-first), recording starts without opening this window. The window is
+/// opened on demand via «Открыть окно записи» in the menu bar. The title-bar red button now
+/// **hides** the window rather than stopping the recording — closing the window no longer
+/// implies stopping. Cmd-Q graceful termination is tracked in #243.
 struct RecordingView: View {
     let coordinator: RecordingCoordinator
 
@@ -33,7 +34,6 @@ struct RecordingView: View {
         RecordingContentView(
             state: self.coordinator.recordingState,
             elapsed: self.coordinator.elapsed,
-            drops: self.coordinator.drops,
             checklist: self.coordinator.checklist,
             sourceLiveness: self.coordinator.sourceLiveness,
             onStop: {
@@ -41,23 +41,10 @@ struct RecordingView: View {
                 Task { await self.coordinator.stop() }
             }
         )
-        // Intercept the title-bar red-button close: when the window disappears while a
-        // recording is still in progress, trigger stop(). The coordinator's `isStopping` guard
-        // makes this idempotent if the Stop button was also tapped (which dismisses the window,
-        // firing this observer as a second call — stop() exits early on the re-entrant path).
-        //
-        // Best-effort: on abrupt Cmd-Q the system may tear down this detached Task before
-        // session.stop() fully finalises the file. This is not a regression — the prior
-        // placeholder had no stop-on-close at all, and any partially-written file remains
-        // recoverable via the movieFragmentInterval fragment headers written mid-recording
-        // (AC-10). Proper applicationShouldTerminate / willTerminate await-stop handling
-        // is deferred to #38.
-        .onDisappear {
-                if self.coordinator.phase == .recording {
-                    recordingLogger.info("Recording window dismissed while recording — triggering stop")
-                    Task { await self.coordinator.stop() }
-                }
-            }
+        // No .onDisappear → stop() since #242: closing the recording window no longer stops
+        // the recording. The window is opened on demand and the red button simply hides it.
+        // Graceful Cmd-Q handling (applicationShouldTerminate / willTerminate await-stop) is
+        // tracked in #243.
     }
 }
 
@@ -69,17 +56,12 @@ struct RecordingView: View {
 /// trivially previewable and all display-logic paths unit-testable via `RecordingDisplayMapper`.
 struct RecordingContentView: View {
     private enum Metrics {
-        // Layout
+        // Layout — static: not Dynamic-Type-scaled
         static let outerPadding: CGFloat = 20
         static let sectionSpacing: CGFloat = 0
         static let statusSpacing: CGFloat = 4
         static let statusBottomPadding: CGFloat = 8
         static let timerBottomPadding: CGFloat = 8
-        static let pillDotSize: CGFloat = 6
-        static let pillDotSpacing: CGFloat = 4
-        static let pillHPadding: CGFloat = 12
-        static let pillVPadding: CGFloat = 5
-        static let pillBottomPadding: CGFloat = 8
         static let checklistTopDividerTopPadding: CGFloat = 12
         static let checklistRowHPadding: CGFloat = 16
         static let checklistRowVPadding: CGFloat = 10
@@ -89,38 +71,59 @@ struct RecordingContentView: View {
         static let stopButtonCornerRadius: CGFloat = 10
         static let stopButtonIconSpacing: CGFloat = 6
         static let statusDotSize: CGFloat = 8
-
-        // Typography
-        static let statusFontSize: CGFloat = 13
-        static let timerFontSize: CGFloat = 56
-        static let pillFontSize: CGFloat = 12
-        static let checklistLabelFontSize: CGFloat = 13
-        static let checklistCheckmarkFontSize: CGFloat = 11
-        static let stopButtonIconFontSize: CGFloat = 12
-        static let stopButtonLabelFontSize: CGFloat = 14
-        static let footerFontSize: CGFloat = 11
         static let footerSpacing: CGFloat = 4
     }
 
+    /// Typography — `@ScaledMetric`: scales with the system Dynamic Type setting (issue #136).
+    /// `@ScaledMetric` cannot be static, so typography values live as instance properties here
+    /// rather than in the `Metrics` enum.
+    @ScaledMetric(relativeTo: .body)
+    private var statusFontSize: CGFloat = 13
+    /// The timer is large by design; scaling relative to .largeTitle preserves its visual
+    /// weight across Dynamic Type sizes while still responding to accessibility preferences.
+    @ScaledMetric(relativeTo: .largeTitle)
+    private var timerFontSize: CGFloat = 56
+    @ScaledMetric(relativeTo: .body)
+    private var checklistLabelFontSize: CGFloat = 13
+    @ScaledMetric(relativeTo: .caption)
+    private var checklistCheckmarkFontSize: CGFloat = 11
+    @ScaledMetric(relativeTo: .caption)
+    private var stopButtonIconFontSize: CGFloat = 12
+    @ScaledMetric(relativeTo: .callout)
+    private var stopButtonLabelFontSize: CGFloat = 14
+    @ScaledMetric(relativeTo: .caption2)
+    private var footerFontSize: CGFloat = 11
+
     let state: RecordingState
     let elapsed: Int
-    let drops: DropCounters
     let checklist: RecordingChecklist
     let sourceLiveness: SourceLiveness
     let onStop: () -> Void
 
     var body: some View {
-        VStack(spacing: Metrics.sectionSpacing) {
-            self.statusSection
-            self.timerSection
-            self.dropPillSection
-            Divider()
-                .padding(.top, Metrics.checklistTopDividerTopPadding)
-            self.checklistSection
-            self.stopButtonSection
-            self.footerSection
+        // Sticky-footer layout: scrollable content + pinned stop button (issue #136).
+        // The stop button stays outside the ScrollView so it is always reachable even when
+        // content overflows at a large Dynamic Type size. macOS auto-hides scrollbars, so
+        // relying on scroll-to-reach for a critical CTA is not acceptable.
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(spacing: Metrics.sectionSpacing) {
+                    self.statusSection
+                    self.timerSection
+                    Divider()
+                        .padding(.top, Metrics.checklistTopDividerTopPadding)
+                    self.checklistSection
+                }
+                .padding(Metrics.outerPadding)
+            }
+            // Stop button + footer pinned below the scroll area — always visible.
+            VStack(spacing: 0) {
+                self.stopButtonSection
+                self.footerSection
+            }
+            .padding(.horizontal, Metrics.outerPadding)
+            .padding(.bottom, Metrics.outerPadding)
         }
-        .padding(Metrics.outerPadding)
         // Fixed size matching the window scene's .windowResizability(.contentSize).
         // alignment: .top pins the content to the top edge when content is shorter than the window.
         .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight, alignment: .top)
@@ -134,7 +137,7 @@ struct RecordingContentView: View {
                 .fill(RecordingDisplayMapper.dotColor(for: self.state))
                 .frame(width: Metrics.statusDotSize, height: Metrics.statusDotSize)
             Text(RecordingDisplayMapper.statusText(for: self.state))
-                .font(.system(size: Metrics.statusFontSize, weight: .semibold))
+                .font(.system(size: self.statusFontSize, weight: .semibold))
                 .foregroundStyle(RecordingDisplayMapper.statusTextColor(for: self.state))
         }
         .frame(maxWidth: .infinity)
@@ -145,34 +148,12 @@ struct RecordingContentView: View {
 
     private var timerSection: some View {
         Text(ElapsedFormatter.string(from: self.elapsed))
-            .font(.system(size: Metrics.timerFontSize, weight: .regular, design: .monospaced))
+            .font(.system(size: self.timerFontSize, weight: .regular, design: .monospaced))
             .foregroundStyle(.primary)
             .frame(maxWidth: .infinity)
             .padding(.bottom, Metrics.timerBottomPadding)
             .accessibilityLabel("Время записи \(ElapsedFormatter.string(from: self.elapsed))")
             .accessibilityAddTraits(.updatesFrequently)
-    }
-
-    // MARK: Drop pill section
-
-    @ViewBuilder
-    private var dropPillSection: some View {
-        let pillLabel = RecordingDisplayMapper.pillAccessibilityLabel(state: self.state, drops: self.drops)
-        HStack(spacing: Metrics.pillDotSpacing) {
-            Circle()
-                .fill(RecordingDisplayMapper.pillDotColor(for: self.state))
-                .frame(width: Metrics.pillDotSize, height: Metrics.pillDotSize)
-            Text(RecordingDisplayMapper.pillText(state: self.state, drops: self.drops))
-                .font(.system(size: Metrics.pillFontSize))
-                .foregroundStyle(RecordingDisplayMapper.pillTextColor(for: self.state))
-                .accessibilityLabel(pillLabel)
-                .accessibilityAddTraits(.updatesFrequently)
-        }
-        .padding(.horizontal, Metrics.pillHPadding)
-        .padding(.vertical, Metrics.pillVPadding)
-        .background(RecordingDisplayMapper.pillBackground(for: self.state))
-        .clipShape(Capsule())
-        .padding(.bottom, Metrics.pillBottomPadding)
     }
 
     // MARK: Checklist section
@@ -221,14 +202,14 @@ struct RecordingContentView: View {
         )
         HStack {
             Text(label)
-                .font(.system(size: Metrics.checklistLabelFontSize))
+                .font(.system(size: self.checklistLabelFontSize))
                 .foregroundStyle(.primary)
             Spacer()
             Text(RecordingDisplayMapper.checklistRowValueText(value: value, isLive: isLive, gender: gender))
-                .font(.system(size: Metrics.checklistLabelFontSize))
+                .font(.system(size: self.checklistLabelFontSize))
                 .foregroundStyle(.secondary)
             Image(systemName: RecordingDisplayMapper.checklistRowIcon(isLive: isLive))
-                .font(.system(size: Metrics.checklistCheckmarkFontSize, weight: .semibold))
+                .font(.system(size: self.checklistCheckmarkFontSize, weight: .semibold))
                 .foregroundStyle(RecordingDisplayMapper.checklistRowIconColor(isLive: isLive))
         }
         .padding(.horizontal, Metrics.checklistRowHPadding)
@@ -246,12 +227,12 @@ struct RecordingContentView: View {
             label: {
                 HStack(spacing: Metrics.stopButtonIconSpacing) {
                     Image(systemName: "stop.fill")
-                        .font(.system(size: Metrics.stopButtonIconFontSize, weight: .semibold))
+                        .font(.system(size: self.stopButtonIconFontSize, weight: .semibold))
                     Text("Остановить")
-                        .font(.system(size: Metrics.stopButtonLabelFontSize, weight: .semibold))
+                        .font(.system(size: self.stopButtonLabelFontSize, weight: .semibold))
                 }
                 .frame(maxWidth: .infinity)
-                .frame(height: Metrics.stopButtonHeight)
+                .frame(minHeight: Metrics.stopButtonHeight)
                 .foregroundStyle(Color.white)
                 .background(Color("StopButtonBackground"))
                 .clipShape(RoundedRectangle(cornerRadius: Metrics.stopButtonCornerRadius))
@@ -261,19 +242,23 @@ struct RecordingContentView: View {
         .padding(.top, Metrics.stopButtonTopPadding)
         .padding(.bottom, Metrics.stopButtonBottomPadding)
     }
+}
 
+// MARK: - RecordingContentView footer section
+
+extension RecordingContentView {
     // MARK: Footer section
 
     private var footerSection: some View {
         HStack(spacing: Metrics.footerSpacing) {
             Image(systemName: "lock.fill")
-                .font(.system(size: Metrics.footerFontSize))
+                .font(.system(size: self.footerFontSize))
                 .foregroundStyle(.secondary)
             Text("Настройки недоступны во время записи — глобальный hotkey")
-                .font(.system(size: Metrics.footerFontSize))
+                .font(.system(size: self.footerFontSize))
                 .foregroundStyle(.secondary)
             Text("⌘⌥⌃R")
-                .font(.system(size: Metrics.footerFontSize, weight: .semibold))
+                .font(.system(size: self.footerFontSize, weight: .semibold))
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
@@ -328,77 +313,6 @@ nonisolated enum RecordingDisplayMapper {
         case .degraded: .orange
         }
     }
-
-    // MARK: Drop pill
-
-    /// The full pill text, with correct Russian pluralization.
-    ///
-    /// - Normal: «1 пропущенный кадр» / «2 пропущенных кадра» / «5 пропущенных кадров»
-    ///   (where N = encoderBackpressureDrops)
-    /// - Degraded: «Пропущен 1 кадр» / «Пропущено 2 кадра» / «Пропущено 5 кадров»
-    ///   (where N = encoderBackpressureDrops; no disk attribution — `DropCounters` carries no reason)
-    static func pillText(state: RecordingState, drops: DropCounters) -> String {
-        let count = drops.encoderBackpressureDrops
-        switch state {
-        case .normal:
-            let adjective = RussianPluralForm.select(
-                count: count,
-                one: "пропущенный",
-                few: "пропущенных",
-                many: "пропущенных"
-            )
-            let noun = RussianPluralForm.select(count: count, one: "кадр", few: "кадра", many: "кадров")
-            return "\(count) \(adjective) \(noun)"
-
-        case .degraded:
-            let verb = RussianPluralForm.select(
-                count: count,
-                one: "Пропущен",
-                few: "Пропущено",
-                many: "Пропущено"
-            )
-            let noun = RussianPluralForm.select(count: count, one: "кадр", few: "кадра", many: "кадров")
-            return "\(verb) \(count) \(noun)"
-        }
-    }
-
-    /// Accessibility label for the drop-pill element.
-    ///
-    /// Returns «Нет пропущенных кадров» when the encoder-backpressure drop counter is zero.
-    /// Otherwise delegates to `pillText(state:drops:)` so visual and accessibility labels match.
-    static func pillAccessibilityLabel(state: RecordingState, drops: DropCounters) -> String {
-        guard drops.encoderBackpressureDrops > 0 else { return "Нет пропущенных кадров" }
-        return self.pillText(state: state, drops: drops)
-    }
-
-    /// Color of the small dot inside the pill.
-    static func pillDotColor(for state: RecordingState) -> Color {
-        switch state {
-        case .normal: .secondary
-        case .degraded: .orange
-        }
-    }
-
-    /// Color of the pill text.
-    static func pillTextColor(for state: RecordingState) -> Color {
-        switch state {
-        case .normal: .secondary
-        case .degraded: .white
-        }
-    }
-
-    /// Background shape fill of the pill.
-    static func pillBackground(for state: RecordingState) -> Color {
-        switch state {
-        case .normal: Color.secondary.opacity(self.normalPillOpacity)
-        case .degraded: .orange
-        }
-    }
-
-    /// Opacity of the pill background in the normal (non-degraded) state.
-    ///
-    /// A subtle overlay matching the macOS secondary-label color at low opacity.
-    static let normalPillOpacity = 0.15
 
     // MARK: Checklist row liveness (#39 / AC-12)
 
@@ -465,7 +379,6 @@ nonisolated enum RecordingDisplayMapper {
     RecordingContentView(
         state: .normal,
         elapsed: 257,
-        drops: .init(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
         checklist: .init(
             screenDescription: "3840×2160 @ 60 Гц",
             cameraDescription: "MX Brio · 1920×1080",
@@ -482,7 +395,6 @@ nonisolated enum RecordingDisplayMapper {
     RecordingContentView(
         state: .normal,
         elapsed: 257,
-        drops: .init(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
         checklist: .init(
             screenDescription: "3840×2160 @ 60 Гц",
             cameraDescription: "MX Brio · 1920×1080",
@@ -499,7 +411,6 @@ nonisolated enum RecordingDisplayMapper {
     RecordingContentView(
         state: .degraded,
         elapsed: 257,
-        drops: .init(encoderBackpressureDrops: 128, captureDrops: 0, cfrNormalizationDrops: 0),
         checklist: .init(
             screenDescription: "3840×2160 @ 60 Гц",
             cameraDescription: "MX Brio · 1920×1080",
@@ -516,7 +427,6 @@ nonisolated enum RecordingDisplayMapper {
     RecordingContentView(
         state: .normal,
         elapsed: 0,
-        drops: .init(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
         checklist: .init(
             screenDescription: "2560×1440 @ 60 Гц",
             cameraDescription: nil,
@@ -533,7 +443,6 @@ nonisolated enum RecordingDisplayMapper {
     RecordingContentView(
         state: .normal,
         elapsed: 312,
-        drops: .init(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
         checklist: .init(
             screenDescription: "3840×2160 @ 60 Гц",
             cameraDescription: "MX Brio · 1920×1080",
@@ -544,6 +453,22 @@ nonisolated enum RecordingDisplayMapper {
     )
     .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
     .preferredColorScheme(.dark)
+}
+
+#Preview("Large font — Dynamic Type accessibility5 (issue #136)") {
+    RecordingContentView(
+        state: .normal,
+        elapsed: 257,
+        checklist: .init(
+            screenDescription: "3840×2160 @ 60 Гц",
+            cameraDescription: "MX Brio · 1920×1080",
+            microphoneDescription: "MacBook Pro"
+        ),
+        sourceLiveness: .allLive,
+        onStop: {}
+    )
+    .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
+    .dynamicTypeSize(.accessibility5)
 }
 
 // swiftlint:enable trailing_closure

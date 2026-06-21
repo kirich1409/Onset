@@ -1070,12 +1070,76 @@ struct VideoEncoderTests {
         let nowAfterSlot3 = anchorSeconds + 3.5 / Double(testFps) + grace + 0.001
         await encoder.clockTick(nowSeconds: nowAfterSlot3)
 
-        // All 3 hold slots must have been gated (pending >= maxPendingFrames throughout).
-        #expect(await encoder.backpressureDropCount >= 2)
+        // All 3 hold slots must have been gated (pending >= maxPendingFrames throughout). These
+        // are SYNTHETIC catch-up holds, so they count as encoderHoldDrops, NOT backpressure (#200).
+        #expect(await encoder.holdDropCount >= 2)
+        // Real-content backpressure counter must stay zero — no real frame was gate-dropped here.
+        #expect(await encoder.backpressureDropCount == 0)
         // Only slot-0 real frame was encoded before the gate was set.
         #expect(mock.encodedBuffers.count == 1)
         // The aggregator should have counted at least 2 gate drops.
         #expect(await encoder.aggregatorHoldsCount >= 2)
+    }
+
+    // MARK: - #200: dropped catch-up holds are encoderHoldDrops, not backpressure
+
+    /// Regression for #200: after a stall, the catch-up batch drops synthetic HOLD frames at the
+    /// gate. Those drops must carry `.encoderHoldDrops` (a non-degrading reason), NOT
+    /// `.encoderBackpressureDrops` — so a false `degraded` latch is never tripped by holds and the
+    /// user-facing dropped-frames count is not inflated by synthetic repeats.
+    ///
+    /// Discriminating at the encoder boundary: under the OLD code every gated hold emitted
+    /// `.encoderBackpressureDrops` and bumped `backpressureDropCount`. This test asserts the
+    /// emitted reason is `.encoderHoldDrops`, `holdDropCount` counts them, and
+    /// `backpressureDropCount` stays 0.
+    @Test("catch-up HOLD drops emit .encoderHoldDrops (not .encoderBackpressureDrops) — #200")
+    func catchUpHoldDrops_emitHoldReason_notBackpressure() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        // maxPendingFrames=1: the gate closes after the first (real) encode, so all subsequent
+        // catch-up holds are gate-dropped.
+        let encoder = await makeEncoder(mock: mock, anchor: anchor, maxPendingFrames: 1, grace: 0.005)
+        try await encoder.start()
+
+        // Collect ALL drop events (reasons) emitted over the session.
+        let dropTask = Task { () -> [DropReason] in
+            var reasons: [DropReason] = []
+            for await event in await encoder.drops {
+                reasons.append(event.reason)
+            }
+            return reasons
+        }
+
+        // Ingest slot 0 first (pending still 0) so lastPixelBuffer is set and the real frame
+        // encodes. Order matters: starting saturated would gate slot 0 itself, leave
+        // lastPixelBuffer nil, and make clockTick a no-op.
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+        #expect(mock.encodedBuffers.count == 1)
+
+        // Saturate the gate, then tick far ahead so a whole catch-up batch of holds is gated.
+        mock.pending = 1
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let grace = 0.005
+        // Make slots 1..testFps all eligible (cap=fps) — a large synthetic hold batch.
+        let nowFarAhead = anchorSeconds + Double(testFps + 2) / Double(testFps) + grace + 0.001
+        await encoder.clockTick(nowSeconds: nowFarAhead)
+
+        await encoder.stop() // finishes the drops stream so the collector terminates
+
+        // The synthetic holds counted as hold drops, NOT backpressure (#200 core assertion).
+        #expect(await encoder.holdDropCount >= 2)
+        #expect(await encoder.backpressureDropCount == 0)
+
+        let reasons = await dropTask.value
+        #expect(!reasons.isEmpty)
+        // Every emitted drop is a hold drop — no real-content backpressure on this synthetic path.
+        // Match via switch: the InferIsolatedConformances trap makes DropReason's Equatable
+        // conformance unusable from the nonisolated #expect context (mirrors backpressure test).
+        for reason in reasons {
+            if case .encoderHoldDrops = reason {} else {
+                Issue.record("expected .encoderHoldDrops, got \(reason)")
+            }
+        }
     }
 
     // MARK: - Pre-anchor frame routing

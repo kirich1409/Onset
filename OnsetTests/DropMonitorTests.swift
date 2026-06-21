@@ -529,9 +529,7 @@ struct DropMonitorHealthTests {
         // Latch must not reset after recovery.
         #expect(health.sessionEverDegraded == true)
         // dominantCause must remain set (invariant: non-.notDegraded iff sessionEverDegraded).
-        // `!=` requires the Equatable conformance (InferIsolatedConformances → @MainActor);
-        // `!(lhs == rhs)` binds the concrete nonisolated `==` witness directly.
-        #expect(!(health.dominantCause == .notDegraded))
+        #expect(health.dominantCause != .notDegraded)
     }
 
     // MARK: Test 3 — dominant cause reflects concentrated backpressure source
@@ -692,15 +690,11 @@ struct DropHealthSnapshotEquatableTests {
         #expect(lhs == rhs)
     }
 
-    // NOTE: `a != b` requires the Equatable conformance which is @MainActor-inferred under
-    // InferIsolatedConformances — unusable in #expect's nonisolated macro expansion.
-    // `!(lhs == rhs)` binds the concrete nonisolated `==` witness and compiles fine.
-
     @Test("snapshots differing in dominantCause are not equal")
     func differingDominantCause_notEqual() {
         let lhs = DropHealthSnapshot(counters: baseCounters, sessionEverDegraded: true, dominantCause: .writer)
         let rhs = DropHealthSnapshot(counters: baseCounters, sessionEverDegraded: true, dominantCause: .encode)
-        #expect(!(lhs == rhs))
+        #expect(lhs != rhs)
     }
 
     @Test("snapshots differing in sessionEverDegraded are not equal")
@@ -709,7 +703,7 @@ struct DropHealthSnapshotEquatableTests {
         let rhs = DropHealthSnapshot(
             counters: baseCounters, sessionEverDegraded: false, dominantCause: .notDegraded
         )
-        #expect(!(lhs == rhs))
+        #expect(lhs != rhs)
     }
 
     @Test("snapshots differing in a counter field are not equal")
@@ -721,6 +715,408 @@ struct DropHealthSnapshotEquatableTests {
         )
         let lhs = DropHealthSnapshot(counters: baseCounters, sessionEverDegraded: true, dominantCause: .writer)
         let rhs = DropHealthSnapshot(counters: otherCounters, sessionEverDegraded: true, dominantCause: .writer)
-        #expect(!(lhs == rhs))
+        #expect(lhs != rhs)
+    }
+}
+
+// MARK: - DropMonitorCaptureBackpressureTests
+
+/// Tests for issue #100 fix: `.captureBackpressureDrops` must fold into the `captureDrops`
+/// counter and must NOT drive the degraded-state window or post-stop alert.
+///
+/// Verifies:
+/// - capture overflow increments `captureDrops` counter (not `encoderBackpressureDrops`)
+/// - capture overflow never sets `sessionEverDegraded` latch, even above the backpressure threshold
+/// - `degradedWarning` (which delegates to `sessionEverDegraded`) stays `false`
+/// - genuine encoder-gate (`encoderBackpressureDrops`) still drives the alert
+@Suite("DropMonitor — captureBackpressureDrops counter routing (#100)")
+struct DropMonitorCaptureBackpressureTests {
+    // Large threshold: capture-overflow drops must NOT cross it, but we send many to be sure.
+    private let windowSeconds = 2.0
+    private let threshold = 3
+
+    // MARK: Test 1 — capture overflow increments captureDrops, not encoderBackpressureDrops
+
+    /// A `.captureBackpressureDrops` event must increment `captureDrops` and leave
+    /// `encoderBackpressureDrops` unchanged.
+    @Test("captureBackpressureDrops increments captureDrops counter, not encoderBackpressureDrops")
+    func captureBackpressure_incrementsCaptureDrops() async {
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        let pts = CMTime(value: 1000, timescale: 1000)
+        continuation.yield(DropEvent(
+            reason: .captureBackpressureDrops, source: .captureScreen, count: 5, detectedAt: pts
+        ))
+        continuation.finish()
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        #expect(health.counters.captureDrops == 5)
+        #expect(health.counters.encoderBackpressureDrops == 0)
+        #expect(health.counters.cfrNormalizationDrops == 0)
+    }
+
+    // MARK: Test 2 — capture overflow above threshold does NOT set degraded latch
+
+    /// Sending more `.captureBackpressureDrops` than the degraded threshold within the window
+    /// must NOT set `sessionEverDegraded` — capture overflow is not encoder/disk pressure.
+    @Test("captureBackpressureDrops above threshold does NOT set sessionEverDegraded latch")
+    func captureBackpressure_aboveThreshold_noLatch() async {
+        // threshold = 3, window = 2 s — send threshold+10 all within window to guarantee a
+        // false-positive if the routing bug were reintroduced.
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        let pts = CMTime(value: 1000, timescale: 1000)
+        // threshold + 10 drops: if any were fed to the window, this would degrade.
+        continuation.yield(DropEvent(
+            reason: .captureBackpressureDrops,
+            source: .captureCameraVideo,
+            count: self.threshold + 10,
+            detectedAt: pts
+        ))
+        continuation.finish()
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        #expect(health.sessionEverDegraded == false)
+        #expect(health.dominantCause == .notDegraded)
+    }
+
+    // MARK: Test 3 — degradedWarning false on capture overflow (AC-9 alert decoupling)
+
+    /// `RecordingResult.degradedWarning` delegates to `sessionEverDegraded`. This test
+    /// builds a `RecordingResult` from a `DropHealthSnapshot` produced by pure capture
+    /// overflow and asserts the post-stop alert does not fire.
+    @Test("captureBackpressureDrops — degradedWarning false (alert decoupled from capture overflow)")
+    func captureBackpressure_degradedWarning_isFalse() async {
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        let pts = CMTime(value: 1000, timescale: 1000)
+        continuation.yield(DropEvent(
+            reason: .captureBackpressureDrops,
+            source: .captureScreen,
+            count: 100,
+            detectedAt: pts
+        ))
+        continuation.finish()
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        // Synthesise a RecordingResult to exercise the exact degradedWarning path.
+        let result = RecordingResult.empty(health)
+        #expect(result.degradedWarning(threshold: self.threshold) == false)
+    }
+
+    // MARK: Test 4 — encoderBackpressureDrops still drives the alert
+
+    /// Regression guard: genuine encoder-gate drops must still set `sessionEverDegraded`
+    /// and `degradedWarning` after the routing change.
+    @Test("encoderBackpressureDrops above threshold still sets sessionEverDegraded (regression guard)")
+    func encoderBackpressure_aboveThreshold_setsLatch() async {
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        let pts = CMTime(value: 1000, timescale: 1000)
+        // threshold+1 in one batch — must cross the window and set the latch.
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops,
+            source: .encode,
+            count: self.threshold + 1,
+            detectedAt: pts
+        ))
+        continuation.finish()
+
+        // Poll until the latch is set (actor processes the event asynchronously).
+        for _ in 0..<200 {
+            if await monitor.snapshot().sessionEverDegraded { break }
+            await Task.yield()
+        }
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        #expect(health.sessionEverDegraded == true)
+        let result = RecordingResult.empty(health)
+        #expect(result.degradedWarning(threshold: self.threshold) == true)
+    }
+
+    // MARK: Test 5 — mixed: capture overflow + encoder drops; only encoder sets latch
+
+    /// When both reasons arrive, `captureDrops` and `encoderBackpressureDrops` accumulate
+    /// independently; the latch is set only when encoder drops cross the threshold.
+    @Test("mixed captureBackpressure + encoderBackpressure — counters independent, latch set by encoder only")
+    func mixed_captureAndEncoder_countersSeparate() async {
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        let pts = CMTime(value: 1000, timescale: 1000)
+        // Capture overflow: many drops, must NOT degrade.
+        continuation.yield(DropEvent(
+            reason: .captureBackpressureDrops,
+            source: .captureScreen,
+            count: 50,
+            detectedAt: pts
+        ))
+        // Encoder drop: exactly threshold+1 → crosses the window.
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops,
+            source: .encode,
+            count: self.threshold + 1,
+            detectedAt: pts
+        ))
+        continuation.finish()
+
+        for _ in 0..<200 {
+            if await monitor.snapshot().sessionEverDegraded { break }
+            await Task.yield()
+        }
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        #expect(health.counters.captureDrops == 50)
+        #expect(health.counters.encoderBackpressureDrops == self.threshold + 1)
+        // Only encoder drops set the latch.
+        #expect(health.sessionEverDegraded == true)
+    }
+}
+
+// MARK: - encoderHoldDrops never degrades (#200)
+
+/// `.encoderHoldDrops` carries SYNTHETIC catch-up hold frames (repeats of the last real frame),
+/// which lose no user content when dropped. These tests assert the routing decision in
+/// `DropMonitor.ingest`:
+/// - hold drops NEVER set `sessionEverDegraded`, even far above the degraded threshold;
+/// - hold drops NEVER leak into the user-facing `DropCounters` (`encoderBackpressureDrops`,
+///   `captureDrops`, `cfrNormalizationDrops`);
+/// - hold drops STILL appear in the per-source diagnostic breakdown (`encode` bucket);
+/// - genuine `.encoderBackpressureDrops` still drives the alert (no over-suppression).
+@Suite("DropMonitor — encoderHoldDrops never degrades (#200)")
+struct DropMonitorHoldDropsTests {
+    private let windowSeconds = 2.0
+    private let threshold = 3
+
+    // MARK: Test 1 — hold drops far above threshold never latch, never inflate user counters
+
+    /// A burst of `.encoderHoldDrops` far exceeding the degraded threshold within the window must
+    /// NOT set `sessionEverDegraded` and must NOT increment any `DropCounters` field — while still
+    /// landing in the `encode` diagnostic bucket. Under the OLD code these holds carried
+    /// `.encoderBackpressureDrops` and would have latched degraded and inflated the user count.
+    @Test("encoderHoldDrops above threshold — no latch, user counters zero, visible in breakdown")
+    func holdDrops_aboveThreshold_neverDegradesNorInflates() async {
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        let pts = CMTime(value: 1000, timescale: 1000)
+        // A whole catch-up batch worth of holds — far past threshold. If any fed the window, this
+        // would degrade; if any landed on encoderBackpressureDrops, the user count would inflate.
+        continuation.yield(DropEvent(
+            reason: .encoderHoldDrops,
+            source: .encode,
+            count: self.threshold + 50,
+            detectedAt: pts
+        ))
+        continuation.finish()
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        // Never degraded — the one-way latch stays clear.
+        #expect(health.sessionEverDegraded == false)
+        #expect(health.dominantCause == .notDegraded)
+        // User-facing dropped-frames counters are NOT inflated by synthetic holds.
+        #expect(health.counters.encoderBackpressureDrops == 0)
+        #expect(health.counters.captureDrops == 0)
+        #expect(health.counters.cfrNormalizationDrops == 0)
+        // The post-stop warning must not fire from hold drops alone.
+        let result = RecordingResult.empty(health)
+        #expect(result.degradedWarning(threshold: self.threshold) == false)
+
+        // But the holds REMAIN observable in the per-source diagnostic breakdown (encode bucket).
+        let breakdown = await monitor.breakdownSnapshot()
+        #expect(breakdown.encode == self.threshold + 50)
+    }
+
+    // MARK: Test 2 — real backpressure still degrades alongside hold drops (no over-suppression)
+
+    /// Hold drops and genuine encoder-backpressure drops arrive together: the holds stay inert
+    /// while the real-content drops still cross the threshold and set the latch. Proves the fix
+    /// did not over-suppress the existing degraded behavior — only synthetic holds are spared.
+    @Test("encoderHoldDrops inert while real encoderBackpressureDrops still sets the latch")
+    func holdDrops_doNotSuppressRealBackpressureDegradation() async {
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        let pts = CMTime(value: 1000, timescale: 1000)
+        // Many synthetic holds — must NOT touch the window.
+        continuation.yield(DropEvent(
+            reason: .encoderHoldDrops, source: .encode, count: 50, detectedAt: pts
+        ))
+        // Genuine real-content backpressure: threshold+1 → crosses the window, sets the latch.
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops, source: .encode, count: self.threshold + 1, detectedAt: pts
+        ))
+        continuation.finish()
+
+        for _ in 0..<200 {
+            if await monitor.snapshot().sessionEverDegraded { break }
+            await Task.yield()
+        }
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        // Real backpressure still degrades — the fix is not over-suppressing.
+        #expect(health.sessionEverDegraded == true)
+        // Only the real-content drops are reflected in the user-facing counter; holds excluded.
+        #expect(health.counters.encoderBackpressureDrops == self.threshold + 1)
+        let result = RecordingResult.empty(health)
+        #expect(result.degradedWarning(threshold: self.threshold) == true)
+    }
+}
+
+// MARK: - stop() drains buffered tail (#202)
+
+/// Regression guard for #202: `stop()` must DRAIN the observe tasks (await without cancelling),
+/// not cancel them. Cancelling truncates the `for await event in drops` iteration immediately,
+/// discarding any `DropEvent` still buffered in the source stream — so the final
+/// `breakdownSnapshot()` / `snapshot()` would under-count the tail.
+///
+/// ## Discrimination caveat (why this is a contract test, not a race-reproducer)
+///
+/// This asserts the contract — feed N events, finish, `stop()`, ALL N counted — which is
+/// deterministic under drain-only for any N. It does NOT deterministically reproduce the
+/// cancel-first bug in-process: `stop()` begins with `await tickTask?.value`, and that suspension
+/// hands the actor away long enough for the observe task to drain the entire (unbounded-buffered)
+/// stream of trivial `ingest` calls and end naturally — so the subsequent `task.cancel()` is a
+/// no-op even under the old code. Empirically verified: a temporary cancel-first revert still
+/// counted all N at N = 50_000 (the in-process race is un-loseable for trivial ingests through the
+/// public API). The bug bites in production where a real burst cannot drain inside that window.
+/// Keeping the contract assertion small and fast is the right trade — it stays green against future
+/// code and never flakes; adding a production `ingest` seam purely to lose the race would violate
+/// minimal-diff.
+@Suite("DropMonitor — stop() drains buffered tail (#202)", .timeLimit(.minutes(1)))
+struct DropMonitorStopDrainTests {
+    private let windowSeconds = 2.0
+    private let threshold = 3
+
+    /// All buffered diagnostic-breakdown drops are counted after `stop()` — none lost to truncation.
+    @Test("stop drains the full buffered tail into the breakdown counters")
+    func stop_drainsBufferedTail_breakdownCountsAll() async {
+        let monitor = DropMonitor(windowSeconds: self.windowSeconds, threshold: self.threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        // Buffer the events, then finish the stream. Drain-only stop() must ingest every one before
+        // reading the counters (see the suite caveat on why this is a contract, not a race repro).
+        let eventCount = 64
+        let pts = CMTime(value: 1000, timescale: 1000)
+        for _ in 0..<eventCount {
+            continuation.yield(DropEvent(
+                reason: .captureDrop, source: .captureScreen, count: 1, detectedAt: pts
+            ))
+        }
+        continuation.finish()
+
+        // Drain-only stop: must read every buffered event before snapshotting the counters.
+        await monitor.stop()
+
+        // Diagnostic breakdown counts ALL events — the drained tail is never lost.
+        let breakdown = await monitor.breakdownSnapshot()
+        #expect(breakdown.captureScreen == eventCount)
+
+        // The cumulative reason counter must also reflect the full tail.
+        let health = await monitor.snapshot()
+        #expect(health.counters.captureDrops == eventCount)
+    }
+
+    /// `stop()` completes (does not hang) when the observed stream is finished — the drain-only
+    /// precondition. If this test returns at all, drain-only terminated; a regression that left a
+    /// stream unfinished here would hang and trip the suite time limit.
+    @Test("stop completes without hanging when the observed stream is finished")
+    func stop_completes_whenStreamFinished() async {
+        let monitor = DropMonitor(windowSeconds: self.windowSeconds, threshold: self.threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+        continuation.finish()
+
+        await monitor.stop()
+        // Reaching here proves stop() returned — no deadlock on a finished stream.
+    }
+
+    /// `cancelObservation()` (failed-start path) terminates even when the observed stream is NOT
+    /// finished. Drain-only would hang here; cancellation ends the observe task regardless. This is
+    /// the deadlock guard for `teardownAfterFailedStart()`.
+    @Test("cancelObservation completes without hanging when the observed stream stays open")
+    func cancelObservation_completes_whenStreamOpen() async {
+        let monitor = DropMonitor(windowSeconds: self.windowSeconds, threshold: self.threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        // Deliberately do NOT finish the stream — mirrors a writer.drops left open on a failed start.
+        await monitor.cancelObservation()
+        // Reaching here proves cancelObservation() returned despite the open stream.
+
+        // Keep the continuation alive past the assertion so the stream is not finished by deinit
+        // before cancelObservation() ran.
+        continuation.finish()
+    }
+}
+
+// MARK: - NonisolatedInequalityRegressionTests (#187)
+
+/// Regression for #187: `!=` on the pipeline value types must be callable from a `nonisolated`
+/// context. The default `Equatable` `!=` extension binds the *conformance*, which under
+/// `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` + `InferIsolatedConformances` is inferred
+/// `@MainActor` when declared in a bare `extension X: Equatable`. Moving the conformance onto the
+/// `nonisolated` type decl keeps it nonisolated so `!=` compiles off the main actor.
+///
+/// `compareOffMainActor` is a free `nonisolated` function — its body is exactly the call site that
+/// failed to compile before the fix. The assertions inside are `Bool` checks (no `#expect` in the
+/// nonisolated helper, since the macro expands main-actor-isolated); the test merely calls it.
+nonisolated private func compareOffMainActor() -> Bool {
+    let firstDropCount = 1
+    let secondDropCount = 2
+    let snapshotA = DropHealthSnapshot(
+        counters: DropCounters(encoderBackpressureDrops: firstDropCount, captureDrops: 0, cfrNormalizationDrops: 0),
+        sessionEverDegraded: true,
+        dominantCause: .writer
+    )
+    let snapshotB = DropHealthSnapshot(
+        counters: DropCounters(encoderBackpressureDrops: secondDropCount, captureDrops: 0, cfrNormalizationDrops: 0),
+        sessionEverDegraded: true,
+        dominantCause: .encode
+    )
+
+    // Each `!=` below would fail to compile from this nonisolated context before #187.
+    let snapshotsDiffer = snapshotA != snapshotB
+    let causesDiffer = DropCause.writer != DropCause.encode
+    let sourcesDiffer = DropSource.captureScreen != DropSource.encode
+    return snapshotsDiffer && causesDiffer && sourcesDiffer
+}
+
+@Suite("Pipeline value types — != from nonisolated context (#187)")
+struct NonisolatedInequalityRegressionTests {
+    /// Compiling + passing proves the conformances are nonisolated and `!=` is reachable off the
+    /// main actor — the exact construct that failed to compile before the fix.
+    @Test("!= on DropHealthSnapshot / DropCause / DropSource works from a nonisolated function")
+    func inequality_compilesAndHolds_fromNonisolatedContext() {
+        #expect(compareOffMainActor())
     }
 }

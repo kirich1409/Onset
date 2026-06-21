@@ -36,6 +36,12 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
     nonisolated let sourceRevocationStream: AsyncStream<RecordingRevocation>
     private let revocationContinuation: AsyncStream<RecordingRevocation>.Continuation
 
+    nonisolated let captureActiveStream: AsyncStream<Void>
+    private let captureActiveContinuation: AsyncStream<Void>.Continuation
+
+    /// Fake session directory — a sentinel path used in coordinator tests.
+    nonisolated let sessionDirectory = URL(filePath: "/tmp/onset-fake-session")
+
     private(set) var startCalled = false
     private(set) var stopCalled = false
     private(set) var startCount = 0
@@ -43,6 +49,14 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
 
     /// When set, `start()` throws this (AC-6 / AC-11 path).
     var startError: (any Error)?
+
+    /// When `true`, `captureActiveStream` is never yielded — simulates consent denied / timeout.
+    var simulateCaptureNeverActivates = false
+
+    /// When `true`, `start()` suspends until `releaseStart()` is called.
+    /// Use to simulate a stop() that races the `session.start()` suspension window (Fix 2 scenario b).
+    var gateStartEnabled = false
+    private let (gateStream, gateContinuation) = AsyncStream.makeStream(of: Void.self)
 
     /// The health snapshot returned by `currentDrops()` while recording.
     var liveDrops = DropHealthSnapshot(
@@ -62,21 +76,50 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
         let (revocationStream, revocationContinuation) = AsyncStream.makeStream(of: RecordingRevocation.self)
         self.sourceRevocationStream = revocationStream
         self.revocationContinuation = revocationContinuation
+        // Relies on the DEFAULT .unbounded buffering: a yield that fires before the coordinator
+        // subscribes is retained in the buffer. A .bufferingNewest/Oldest(1) policy would silently
+        // drop it and leave the coordinator hanging until the 30 s timeout.
+        let (captureActiveStream, captureActiveContinuation) = AsyncStream.makeStream(of: Void.self)
+        self.captureActiveStream = captureActiveStream
+        self.captureActiveContinuation = captureActiveContinuation
     }
 
     func start(permissions: EffectivePermissions) async throws {
         self.startCalled = true
         self.startCount += 1
         if let startError { throw startError }
+        // When gateStartEnabled, suspend here until releaseStart() is called. This lets a test
+        // call coordinator.stop() while start() is blocked — making activationTask still nil at
+        // that point — to exercise the Fix 2 (b) race window.
+        if self.gateStartEnabled {
+            for await _ in self.gateStream {
+                break
+            }
+        }
+        // Default behaviour: immediately signal that capture is active, mirroring a live session
+        // where consent is pre-granted and the first frame arrives quickly. Tests that want to
+        // control the timing call emitCaptureActive() / finishCaptureActiveWithoutActivation()
+        // manually and must set simulateCaptureNeverActivates = true to suppress the auto-emit.
+        if !self.simulateCaptureNeverActivates {
+            self.captureActiveContinuation.yield(())
+            self.captureActiveContinuation.finish()
+        }
+    }
+
+    /// Test hook: unblock a `start()` suspension gated by `gateStartEnabled`.
+    func releaseStart() {
+        self.gateContinuation.yield(())
+        self.gateContinuation.finish()
     }
 
     func stop() async -> RecordingResult {
         self.stopCalled = true
         self.stopCount += 1
-        // The live session finishes both streams on stop; mirror that so the coordinator's
+        // The live session finishes all streams on stop; mirror that so the coordinator's
         // subscription loops end deterministically.
         self.stateContinuation.finish()
         self.revocationContinuation.finish()
+        self.captureActiveContinuation.finish()
         return self.result
     }
 
@@ -92,6 +135,18 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
     /// Test hook: push a revocation event into the stream (the coordinator is the sole consumer).
     func emitRevocation(_ revocation: RecordingRevocation) {
         self.revocationContinuation.yield(revocation)
+    }
+
+    /// Test hook: signal capture activation (first real screen frame arrived).
+    func emitCaptureActive() {
+        self.captureActiveContinuation.yield(())
+        self.captureActiveContinuation.finish()
+    }
+
+    /// Test hook: finish captureActiveStream WITHOUT yielding — simulates consent denied or
+    /// stream terminal-stop arriving before any real frame.
+    func finishCaptureActiveWithoutActivation() {
+        self.captureActiveContinuation.finish()
     }
 }
 
@@ -129,7 +184,8 @@ private enum CoordinatorFixtures {
                 cameraDescription: nil,
                 microphoneDescription: nil
             ),
-            origin: origin
+            origin: origin,
+            config: .mvpDefault
         )
     }
 
@@ -182,7 +238,8 @@ private enum CoordinatorFixtures {
                 cameraDescription: "FaceTime HD · 1080p30",
                 microphoneDescription: "MacBook Pro — микрофон"
             ),
-            origin: .main
+            origin: .main,
+            config: .mvpDefault
         )
     }
 }
@@ -223,12 +280,13 @@ private func eventuallyMain(timeoutMs: Int = 8000, _ condition: () -> Bool) asyn
 @Suite("RecordingCoordinator — lifecycle (#12 Phase 0)")
 @MainActor
 struct RecordingCoordinatorTests {
-    @Test("start → phase=.recording, checklist captured, windows choreographed")
+    @Test("start → phase=.recording, checklist captured, windows choreographed, notifier called")
     func start_transitionsToRecording() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let notifier = FakeRecordingStartNotifier()
         var openedRecording = false
         var dismissedMain = false
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake }, notifier: notifier)
         coordinator.bindWindowActions(
             openRecordingWindow: { openedRecording = true },
             dismissMainWindow: { dismissedMain = true },
@@ -244,8 +302,10 @@ struct RecordingCoordinatorTests {
         #expect(coordinator.checklist.screenDescription == "1280×720 @ 60 Гц")
         #expect(coordinator.checklist.cameraDescription == "FaceTime HD · 1080p30")
         #expect(coordinator.checklist.microphoneDescription == "MacBook Pro — микрофон")
-        #expect(openedRecording, "recording window must open on start (AC-3)")
+        // #242 — menu-bar-first: recording window is NOT opened automatically on start.
+        #expect(!openedRecording, "recording window must NOT open on start (menu-bar-first, #242)")
         #expect(dismissedMain, "main window must hide on start (AC-3)")
+        #expect(notifier.notifyCallCount == 1, "start notifier must fire exactly once")
 
         await coordinator.stop()
     }
@@ -288,7 +348,7 @@ struct RecordingCoordinatorTests {
 
         try await coordinator.start(CoordinatorFixtures.request())
         // elapsed starts at 0; the tick loop derives it from the start Date. After ~1.1s it is ≥ 1.
-        let ticked = await eventuallyMain(timeoutMs: 3000) { coordinator.elapsed >= 1 }
+        let ticked = await eventuallyMain(timeoutMs: 8000) { coordinator.elapsed >= 1 }
         #expect(ticked, "elapsed must increment from the start Date while recording")
 
         await coordinator.stop()
@@ -312,8 +372,8 @@ struct RecordingCoordinatorTests {
         #expect(coordinator.lastDegradedWarning == false)
         #expect(coordinator.drops.encoderBackpressureDrops == 0, "drops propagate from result (clean path)")
         #expect(coordinator.lastWriteError == nil, "no write error on clean result")
-        #expect(revealed?.count == 1, "finished files must be revealed in Finder")
-        #expect(revealed?.first?.lastPathComponent == "onset-coordinator-screen.mp4", "revealed URL matches result")
+        #expect(revealed?.count == 1, "session folder must be revealed in Finder")
+        #expect(revealed?.first?.lastPathComponent == "onset-fake-session", "revealed URL is the session directory")
     }
 
     @Test("stop → phase returns to .idle when started from the menu bar")
@@ -327,26 +387,54 @@ struct RecordingCoordinatorTests {
         #expect(coordinator.phase == .idle, "menu-bar origin → return to .idle")
     }
 
-    @Test("stop computes the degraded warning from the result")
-    func stop_computesDegradedWarning() async throws {
-        // sessionEverDegraded: true makes the warning fire — not the raw backpressureDrops count.
-        let fake = FakeRecordingControlling(
-            result: CoordinatorFixtures.result(backpressureDrops: 128, sessionEverDegraded: true)
-        )
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+    // MARK: - menuBar + write error opens main window (#131)
 
-        try await coordinator.start(CoordinatorFixtures.request())
+    @Test("stop menuBar + degraded drops but saved → returns to .idle, no window open, no pending alert")
+    func stop_menuBarWithDegradedDrops_returnsToIdleWithoutOpeningWindow() async throws {
+        let fake = FakeRecordingControlling(
+            result: CoordinatorFixtures.result(backpressureDrops: 64)
+        )
+        let openCounter = Counter()
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: { openCounter.increment() }
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request(origin: .menuBar))
         await coordinator.stop()
 
-        #expect(coordinator.lastDegradedWarning == true, "degradedWarning must come from sessionEverDegraded latch")
-        #expect(coordinator.lastDroppedFrames == 128, "lastDroppedFrames must be the frozen snapshot from stop()")
-        #expect(coordinator.drops.encoderBackpressureDrops == 128, "final drops come from the result")
+        #expect(coordinator.phase == .idle, "degraded but saved menu-bar stop → return to .idle origin")
+        #expect(openCounter.value == 0, "degraded drops no longer open the main window")
+        #expect(!coordinator.hasPendingAlert, "degraded warning removed → nothing to present")
     }
 
-    @Test("stop produces no degraded warning when sessionEverDegraded is false (even with backpressure drops)")
-    func stop_noDegradedWarning_whenNotEverDegraded() async throws {
-        // Key regression guard: high backpressureDrops but sessionEverDegraded == false means
-        // the drops were too scattered to trip the window. The post-stop alert must NOT fire.
+    @Test("stop menuBar + write error → opens main window so alert can be presented (#131)")
+    func stop_menuBarWithWriteError_opensMainWindow() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.failedWriteResult())
+        let openCounter = Counter()
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: { openCounter.increment() }
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request(origin: .menuBar))
+        await coordinator.stop()
+
+        #expect(coordinator.phase == .main, "menuBar + write error → must open main window (phase .main)")
+        #expect(openCounter.value == 1, "openMainWindow must be called exactly once")
+        #expect(coordinator.hasPendingAlert, "hasPendingAlert must still be true until user acknowledges")
+    }
+
+    @Test("stop computes the degraded warning from the result")
+    func stop_computesDegradedWarning() async throws {
+        // 128 backpressure drops is well above the default postStopDropWarningThreshold (5) —
+        // lastDegradedWarning must be true because lastDroppedFrames >= threshold.
         let fake = FakeRecordingControlling(
             result: CoordinatorFixtures.result(backpressureDrops: 128, sessionEverDegraded: false)
         )
@@ -355,8 +443,25 @@ struct RecordingCoordinatorTests {
         try await coordinator.start(CoordinatorFixtures.request())
         await coordinator.stop()
 
-        #expect(coordinator.lastDegradedWarning == false, "no warning when session was never degraded")
-        #expect(coordinator.lastDroppedFrames == 128, "lastDroppedFrames still tracked for reference")
+        #expect(coordinator.lastDegradedWarning == true, "128 drops >= threshold → warning fires")
+        #expect(coordinator.lastDroppedFrames == 128, "lastDroppedFrames must be the frozen snapshot from stop()")
+        #expect(coordinator.drops.encoderBackpressureDrops == 128, "final drops come from the result")
+    }
+
+    @Test("stop produces no degraded warning when backpressure drops are below postStopDropWarningThreshold")
+    func stop_noDegradedWarning_whenDropsBelowThreshold() async throws {
+        // AC-9 regression guard (#132): a single isolated backpressure drop (count=1) must NOT fire
+        // the post-stop alert — the threshold (default 5) must be reached cumulatively.
+        let fake = FakeRecordingControlling(
+            result: CoordinatorFixtures.result(backpressureDrops: 1, sessionEverDegraded: false)
+        )
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        await coordinator.stop()
+
+        #expect(coordinator.lastDegradedWarning == false, "single drop is below threshold — no warning")
+        #expect(coordinator.lastDroppedFrames == 1, "lastDroppedFrames still tracked for reference")
     }
 
     @Test("stop is idempotent across concurrent paths — teardown runs once")
@@ -413,7 +518,7 @@ struct RecordingCoordinatorTests {
 
         try await coordinator.start(CoordinatorFixtures.request())
         // Wait until at least one tick so elapsed > 0 and the loop is confirmed running.
-        let ticked = await eventuallyMain(timeoutMs: 3000) { coordinator.elapsed >= 1 }
+        let ticked = await eventuallyMain(timeoutMs: 8000) { coordinator.elapsed >= 1 }
         #expect(ticked, "prerequisite: elapsed must tick to at least 1 before stopping")
 
         await coordinator.stop()
@@ -427,7 +532,7 @@ struct RecordingCoordinatorTests {
 
     @Test("AC-9 degraded-warning lifecycle: set on degraded stop, cleared by acknowledge, absent after clean session")
     func degradedWarning_lifecycle() async throws {
-        // Session 1: result carries sessionEverDegraded=true.
+        // Session 1: result carries 64 backpressure drops — well above the default threshold (5).
         let fake1 = FakeRecordingControlling(
             result: CoordinatorFixtures.result(backpressureDrops: 64, sessionEverDegraded: true)
         )
@@ -824,6 +929,291 @@ struct RecordingCoordinatorWriterFailedTests {
         #expect(coordinator.phase == .recording, "phase must remain .recording — screen still records")
 
         await coordinator.stop()
+    }
+}
+
+// MARK: - Screen consent ordering fix (#171)
+
+/// Tests for the fix that gates recording UI on the first real screen frame.
+///
+/// On macOS 26 `SCStream.startCapture()` returns before the user grants consent. The coordinator
+/// must NOT transition to `.recording`, start the elapsed timer, or open the recording window until
+/// the first real screen frame arrives (`captureActiveStream` yields). These tests exercise:
+///
+/// 1. Phase stays pre-recording until activation signal arrives.
+/// 2. Consent denied / stream terminal-stop → clean revert, `.captureDidNotActivate` thrown.
+/// 3. Timeout (stream never yields, never finishes) → clean revert, `.captureDidNotActivate` thrown.
+/// 4. User-cancel during consent wait → clean revert, no error thrown.
+///
+/// Each test controls the activation timing manually by setting
+/// `fake.simulateCaptureNeverActivates = true` and calling `emitCaptureActive()` or
+/// `finishCaptureActiveWithoutActivation()` at the right moment.
+@Suite("RecordingCoordinator — screen consent ordering (#171)")
+@MainActor
+struct RecordingCoordinatorConsentOrderingTests {
+    @Test("start does not transition to .recording until captureActiveStream yields")
+    func start_doesNotTransitionToRecording_beforeFirstFrame() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        // Suppress auto-emit so we control exactly when activation fires.
+        fake.simulateCaptureNeverActivates = true
+
+        var openedRecording = false
+        var dismissedMain = false
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        coordinator.bindWindowActions(
+            openRecordingWindow: { openedRecording = true },
+            dismissMainWindow: { dismissedMain = true },
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+
+        // Launch start() but do NOT await it yet — activation has not fired.
+        let startTask = Task { try await coordinator.start(CoordinatorFixtures.request()) }
+
+        // Give the task a chance to run up to the activation wait.
+        // The 50 ms sleep is necessary here: we must observe the state *while suspended in the wait*,
+        // so there is an inherent ordering dependency on the Task being scheduled first.
+        try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+
+        // Phase must still be pre-recording and UI must not have opened.
+        #expect(coordinator.phase != .recording, "phase must not flip to .recording before first frame (#171)")
+        #expect(coordinator.elapsed == 0, "elapsed must be 0 before first frame (#171)")
+        #expect(!openedRecording, "recording window must not open before first frame (#171)")
+        #expect(!dismissedMain, "main window must not dismiss before first frame (#171)")
+
+        // Now signal activation — coordinator must transition.
+        fake.emitCaptureActive()
+
+        try await startTask.value
+
+        #expect(coordinator.phase == .recording, "phase must flip to .recording after first frame")
+        // #242 — menu-bar-first: recording window is never opened automatically.
+        #expect(!openedRecording, "recording window must NOT open, even after first frame (menu-bar-first, #242)")
+        #expect(dismissedMain, "main window must dismiss after first frame")
+        // Fix #6: startedAt must be set — timer anchors to first-frame time.
+        #expect(coordinator.startedAt != nil, "startedAt must be set after activation (#171)")
+
+        await coordinator.stop()
+    }
+
+    @Test("start reverts promptly on deny/terminal-stop — not after full timeout (fix #1 regression)")
+    func start_revertsToPreRecording_onDenyOrTerminalStop() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        fake.simulateCaptureNeverActivates = true
+
+        // Use a LARGE timeout (100 s) so that if stream-finish is NOT the trigger, the test would
+        // block for 100 s (deterministic proof that fix #1 drives the revert, not the timeout).
+        let coordinator = RecordingCoordinator(
+            sessionFactory: { _ in fake },
+            activationTimeoutSeconds: 100
+        )
+        coordinator.enterMain()
+
+        var openedRecording = false
+        coordinator.bindWindowActions(
+            openRecordingWindow: { openedRecording = true },
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+
+        // Launch start() — it will wait for activation.
+        let startTask = Task {
+            try await coordinator.start(CoordinatorFixtures.request())
+        }
+
+        // Give the task a chance to enter the activation wait.
+        try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+
+        // Simulate consent denied: stream finishes without yielding.
+        // The revert must happen PROMPTLY (not after the 100-second timeout).
+        fake.finishCaptureActiveWithoutActivation()
+
+        // start() must throw .captureDidNotActivate (renamed from captureConsentDenied).
+        var threwCaptureDidNotActivate = false
+        do {
+            try await startTask.value
+        } catch let error as RecordingError {
+            if case .captureDidNotActivate = error { threwCaptureDidNotActivate = true }
+        }
+
+        #expect(
+            threwCaptureDidNotActivate,
+            "start() must throw .captureDidNotActivate when stream ends without activation"
+        )
+        #expect(coordinator.phase == .main, "phase must revert to pre-recording state after deny")
+        #expect(!openedRecording, "recording window must NOT have opened")
+        #expect(coordinator.elapsed == 0, "elapsed must be 0 — timer must not have started")
+        // Fix #6: session must have been stopped exactly once (no leak).
+        #expect(fake.stopCount == 1, "session must be stopped exactly once — no leak (#2)")
+    }
+
+    @Test("start reverts on timeout when captureActiveStream never yields and never finishes")
+    func start_revertsOnTimeout_whenStreamNeverActivates() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        // simulateCaptureNeverActivates=true AND never call finishCaptureActiveWithoutActivation
+        // → stream hangs forever. The injected tiny timeout drives the revert.
+        fake.simulateCaptureNeverActivates = true
+
+        // Use a tiny timeout (50 ms) so the test does not take 30 s.
+        let coordinator = RecordingCoordinator(
+            sessionFactory: { _ in fake },
+            activationTimeoutSeconds: 0.05
+        )
+        coordinator.enterMain()
+
+        var threwCaptureDidNotActivate = false
+        do {
+            try await coordinator.start(CoordinatorFixtures.request())
+        } catch let error as RecordingError {
+            if case .captureDidNotActivate = error { threwCaptureDidNotActivate = true }
+        }
+
+        #expect(threwCaptureDidNotActivate, "start() must throw .captureDidNotActivate on activation timeout")
+        #expect(coordinator.phase == .main, "phase must revert to .main after timeout")
+        #expect(coordinator.session == nil, "session must be nil after timeout — no leak (#2)")
+    }
+
+    @Test("stop() during consent wait reverts silently — no error thrown to caller")
+    func stop_duringConsentWait_revertsWithoutError() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        fake.simulateCaptureNeverActivates = true
+
+        let coordinator = RecordingCoordinator(
+            sessionFactory: { _ in fake },
+            activationTimeoutSeconds: 100
+        )
+        coordinator.enterMain()
+
+        let startTask = Task {
+            try await coordinator.start(CoordinatorFixtures.request())
+        }
+
+        // Give start() a chance to reach the activation wait.
+        try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+
+        // User cancels by pressing stop — must NOT produce an error alert.
+        await coordinator.stop()
+
+        var threwError = false
+        do {
+            try await startTask.value
+        } catch {
+            threwError = true
+        }
+
+        #expect(!threwError, "stop() during consent wait must not surface an error to the caller")
+        #expect(coordinator.phase == .main, "phase must return to .main after user cancel")
+        #expect(coordinator.session == nil, "session must be nil after user cancel — no leak (#2)")
+    }
+
+    // MARK: Fix 2 regression tests
+
+    /// Scenario (b): stop() arrives while session.start() is still suspended — activationTask is
+    /// nil at that point so Task.cancel() is a no-op. The cancel flag must survive the resume and
+    /// trigger a silent revert (phase stays .main, no error thrown).
+    ///
+    /// This is the regression test that catches the old bug: the original code reset
+    /// `activationCancelledByUser = false` at the TOP of the activation block (after the
+    /// `session.start()` await) — wiping the flag set by stop() and letting recording proceed.
+    @Test("stop() during session.start() suspension reverts silently (Fix 2b — no activationTask wipe)")
+    func stop_duringSessionStartSuspension_revertsWithoutError() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        // Gate session.start() so stop() can race it while activationTask is still nil.
+        fake.gateStartEnabled = true
+
+        var openedRecording = false
+        let coordinator = RecordingCoordinator(
+            sessionFactory: { _ in fake },
+            activationTimeoutSeconds: 100
+        )
+        coordinator.enterMain()
+        coordinator.bindWindowActions(
+            openRecordingWindow: { openedRecording = true },
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+
+        // Launch start() — it will suspend inside fake.start() (activationTask is nil here).
+        let startTask = Task {
+            try await coordinator.start(CoordinatorFixtures.request())
+        }
+
+        // Give start() a chance to reach the gate suspension.
+        try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+
+        // stop() sets activationCancelledByUser = true; activationTask is still nil so cancel is
+        // a no-op — this is the exact race that the old reset wiped.
+        await coordinator.stop()
+
+        // Unblock session.start() — auto-emit will fire (simulateCaptureNeverActivates is false)
+        // so captureActivated == true. The fix must catch the flag BEFORE the guard and revert.
+        fake.releaseStart()
+
+        var threwError = false
+        do {
+            try await startTask.value
+        } catch {
+            threwError = true
+        }
+
+        #expect(!threwError, "stop() during session.start() must revert silently, not throw")
+        #expect(coordinator.phase == .main, "phase must be .main after silent revert")
+        #expect(!openedRecording, "recording window must NOT open after cancel during session.start()")
+        // stop() in isStarting mode only calls cancelActivation() (does not stop the session itself);
+        // the fix adds session.stop() in the pre-guard cancel branch → stopCount == 1.
+        #expect(fake.stopCount == 1, "session must be stopped exactly once")
+    }
+
+    /// Scenario (a) deterministic variant: stop() races the activation wait after the stream has
+    /// already yielded. Implemented via the start-gate (same seam as scenario b) so the timing is
+    /// deterministic: gate keeps session.start() in suspension; stop() sets the flag; releaseStart()
+    /// fires auto-emit (captureActivated == true); pre-guard check catches the flag → silent revert.
+    ///
+    /// Note: the pure success-path race (stop after activationTask.value but before resume) has no
+    /// fake seam and is not representable deterministically — both tests fold through the start-gate.
+    @Test("stop() after activation yielded true reverts silently — pre-guard cancel check (Fix 2a)")
+    func stop_afterActivationYielded_revertsWithoutError() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        // Gate start() — same seam; after releaseStart() auto-emit fires giving captureActivated=true.
+        fake.gateStartEnabled = true
+
+        var openedRecording = false
+        let coordinator = RecordingCoordinator(
+            sessionFactory: { _ in fake },
+            activationTimeoutSeconds: 100
+        )
+        coordinator.enterMain()
+        coordinator.bindWindowActions(
+            openRecordingWindow: { openedRecording = true },
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+
+        let startTask = Task {
+            try await coordinator.start(CoordinatorFixtures.request())
+        }
+
+        try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+
+        // Set the cancel flag while start() is still suspended.
+        await coordinator.stop()
+
+        // Release the gate — captureActivated will be true; fix must revert via the pre-guard check.
+        fake.releaseStart()
+
+        var threwError = false
+        do {
+            try await startTask.value
+        } catch {
+            threwError = true
+        }
+
+        #expect(!threwError, "stop() before activation completes must revert silently, not throw")
+        #expect(coordinator.phase == .main, "phase must be .main after cancel-flag revert")
+        #expect(!openedRecording, "recording window must NOT open when cancel flag is set")
     }
 }
 

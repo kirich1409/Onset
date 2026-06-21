@@ -105,6 +105,11 @@ actor DualFileOutputStage {
         var state: WriterState = .live
 
         /// `true` while the writer is open and accepting audio/video.
+        ///
+        /// A faulted writer MUST remain `isLive` (i.e. `recordFault` must never flip `state` to
+        /// `.finalized`): `finishAll`/`finalizePipeline` skip `markFinished()` on non-live writers,
+        /// and `markFinished()` is what seals the `drops` stream. If a fault left `drops` open,
+        /// `DropMonitor.stop()` — which drains those streams — would hang on session stop (#202).
         var isLive: Bool {
             if case .live = self.state { return true }
             return false
@@ -116,6 +121,12 @@ actor DualFileOutputStage {
     /// The pipelines that are expected to produce a writer. The pending-audio buffer is held until
     /// every expected writer has been created (so each gets the identical replay), then released.
     private let expectedKinds: Set<RecordingPipelineKind>
+
+    /// Expected pipelines that were revoked BEFORE ever creating a writer (#201). Subtracted from
+    /// `expectedKinds` when deciding "all writers created", so pending audio destined for a pipeline
+    /// that will never exist is released instead of buffered forever. `expectedKinds` is a `let`
+    /// (immutable plan); this mutable set records which of those plans turned out dead at runtime.
+    private var deadKinds: Set<RecordingPipelineKind> = []
 
     /// Already-retimed mic buffers awaiting the first writer of each pipeline (drop-oldest cap).
     private var pendingAudio: [RetimedAudioBuffer] = []
@@ -476,10 +487,16 @@ actor DualFileOutputStage {
             // the cap can be hit before it exists — the earliest mic audio is then sacrificed and
             // the late writer's audio track simply starts later. Documented edge (AC-7 replay).
             self.pendingAudioDropped += 1
+            // Throttle the warning (#201): a never-finalised static pipeline drops ~47 buffers/s,
+            // which spammed one warning per sample for the whole session. Log only the FIRST drop
+            // and then every `maxPendingAudioBuffers`-th drop; the cumulative `pendingAudioDropped`
+            // count is carried in every line so no information is lost between throttled logs.
             let cap = Self.maxPendingAudioBuffers
-            self.logger.warning(
-                "Dropping oldest pending-audio buffer (cap=\(cap), total dropped: \(self.pendingAudioDropped))"
-            )
+            if self.pendingAudioDropped == 1 || self.pendingAudioDropped.isMultiple(of: cap) {
+                self.logger.warning(
+                    "Dropping oldest pending-audio buffer (cap=\(cap), total dropped: \(self.pendingAudioDropped))"
+                )
+            }
             self.pendingAudio.removeFirst()
         }
         self.pendingAudio.append(carrier)
@@ -499,7 +516,11 @@ actor DualFileOutputStage {
     }
 
     private func allWritersCreated() -> Bool {
-        self.expectedKinds.allSatisfy { self.writers[$0] != nil }
+        // Effective expected set excludes pipelines revoked before any writer (#201): a dead
+        // pipeline will never produce a writer, so pending audio must not wait on it forever.
+        // When the effective set is empty (every expected pipeline died before a writer existed),
+        // `allSatisfy` is vacuously true — pending audio is released rather than buffered forever.
+        self.expectedKinds.subtracting(self.deadKinds).allSatisfy { self.writers[$0] != nil }
     }
 
     // MARK: - Finalize
@@ -508,12 +529,25 @@ actor DualFileOutputStage {
     /// and removes it from the fan-out set so no further audio/video is routed to it. The other
     /// pipeline keeps recording.
     ///
-    /// No-op if the pipeline never produced a writer (e.g. a static screen that sent no frames
-    /// before the revoke) or was already finalised.
+    /// When the pipeline never produced a writer (e.g. a camera revoked before its first frame, or
+    /// a static screen that sent no frames before the revoke), it is marked dead (#201): it is
+    /// excluded from the effective expected set so any pending audio held for it is released instead
+    /// of buffered forever. No-op if the pipeline was already finalised (writer present, not live).
     func finalizePipeline(_ kind: RecordingPipelineKind) async {
-        guard var pipelineWriter = self.writers[kind], pipelineWriter.isLive else {
+        guard let existing = self.writers[kind] else {
+            // Never-created revoke (#201): record the pipeline as dead and release pending audio if
+            // every surviving expected writer now exists. The pending list has already been drained
+            // into each survivor at THEIR creation, so releasing only stops the unbounded buffering.
+            self.deadKinds.insert(kind)
+            self.releasePendingIfAllWritersCreated()
             return
         }
+        // Writer exists but is not live → already finalised: still a no-op, and it does not block
+        // `allWritersCreated()` (its entry stays in `writers`, so it counts as created).
+        guard existing.isLive else {
+            return
+        }
+        var pipelineWriter = existing
         // Cancel the fault-observer task before markFinished() so the faults stream finishing
         // (via markFinished → faultsContinuation.finish) does not trigger onAllWritersFaulted
         // on a gracefully stopped pipeline.

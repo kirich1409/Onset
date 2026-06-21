@@ -25,12 +25,16 @@ merge-ready PR. Never pause mid-task to ask "should I continue?".
 - Merge-ready = local gates green: `scripts/preflight.sh` (mirrors CI pr-gate) +
   docs updated in the same PR + L5 on reference hardware (MX Brio) when the change
   touches recording/devices — build + unit alone do not close L5.
-- The cycle usually closes only on the target Mac. Cloud Claude sessions and GitHub
-  CI have no macOS toolchain, screen, or camera: they cannot run `preflight.sh`, the
-  UI loop, or L5 — and so cannot finish such a task. From there: open the PR, state
-  in its body which gates remain and where they run, leave it unmerged and the issue
-  out of Done until a session on the target hardware verifies. Merge from cloud only
-  when no remaining gate needs macOS (docs/CI-config-only changes).
+- The cycle usually closes only on the target Mac. Cloud Claude sessions have no
+  macOS toolchain, screen, or camera and cannot run `preflight.sh`, the UI loop, or L5
+  locally. GitHub CI, though, runs the pr-gate (build + unit + lint + artifact-checks)
+  on macOS runners — a green CI is real macOS verification of those gates; it only
+  lacks screen/camera for L5 and the UI loop. Merge from cloud when CI is green and no
+  remaining gate needs real hardware (L5) or a human-driven UI check — this covers
+  docs/CI-config, build/unit/lint-only, and similar changes. When L5 or the UI loop
+  remains, open the PR, state in its body which gates remain and where they run, and
+  leave it unmerged and the issue out of Done until a session on the target hardware
+  verifies.
 - When gates pass: mark PR ready + `gh pr merge --auto --squash`, no per-PR
   confirmation (personal repo). Evidence over assertions in the PR body: Swift
   Testing summary line, lint result, screenshot for UI changes — not "it works".
@@ -88,7 +92,7 @@ Artifact checks (CI `artifact-checks` job):
   `pkill -9 Onset` (exactly this name, never broader). One `xcodebuild test` at a
   time — hardware tests fight over the camera and hang, spawning extra instances.
 - Reference hardware for L5: Logitech MX Brio (`docs/quality/production-quality-bar.md`).
-- Recordings land in `~/Movies/Onset/` — L5 outputs for verify-cfr/ffprobe live there.
+- Recordings land in session subfolders `Onset <timestamp>/` inside the user-selected base directory (default `~/Movies/Onset/`) — L5 outputs for verify-cfr/ffprobe live there.
 - Test-writing conventions (fakes, naming, suites): `OnsetTests/CLAUDE.md`.
 - Coverage on by default in `Onset.xctestplan`, scoped to target `Onset` (not the test
   bundle); the L5 plan gathers none. Inspect: add `-resultBundlePath /tmp/R.xcresult`
@@ -127,8 +131,12 @@ Full type-level map (Russian): `docs/architecture.md`.
   types (`CFRNormalizer`, `CapabilityResolver`, `EffectivePermissions`, `AppRouter`,
   `MenuBarLabelMapper`); framework/C interop stays inside actors. New logic follows
   this split.
-- **Default MainActor isolation**: value types declare explicit `nonisolated` static
-  operators for `Equatable`/`Hashable` to stay usable off the main actor.
+- **Default MainActor isolation**: value types declare `Equatable`/`Hashable`
+  conformances on the `nonisolated` type declaration itself. For structs this is
+  sufficient — the compiler synthesizes nonisolated witnesses. For enums,
+  `InferIsolatedConformances` still infers the synthesized conformance as
+  `@MainActor` even on a `nonisolated` decl, so enums require an explicit
+  `nonisolated static func ==` witness to be usable off the main actor.
 - **Single T0 epoch** (`HostTimeAnchor`) per session; all PTS are host-time offsets
   from T0, converted once at ingest.
 - **One-shot lifecycle**: `start()` succeeds once, a throwing `start()` is terminal,

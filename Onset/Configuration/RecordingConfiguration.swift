@@ -148,6 +148,16 @@ nonisolated struct RecordingConfiguration {
     /// **Placeholder** — calibrate post-MVP.
     nonisolated let degradedWindowSeconds: Double
 
+    /// Minimum cumulative encoder-backpressure drop count across the whole session that triggers
+    /// the post-stop "возможны рывки" alert (AC-9). Inclusive: `total >= threshold` → alert.
+    ///
+    /// Intentionally separate from `degradedBackpressureThreshold` (the live sliding-window rate
+    /// threshold, AC-8): the live indicator measures rate within a short window; the post-stop
+    /// alert measures the session-total and should only fire for a significant number of drops.
+    /// `>= threshold` here vs `>` in AC-8 — each comparison matches its own spec wording.
+    /// **Placeholder** — calibrate post-MVP against real hardware drop rates.
+    nonisolated let postStopDropWarningThreshold: Int
+
     // MARK: - Engine Budget Cap
 
     /// Throughput ceiling for the encode engine. Used by CapabilityProbe pre-flight.
@@ -158,12 +168,13 @@ nonisolated struct RecordingConfiguration {
 
     // MARK: - Output Directory
 
-    /// Root directory for all recorded files (`~/Movies/Onset/`).
+    /// Base directory under which session subdirectories are created (`~/Movies/Onset/` by default).
     ///
-    /// Resolved via `FileManager` at init time. The directory is created on first
-    /// recording start if absent; this property only provides the target URL.
+    /// A session-scoped subdirectory (`"Onset YYYY-MM-DD HH.mm.ss"`) is created inside this
+    /// directory at recording start. This property provides the target base URL; the subdirectory
+    /// and its files are created lazily by `RecordingOutput.ensureDirectory(_:)`.
     /// Spec: `~/Movies/Onset/`; Technical Constraints: Developer ID path, no sandbox.
-    nonisolated let outputDirectory: URL
+    nonisolated let baseOutputDirectory: URL
 
     // MARK: - Bitrate Lookup
 
@@ -234,22 +245,21 @@ nonisolated struct RecordingConfiguration {
 
     // MARK: - Private factory
 
-    /// Builds the canonical MVP default value.
+    /// Builds the canonical MVP default value with an optional custom base output directory.
     ///
     /// Extracted into a named `nonisolated static func` so that the function body is
     /// explicitly `nonisolated`. Under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` +
     /// `NonisolatedNonsendingByDefault`, a closure literal assigned to a `nonisolated static let`
     /// is still inferred as `@MainActor`-isolated, causing a compile error. A named function
     /// carries its `nonisolated` annotation unambiguously through the type-checker.
-    nonisolated private static func makeMVPDefault() -> Self {
-        // `NSHomeDirectory()` is a plain Foundation free function with no actor isolation,
-        // so it is safe to call from this `nonisolated` context.
-        // `FileManager.default.urls(for:in:)` is `@MainActor`-isolated under these compiler
-        // flags and therefore cannot be called here. The home-directory path is stable for
-        // the lifetime of the process and does not require FileManager.
-        let outputDirectory = URL(filePath: NSHomeDirectory(), directoryHint: .isDirectory)
-            .appending(path: "Movies", directoryHint: .isDirectory)
-            .appending(path: "Onset", directoryHint: .isDirectory)
+    ///
+    /// - Parameter baseDirectory: The user-selected base output directory. When `nil`,
+    ///   `~/Movies/Onset/` is used as the default.
+    nonisolated static func makeMVPDefault(baseDirectory: URL? = nil) -> Self {
+        // `RecordingOutput.directory()` is the single authoritative source for `~/Movies/Onset/`.
+        // It uses `NSHomeDirectory()` internally — a plain Foundation free function with no actor
+        // isolation — so it is safe to call from this `nonisolated` context.
+        let baseOutputDirectory = baseDirectory ?? RecordingOutput.directory()
 
         let bitrateTable: [(key: BitrateKey, value: Int)] = [
             (key: BitrateKey(width: 3840, height: 2160, fps: 60), value: 60_000_000),
@@ -288,8 +298,9 @@ nonisolated struct RecordingConfiguration {
             // Degraded-state policy placeholders — калибруется post-MVP against real drop rates.
             degradedBackpressureThreshold: 30,
             degradedWindowSeconds: 2.0,
+            postStopDropWarningThreshold: 5,
             budgetCap: budgetCap,
-            outputDirectory: outputDirectory
+            baseOutputDirectory: baseOutputDirectory
         )
     }
 }
@@ -323,8 +334,9 @@ extension RecordingConfiguration: Equatable {
             && lhs.movieFragmentInterval == rhs.movieFragmentInterval
             && lhs.degradedBackpressureThreshold == rhs.degradedBackpressureThreshold
             && lhs.degradedWindowSeconds == rhs.degradedWindowSeconds
+            && lhs.postStopDropWarningThreshold == rhs.postStopDropWarningThreshold
             && lhs.budgetCap == rhs.budgetCap
-            && lhs.outputDirectory == rhs.outputDirectory
+            && lhs.baseOutputDirectory == rhs.baseOutputDirectory
     }
 }
 

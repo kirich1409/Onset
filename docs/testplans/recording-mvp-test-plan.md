@@ -198,17 +198,17 @@ platform: [desktop]
 | Platform | Apple Silicon, macOS 26.x |
 | Source | Spec §AC-9; `RecordingCoordinatorTests.swift` |
 
-#### REC-TC-33 — MainViewModel: переключатель камеры исключает камеру из записи [unit]
+#### REC-TC-33 — MainViewModel: пикер камеры исключает камеру из записи [unit]
 | | |
 |---|---|
 | Priority | P1 |
 | Type | unit |
 | AC ref | AC-2, AC-11 |
-| Preconditions | `FakePermissionsService`, `FakeRecordingControlling`; камера доступна |
-| Steps | (а) `cameraEnabled = false` → `isCameraActive == false`; `activeCamera == nil`; `resolveCameraFormat()` возвращает `nil`; `buildChecklist` не содержит строку камеры. (б) `cameraEnabled = true` при ненулевом `selectedCamera` → `isCameraActive == true`; `activeCamera != nil`. (в) `canRecord` НЕ изменяется при обоих состояниях переключателя (экран обязателен; камера опциональна). (г) Цикл off→on: `cameraEnabled = false`, затем `= true` → `selectFirstCameraIfNeeded()` вызван, `selectedCamera` восстановлен. (д) `cameraEnabled = false` не очищает `selectedCameraID` (исчезновение камеры из пикера — маскировка, не сброс). |
-| Expected Result | Отключённая камера полностью исключается из `RecordingRequest`; `canRecord` не зависит от переключателя; повторное включение восстанавливает выбор |
+| Preconditions | `FakePermissionsService`; камера доступна |
+| Steps | (а) `cameraPickerSelection = nil` («Выключена») → `isCameraActive == false`; `activeCamera == nil`; `resolveCameraFormat()` возвращает `nil`; `buildChecklist` не содержит строку камеры. (б) `cameraPickerSelection = <uniqueID>` → `isCameraActive == true`; `activeCamera != nil`. (в) `canRecord` НЕ изменяется при обоих значениях пикера (экран обязателен; камера опциональна). (г) Цикл «Выключена»→устройство: `cameraPickerSelection = nil`, затем `= <uniqueID>` → `selectedCameraID` соответствует выбранному устройству. (д) `cameraPickerSelection = nil` не очищает `selectedCameraID` (сохранение выбора для восстановления при повторном включении). (е) `cameraPickerSelection = nil` из disconnected-состояния → `disconnectedCameraName == nil` (явное выключение снимает stale-уведомление). |
+| Expected Result | Выключенная камера полностью исключается из `RecordingRequest`; `canRecord` не зависит от пикера; повторное включение восстанавливает выбор; stale-уведомление сбрасывается при явном выключении |
 | Platform | Apple Silicon, macOS 26.x |
-| Source | `MainViewModelCameraToggleTests.swift` (покрывает все sub-кейсы); `MainViewModel.swift` — `activeCamera`, `isCameraActive`, `cameraEnabled.didSet` |
+| Source | `MainViewModelCameraToggleTests.swift` (покрывает все sub-кейсы); `MainViewModel.swift` — `activeCamera`, `isCameraActive`, `cameraPickerSelection` |
 
 #### REC-TC-34 — DisplayLabelMapper: два разных формата для пикера и HUD [unit]
 | | |
@@ -446,15 +446,15 @@ platform: [desktop]
 | Platform | Apple Silicon, macOS 26.x |
 | Source | Spec §AC-10 |
 
-#### REC-TC-31 — Остановка с backpressure-предупреждением (AC-9)
+#### REC-TC-31 — Технический отчёт о потерях кадров на диске (AC-9)
 | | |
 |---|---|
 | Priority | P2 |
 | Type | ui-scenario |
 | AC ref | AC-9 |
 | Preconditions | Записи предшествовали существенные backpressure-дропы (TC-19) |
-| Steps | 1. После записи с Degraded-эпизодом остановить штатно. 2. Наблюдать результат: Finder reveal + уведомление содержит предупреждение «запись завершена, пропущено N кадров — возможны рывки». |
-| Expected Result | Предупреждение о дропах присутствует в результирующем уведомлении |
+| Steps | 1. После записи с Degraded-эпизодом остановить штатно. 2. Открыть папку сессии в Finder. 3. Убедиться, что post-stop алерт о пропущенных кадрах **не** показывается. 4. Открыть файл `Onset YYYY-MM-DD HH.mm.ss — Техническая информация.txt` рядом с записями. |
+| Expected Result | Алерт о дропах отсутствует. В папке сессии есть текстовый отчёт с секциями «Пропущенные кадры», «Разбивка по источникам», «Деградация в течение сессии» и «Основная причина»; счётчики ненулевые после Degraded-эпизода. Индикатор «ЗАПИСЬ · ДЕГРАДАЦИЯ» по-прежнему показывался во время записи. |
 | Platform | Apple Silicon, macOS 26.x |
 | Source | Spec §AC-9 |
 
@@ -470,17 +470,17 @@ platform: [desktop]
 | Platform | Apple Silicon, macOS 26.x |
 | Source | Spec §Prerequisites |
 
-#### REC-TC-35 — Переключатель «Камера»: OFF скрывает пикер и превью, не блокирует запись (AC-2)
+#### REC-TC-35 — Пикер «Устройство»: «Выключена» скрывает превью, не блокирует запись (AC-2)
 | | |
 |---|---|
 | Priority | P1 |
 | Type | ui-scenario |
 | AC ref | AC-2, AC-11 |
 | Preconditions | Камера подключена и разрешение выдано; экран и микрофон готовы |
-| Steps | **Кейс А — камера выключена:** 1. Переключить «Камера» → OFF. 2. Проверить: пикер камеры и live-превью скрываются. 3. Кнопка «Записать» остаётся активна. 4. Нажать «Записать», записать 5s, остановить. 5. В `~/Movies/Onset/`: присутствует `Screen.mp4`, `Camera.mp4` отсутствует (или не создан). **Кейс Б — повторное включение:** 6. Вернуть переключатель → ON. 7. Проверить: пикер и превью появляются; в пикере видно ранее выбранное устройство (сброса нет). 8. Нажать «Записать», записать 5s, остановить. 9. В `~/Movies/Onset/`: оба файла присутствуют. |
-| Expected Result | OFF: только Screen.mp4; утечки сессии нет. ON: оба файла; выбор камеры сохранён без сброса |
+| Steps | **Кейс А — камера выключена:** 1. В пикере «Устройство» секции «Камера» выбрать «Выключена» (#224). 2. Проверить: live-превью скрывается; пикер остаётся видимым. 3. Кнопка «Записать» остаётся активна. 4. Нажать «Записать», записать 5s, остановить. 5. В папке сессии: присутствует `Screen.mp4`, `Camera.mp4` отсутствует (или не создан). **Кейс Б — повторное включение:** 6. В пикере выбрать устройство камеры. 7. Проверить: превью появляется; выбрано ранее использованное устройство (сброса нет). 8. Нажать «Записать», записать 5s, остановить. 9. В папке сессии: оба файла присутствуют. |
+| Expected Result | «Выключена»: только Screen.mp4; утечки сессии нет. Устройство выбрано: оба файла; выбор камеры сохранён без сброса |
 | Platform | Apple Silicon, macOS 26.x |
-| Source | `MainViewModel.swift` — `activeCamera`, `cameraEnabled.didSet`, `selectFirstCameraIfNeeded`; `MainView+Sections.swift` — секция камеры гейтится на `model.cameraEnabled` |
+| Source | `MainViewModel.swift` — `activeCamera`, `cameraPickerSelection` (#224), `selectFirstCameraIfNeeded`; `MainView+Sections.swift` — превью гейтится на `model.isCameraActive` |
 
 #### REC-TC-36 — Превью камеры: соотношение 16:9, ограничение высоты 140pt, кнопка «Записать» видна (AC-1) [P2-edge]
 | | |

@@ -113,6 +113,9 @@ private final class FakeScreenSource: VideoFrameSource, @unchecked Sendable {
     private(set) var startCalled = false
     private(set) var stopCalled = false
 
+    /// When set, `start(anchoredTo:)` throws this — drives the `teardownAfterFailedStart` path (#202).
+    var startError: (any Error)?
+
     init() {
         let (frames, framesContinuation) = AsyncStream.makeStream(of: VideoFrame.self)
         self.frames = frames
@@ -127,6 +130,7 @@ private final class FakeScreenSource: VideoFrameSource, @unchecked Sendable {
 
     func start(anchoredTo anchor: HostTimeAnchor) async throws {
         self.startCalled = true
+        if let startError { throw startError }
     }
 
     func stop() async {
@@ -552,6 +556,44 @@ struct RecordingSessionProbeTests {
     }
 }
 
+// MARK: - Failed start teardown (#202)
+
+/// Covers the abnormal teardown path: when `start()` throws AFTER `makeStage()` built a live
+/// `DropMonitor` (i.e. in `buildPipelines`/`startSources`), `teardownAfterFailedStart()` must use
+/// `dropMonitor.cancelObservation()` — not `stop()`. Drain-only `stop()` would hang if any observed
+/// stream were still open on this path (no `stage.finishAll()` runs here). The integration assertion
+/// is simply that `start()` rejects and returns control — a hang would trip the suite time limit.
+@Suite("RecordingSession — failed start teardown (#202)", .timeLimit(.minutes(1)))
+struct RecordingSessionFailedStartTests {
+    @Test("source start throws after monitor built → start() rejects, teardown completes (no hang)")
+    func sourceStartThrows_teardownCompletes() async {
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        // Screen source throws in start(anchoredTo:) — this fires inside startSources(), AFTER
+        // makeStage() created the DropMonitor and buildPipelines() registered source/encoder drops.
+        struct StartFailure: Error {}
+        sources.screenSource.startError = StartFailure()
+        let okProbe: @Sendable () -> ProbeResult = { .ok(SessionFixtures.plan()) }
+        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: okProbe)
+
+        var didThrow = false
+        do {
+            try await session.start(permissions: SessionFixtures.fullPermissions())
+        } catch {
+            didThrow = true
+        }
+        // start() rejected, and reaching here proves teardownAfterFailedStart() (including
+        // dropMonitor.cancelObservation()) returned — a drain-on-open-stream regression would hang.
+        #expect(didThrow, "start() must rethrow the source failure")
+        #expect(sources.screenSource.startCalled, "the failing source must have been started")
+
+        // stop() after a failed start is a no-op (session never reached .running cleanly); it must
+        // also return promptly without hanging.
+        _ = await session.stop()
+    }
+}
+
 // MARK: - AC-7 — shared T0
 
 @Suite("RecordingSession — shared T0 epoch (AC-7)")
@@ -629,11 +671,14 @@ struct RecordingSessionStopTests {
         // No drops emitted → degradedWarning should be false.
 
         let result = await session.stop()
-        #expect(result.degradedWarning == false, "no backpressure drops → no warning (AC-8 policy)")
+        #expect(
+            result.degradedWarning(threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold) == false,
+            "no backpressure drops → no warning"
+        )
     }
 
-    @Test("degradedWarning true when session crossed the degraded-state threshold (sessionEverDegraded latch)")
-    func degradedWarning_true_whenThresholdCrossed() async throws {
+    @Test("degradedWarning true when backpressure drops reach postStopDropWarningThreshold (AC-9)")
+    func degradedWarning_true_whenBackpressureDropReachesThreshold() async throws {
         let probe = SampleProbeOK()
         let encoders = FakeEncoderFactory()
         let writers = SessionFakeWriterFactory()
@@ -646,54 +691,22 @@ struct RecordingSessionStopTests {
         try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
         _ = await eventually { writers.bothWritersCreated }
 
-        // Emit threshold+1 (31) backpressure drops as one batched event in a tight window.
-        // Default threshold is 30; count:31 crosses it in a single CMTime instant → latch set.
+        // Emit exactly postStopDropWarningThreshold backpressure drops — the post-stop alert
+        // fires at >= threshold (AC-9), so this is the minimum count that must trigger it.
+        let threshold = RecordingConfiguration.mvpDefault.postStopDropWarningThreshold
         let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
         encoders.screenEncoder.emitDrop(DropEvent(
-            reason: .encoderBackpressureDrops, source: .encode, count: 31, detectedAt: dropPts
-        ))
-        // Poll until sessionEverDegraded is latched — avoids racing the observe child task.
-        _ = await eventually { await session.currentDrops().sessionEverDegraded }
-
-        let result = await session.stop()
-        #expect(
-            result.degradedWarning == true,
-            "threshold crossed → sessionEverDegraded latch → degradedWarning true (AC-8)"
-        )
-        #expect(result.drops.encoderBackpressureDrops > 0, "drop counter must reflect the emitted drops")
-        // `!=` requires the Equatable conformance (InferIsolatedConformances → @MainActor in
-        // nonisolated #expect expansion). `!(lhs == rhs)` binds the concrete nonisolated witness.
-        #expect(!(result.dominantCause == .notDegraded), "degraded session must report a non-.notDegraded cause")
-    }
-
-    @Test("degradedWarning false when backpressure drops never crossed the threshold (scattered drops)")
-    func degradedWarning_false_whenDropsBelowThreshold() async throws {
-        let probe = SampleProbeOK()
-        let encoders = FakeEncoderFactory()
-        let writers = SessionFakeWriterFactory()
-        let sources = FakeSourceFactory()
-        // Default threshold (30): one drop is never enough to flip the latch — no warning.
-        let session = makeSession(encoders: encoders, writers: writers, sources: sources, probe: probe.callable())
-
-        try await session.start(permissions: SessionFixtures.fullPermissions())
-        try encoders.screenEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
-        try encoders.cameraEncoder.emit(SessionFixtures.encodedSample(ptsSeconds: 1.0))
-        _ = await eventually { writers.bothWritersCreated }
-
-        // One drop — far below default threshold(30). Window never crosses → latch stays false.
-        let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
-        encoders.screenEncoder.emitDrop(DropEvent(
-            reason: .encoderBackpressureDrops, source: .encode, count: 1, detectedAt: dropPts
+            reason: .encoderBackpressureDrops, source: .encode, count: threshold, detectedAt: dropPts
         ))
         // Poll until the drop is ingested so the test doesn't stop before the monitor sees it.
         _ = await eventually { await session.currentDrops().counters.encoderBackpressureDrops >= 1 }
 
         let result = await session.stop()
         #expect(
-            result.degradedWarning == false,
-            "below-threshold drops → latch never set → degradedWarning false (regression guard)"
+            result.degradedWarning(threshold: threshold) == true,
+            "backpressure drops >= threshold → post-stop warning must fire (AC-9)"
         )
-        #expect(result.drops.encoderBackpressureDrops == 1, "drop counter still reflects the emitted drop")
+        #expect(result.drops.encoderBackpressureDrops == threshold, "drop counter must reflect the emitted drops")
     }
 
     @Test("stop() is idempotent — second call returns the same result (Gap B)")
@@ -727,7 +740,8 @@ struct RecordingSessionStopTests {
             "stop() must return identical drop counters on re-entry"
         )
         #expect(
-            first.degradedWarning == second.degradedWarning,
+            first.degradedWarning(threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold)
+                == second.degradedWarning(threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold),
             "stop() must return identical degradedWarning on re-entry"
         )
         // The first result must have non-zero drops to confirm the test is non-vacuous.
@@ -771,7 +785,8 @@ struct RecordingSessionStopTests {
             "concurrent stop() must return identical drop counters"
         )
         #expect(
-            first.degradedWarning == second.degradedWarning,
+            first.degradedWarning(threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold)
+                == second.degradedWarning(threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold),
             "concurrent stop() must return identical degradedWarning"
         )
         // Non-vacuous: the first result must carry the emitted drop.
@@ -799,7 +814,10 @@ struct RecordingSessionStopTests {
             return
         }
         #expect(result.outputURLs.isEmpty, "no URLs expected when stop fires before start")
-        #expect(result.degradedWarning == false, "no drops can have accumulated before start")
+        #expect(
+            result.degradedWarning(threshold: RecordingConfiguration.mvpDefault.postStopDropWarningThreshold) == false,
+            "no drops can have accumulated before start"
+        )
         // No writer interactions must have occurred.
         #expect(!writers.screenWriter.markFinishedCalled, "screen writer must not be touched")
         #expect(!writers.cameraWriter.markFinishedCalled, "camera writer must not be touched")
@@ -1239,8 +1257,9 @@ struct RecordingSessionOutputDirectoryTests {
             movieFragmentInterval: mvp.movieFragmentInterval,
             degradedBackpressureThreshold: mvp.degradedBackpressureThreshold,
             degradedWindowSeconds: mvp.degradedWindowSeconds,
+            postStopDropWarningThreshold: mvp.postStopDropWarningThreshold,
             budgetCap: mvp.budgetCap,
-            outputDirectory: tempDir
+            baseOutputDirectory: tempDir
         )
 
         let probe = SampleProbeOK()
@@ -1263,6 +1282,85 @@ struct RecordingSessionOutputDirectoryTests {
         )
 
         _ = await session.stop()
+    }
+
+    /// `start()` must throw `RecordingError.outputDirectoryUnavailable` when the session
+    /// subdirectory cannot be created because the base output directory is read-only.
+    ///
+    /// The test sets the base directory to `chmod 0o555` (no write) so that
+    /// `RecordingOutput.ensureDirectory` fails, then restores permissions in `defer`
+    /// and removes the directory.
+    @Test("start() throws outputDirectoryUnavailable when the base directory is read-only")
+    func start_throwsOutputDirectoryUnavailable_whenBaseIsReadOnly() async throws {
+        // Create a writable base directory, then remove write permission.
+        let base = URL(filePath: NSTemporaryDirectory(), directoryHint: .isDirectory)
+            .appending(path: "OnsetTests-readonly-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer {
+            // Restore so cleanup can remove it.
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: base.path(percentEncoded: false)
+            )
+            try? FileManager.default.removeItem(at: base)
+        }
+
+        // Remove write permission on the base — ensureDirectory on a subdirectory inside will fail.
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555],
+            ofItemAtPath: base.path(percentEncoded: false)
+        )
+
+        let mvp = RecordingConfiguration.mvpDefault
+        let config = RecordingConfiguration(
+            container: mvp.container,
+            codec: mvp.codec,
+            sampleEntry: mvp.sampleEntry,
+            profileLevel: mvp.profileLevel,
+            colorPrimaries: mvp.colorPrimaries,
+            transferFunction: mvp.transferFunction,
+            yCbCrMatrix: mvp.yCbCrMatrix,
+            bitDepth: mvp.bitDepth,
+            maxScreenFps: mvp.maxScreenFps,
+            minCameraFps: mvp.minCameraFps,
+            bitrateTable: mvp.bitrateTable,
+            dataRateLimitsPeakMultiplier: mvp.dataRateLimitsPeakMultiplier,
+            keyFrameIntervalSeconds: mvp.keyFrameIntervalSeconds,
+            allowFrameReordering: mvp.allowFrameReordering,
+            pixelFormatPreference: mvp.pixelFormatPreference,
+            audioSampleRate: mvp.audioSampleRate,
+            audioChannelCount: mvp.audioChannelCount,
+            audioBitrate: mvp.audioBitrate,
+            movieFragmentInterval: mvp.movieFragmentInterval,
+            degradedBackpressureThreshold: mvp.degradedBackpressureThreshold,
+            degradedWindowSeconds: mvp.degradedWindowSeconds,
+            postStopDropWarningThreshold: mvp.postStopDropWarningThreshold,
+            budgetCap: mvp.budgetCap,
+            baseOutputDirectory: base
+        )
+
+        let probe = SampleProbeOK()
+        let encoders = FakeEncoderFactory()
+        let writers = SessionFakeWriterFactory()
+        let sources = FakeSourceFactory()
+        let session = makeSession(
+            encoders: encoders,
+            writers: writers,
+            sources: sources,
+            probe: probe.callable(),
+            config: config
+        )
+
+        do {
+            try await session.start(permissions: SessionFixtures.fullPermissions())
+            Issue.record("start() must throw when the base directory is not writable")
+        } catch let error as RecordingError {
+            guard case .outputDirectoryUnavailable = error else {
+                Issue.record("expected .outputDirectoryUnavailable, got \(error)")
+                return
+            }
+            // Expected — no assertion needed.
+        }
     }
 }
 

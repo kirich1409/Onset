@@ -1,3 +1,4 @@
+import AVFoundation
 import os
 
 // MARK: - Constants
@@ -38,20 +39,59 @@ extension MainViewModel {
         }
     }
 
+    /// Subscribes to display-configuration changes for the lifetime of the caller's structured
+    /// task. Should be called once from a `.task` modifier (alongside `loadDevices`);
+    /// the task is automatically cancelled — and the subscription torn down — when the view
+    /// disappears.
+    ///
+    /// On each event, re-runs display discovery and applies `DisplaySelectionReconciler` to
+    /// preserve or heal the current selection.  Does NOT debounce: events arrive infrequently
+    /// (human-scale hardware operations) and discovery is idempotent.
+    func subscribeToDisplayChanges() async {
+        for await _ in self.screenChangeEvents() {
+            await self.loadDisplays()
+        }
+    }
+
     func loadDisplays() async {
         let authorized = self.permissions.screenStatus == .authorized
         do {
             let found = try await self.discoverDisplays(authorized)
-            self.displays = found
-            // AC-1: auto-select when exactly one display
-            if found.count == 1 {
-                self.selectedDisplayID = found[0].displayID
-            }
+            self.applyDisplays(found)
             mainViewModelLogger.info("Displays loaded — count: \(found.count)")
         } catch {
             mainViewModelLogger.error("Display discovery failed: \(String(describing: error))")
             self.displays = []
             self.recordError = "Не удалось загрузить список дисплеев"
+        }
+    }
+
+    /// Applies a freshly-discovered display list, reconciling the current selection.
+    ///
+    /// Separated from `loadDisplays()` so `DisplaySelectionReconciler` can be tested
+    /// directly without going through the async discovery path.
+    ///
+    /// - Parameter newDisplays: The complete, up-to-date list from device discovery.
+    func applyDisplays(_ newDisplays: [Display]) {
+        let outcome = DisplaySelectionReconciler.reconcile(
+            selected: self.selectedDisplayID,
+            newDisplays: newDisplays
+        )
+        self.displays = newDisplays
+        switch outcome {
+        case let .keepExisting(id):
+            self.selectedDisplayID = id
+
+        case let .fallbackToFirst(id):
+            mainViewModelLogger.info("Selected display gone — falling back to first available")
+            self.selectedDisplayID = id
+
+        case let .autoSelectSingle(id):
+            // AC-1: exactly one display available; auto-select it.
+            self.selectedDisplayID = id
+
+        case .noSelection:
+            self.selectedDisplayID = nil
         }
     }
 
@@ -64,6 +104,13 @@ extension MainViewModel {
 
         let foundCameras = self.discoverCameras(cameraAuthorized)
         self.cameras = foundCameras
+        // Build the name cache once per load so ForEach renders use O(1) dictionary lookups
+        // instead of a synchronous AVCaptureDevice(uniqueID:) call per item per render pass.
+        self.cameraDisplayNames = Dictionary(
+            uniqueKeysWithValues: foundCameras.map { camera in
+                (camera.uniqueID, AVCaptureDevice(uniqueID: camera.uniqueID)?.localizedName ?? "Камера")
+            }
+        )
 
         let foundMics = self.discoverMicrophones(micAuthorized)
         self.microphones = foundMics

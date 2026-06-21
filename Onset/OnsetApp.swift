@@ -9,21 +9,6 @@ nonisolated private let appLogger = Logger(
     category: "OnsetApp"
 )
 
-// MARK: - Test-mode detection
-
-/// `true` when the process is launched as a test host by XCTest.
-///
-/// XCTest sets `XCTestConfigurationFilePath` in the environment before executing any test
-/// bundle. Detecting it here prevents multiple app instances — each with an onboarding
-/// window and live `PermissionsService` UI — from accumulating across test runs and
-/// interfering with the L5 live-capture tests that fight over screen/camera permissions.
-///
-/// Note: screen-recording and camera TCC grants are held by the **process** (bundle ID),
-/// not by individual windows. Suppressing the UI scene here does NOT remove those grants
-/// from the test-host process, so L5 hardware-capture tests continue to pass.
-nonisolated private let isRunningUnderXCTest =
-    ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
-
 // MARK: - Window IDs
 
 /// Stable scene identifiers used by `openWindow` / `dismissWindow`.
@@ -78,6 +63,10 @@ struct OnsetApp: App {
     /// real recording if the key is pressed during a test session).
     @State private var hotKeyMonitor = GlobalHotKeyMonitor()
 
+    /// Coordinator for the diagnostic export flow (#164): collect OS logs → NSSavePanel → reveal.
+    /// Shared by `MenuBarMenu`; created once at app-init time (lightweight, no I/O at init).
+    @State private var diagnosticsCoordinator = DiagnosticsSaveCoordinator()
+
     var body: some Scene {
         Window("Onset", id: WindowID.main) {
             // Under XCTest the window is empty (no RootView, no onboarding flow, no
@@ -126,7 +115,7 @@ struct OnsetApp: App {
         // Menu bar item (#38). Full 3-state label and context menu.
         // Suppressed under XCTest so test hosts do not accumulate competing status items.
         MenuBarExtra(isInserted: .constant(!isRunningUnderXCTest)) {
-            MenuBarMenu(coordinator: self.coordinator)
+            MenuBarMenu(coordinator: self.coordinator, diagnosticsCoordinator: self.diagnosticsCoordinator)
         } label: {
             MenuBarLabel(coordinator: self.coordinator)
         }

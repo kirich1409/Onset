@@ -63,7 +63,7 @@ nonisolated func cameraBackpressureDropEvent(
 )
 -> DropEvent? {
     guard case .dropped = yieldResult else { return nil }
-    return DropEvent(reason: .encoderBackpressureDrops, source: .captureCameraVideo, count: 1, detectedAt: pts)
+    return DropEvent(reason: .captureBackpressureDrops, source: .captureCameraVideo, count: 1, detectedAt: pts)
 }
 
 /// Returns a backpressure `DropEvent` for an audio `AsyncStream.Continuation.YieldResult`.
@@ -73,7 +73,7 @@ nonisolated func audioBackpressureDropEvent(
 )
 -> DropEvent? {
     guard case .dropped = yieldResult else { return nil }
-    return DropEvent(reason: .encoderBackpressureDrops, source: .captureCameraAudio, count: 1, detectedAt: pts)
+    return DropEvent(reason: .captureBackpressureDrops, source: .captureCameraAudio, count: 1, detectedAt: pts)
 }
 
 /// Returns `true` when `frameHostTime >= sessionStart`.
@@ -83,6 +83,19 @@ nonisolated func audioBackpressureDropEvent(
 /// files are compiled into the same target.
 nonisolated func shouldKeepCameraFrame(frameHostTime: CMTime, sessionStart: CMTime) -> Bool {
     CMTimeCompare(frameHostTime, sessionStart) >= 0
+}
+
+/// Returns `true` when the capture telemetry task should be launched after `start()`.
+///
+/// Telemetry runs only for a `.record`-role source that actually reached `.running`.
+/// On the stop()-during-start abort path `buildAndStartSession` returns normally with
+/// state `.stopped` (the racing `stop()` already ran its `captureTelemetryTask?.cancel()`),
+/// so telemetry must NOT start there — otherwise the task `start()` would launch is never
+/// cancelled and a 1 Hz telemetry task leaks for the rest of the process lifetime (#203).
+nonisolated func shouldStartCaptureTelemetry(role: CaptureRole, state: CameraCaptureState) -> Bool {
+    guard case .record = role else { return false }
+    guard case .running = state else { return false }
+    return true
 }
 
 /// Converts `pts` from `sourceClock` to the host clock.
