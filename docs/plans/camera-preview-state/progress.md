@@ -6,7 +6,7 @@
 - [x] T-1 — CameraPreviewState enum + computed-мосты (#254) ✅ commit 8f82ead; L0+L2 green (55 MainViewModel tests pass, 1:1)
 - [x] T-2 — Мягкий таймаут `.connectingSlow` (#255) ✅ L0+L2 green (10 deterministic timeout tests + camera suites)
 - [x] T-3 — VoiceOver-анонс на переходах (#256) ✅ L0+L2 green (72 tests / 4 suites, no flake over 2 runs)
-- [ ] T-4 — Гейты и PR
+- [x] T-4 — Гейты и PR ✅ build+unit 842/843 (1 несвязанный ScreenSource L5 флейк); CI-truth lint clean; draft PR #257; доска → In progress. L5/live (#255 Continuity slow, #256 VoiceOver interrupt) — остаточный гейт до promotion.
 
 ## Learnings
 - T-1: план ошибочно считал `:36` reset «поглощённым» `stopCurrentPreview→.idle` — но тот early-return'ит при `previewSource==nil`, sticky `.failed` пережил бы. Восстановлено 1:1 явным `.idle` после stopCurrentPreview + дискриминатор-тест `managePreviewNil_afterFailure_clearsFailed`.
