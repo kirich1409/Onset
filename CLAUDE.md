@@ -36,8 +36,11 @@ merge-ready PR. Never pause mid-task to ask "should I continue?".
   leave it unmerged and the issue out of Done until a session on the target hardware
   verifies.
 - When gates pass: mark PR ready + `gh pr merge --auto --squash`, no per-PR
-  confirmation (personal repo). Evidence over assertions in the PR body: Swift
-  Testing summary line, lint result, screenshot for UI changes — not "it works".
+  confirmation (personal repo). EXCEPTION — meta changes that shape agent behavior
+  and the owner's expectations/costs (CLAUDE.md, `.claude/`, `.github/workflows/`,
+  lint/build configs, `docs/specs/`) are NEVER auto-merged: open the PR, explicitly
+  call the owner to review, merge only after approval. Evidence over assertions in
+  the PR body: Swift Testing summary, lint result, screenshot for UI changes.
 
 ## Language
 
@@ -60,7 +63,7 @@ xcodebuild test -scheme Onset -destination 'platform=macOS' -configuration Debug
   ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
 
 # Lint — CI "Lint" job runs BOTH; check both before push
-swiftformat . --lint --config .swiftformat
+swiftformat --lint .  # CI-exact; do NOT add --config (changes rule resolution → false wrapAttributes errors)
 swiftlint lint --strict --config .swiftlint.yml   # version pinned 0.63.3 via Mintfile
 ```
 
@@ -77,14 +80,12 @@ Artifact checks (CI `artifact-checks` job):
 
 ## Testing
 
-- Swift Testing only, zero XCTest. The XCTest banner "Executed 0 tests" in xcodebuild
-  output is FALSE — the verdict is the Swift Testing summary line. Never use `-quiet`:
-  it hides that summary.
-- L5 (real hardware) suites are opt-in via env vars: `ONSET_RUN_L5_CAPTURE=1`
-  (CameraSource, RecordingSession), `ONSET_RUN_L5_ENCODE=1` (VideoEncoder, FileWriter).
-  Use `xcodebuild test -scheme Onset -testPlan Onset-L5` — the plan sets both vars
-  automatically. See `docs/quality/production-quality-bar.md` §4.3.
-  `-only-testing` matches suites, not test functions.
+- Swift Testing only, zero XCTest. The XCTest "Executed 0 tests" banner is FALSE —
+  the verdict is the Swift Testing summary line; never use `-quiet` (hides it).
+- L5 (real hardware) suites are env-gated: `ONSET_RUN_L5_CAPTURE=1` (CameraSource,
+  RecordingSession), `ONSET_RUN_L5_ENCODE=1` (VideoEncoder, FileWriter); `xcodebuild
+  test -testPlan Onset-L5` sets both. `-only-testing` matches suites, not functions.
+  See `docs/quality/production-quality-bar.md` §4.3.
 - L5 requires a SIGNED build — drop `CODE_SIGNING_ALLOWED=NO` for build-for-testing;
   an unsigned test host writes a sticky TCC deny for screen capture (recovery:
   `tccutil reset ScreenCapture` + manual re-grant).
