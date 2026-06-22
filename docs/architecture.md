@@ -17,7 +17,8 @@
 | `ScreenSource` | `ScreenSource.swift` | Актор: захват дисплея через ScreenCaptureKit, обрабатывает hot-plug отключение |
 | `CameraDevice` | `CaptureDeviceModels.swift` | Иммутабельный снапшот камеры (uniqueID + форматы), без живых ссылок на `AVCaptureDevice` |
 | `Display` | `CaptureDeviceModels.swift` | Иммутабельный снапшот дисплея: `CGDirectDisplayID`, размеры, частота |
-| `DeviceDiscovery` | `DeviceDiscovery+Displays.swift`, `DeviceDiscovery+CaptureDevices.swift` | Nonisolated-перечисление устройств с чистыми мапперами для тестов; suspended-устройства (`isSuspended`, например FaceTime-камера при закрытой крышке) исключаются из результатов |
+| `DeviceDiscovery` | `DeviceDiscovery+Displays.swift`, `DeviceDiscovery+CaptureDevices.swift` | Nonisolated-перечисление устройств с чистыми мапперами для тестов; suspended-устройства (`isSuspended`, например FaceTime-камера при закрытой крышке) исключаются из результатов. Встроенный микрофон не флипает `isSuspended` при закрытой крышке (отдаёт цифровую тишину), поэтому скрывается отдельно — чистым фильтром `microphonesAvailable(_:lidClosed:)` по состоянию крышки из `LidState` |
+| `LidState` | `LidState.swift` | Nonisolated-обёртка над IOKit: `isClosed` читает `AppleClamshellState` из `IOPMrootDomain` (clamshell). Дискриминатор для скрытия встроенного микрофона — у него нет AVFoundation/CoreAudio-сигнала недоступности |
 | `DeviceAvailabilityObserver` | `DeviceAvailabilityObserver.swift` | Поток событий топологии устройств (`DeviceChangeEvent`): NotificationCenter connect/disconnect + KVO `isSuspended`; время жизни привязано к стриму (teardown через `onTermination`) |
 | `ScreenStreamConfigurationBuilder` | `ScreenStreamConfigurationBuilder.swift` | Чистый билдер `ResolvedRecordingPlan` → `SCStreamConfiguration` |
 
@@ -187,7 +188,7 @@ TCC-разрешения, политика записи, запись MP4.
 | Тип | Файл | Роль |
 |---|---|---|
 | `RecordingCoordinator` | `UI/RecordingCoordinator.swift` | Единственный владелец состояния записи (phase, recordingState, drops, elapsed) и единственный подписчик стримов сессии |
-| `MainViewModel` | `UI/Main/MainViewModel.swift` | Выбор устройств и enable-логика кнопки Record (AC-2: экран обязателен, камера опциональна, guard невыбранного микрофона); список камер/микрофонов обновляется вживую через `observeDeviceChanges()` (`MainViewModel+Devices.swift`); выбор и персистирование базовой папки вывода (#225) |
+| `MainViewModel` | `UI/Main/MainViewModel.swift` | Выбор устройств и enable-логика кнопки Record (AC-2: экран обязателен, камера опциональна, guard невыбранного микрофона); список камер/микрофонов обновляется вживую через `observeDeviceChanges()` и при смене конфигурации экранов через `subscribeToDisplayChanges()` (закрытие крышки гасит внутренний дисплей → ре-энумерация устройств, скрывающая встроенный микрофон) (`MainViewModel+Devices.swift`); выбор и персистирование базовой папки вывода (#225) |
 | `outputSection` / `OutputFolderRow` | `UI/Main/MainView+Sections.swift` | Секция «ВЫВОД» главного окна: строка с текущей базовой папкой (путь сокращён через `~`) и кнопка выбора через `NSOpenPanel` (#225) |
 | `OnboardingViewModel` | `UI/Onboarding/OnboardingViewModel.swift` | Статусы карточек разрешений из `PermissionsProviding`; поллинг TCC экрана |
 | `RecordingControlling` | `UI/RecordingControlling.swift` | Nonisolated-протокол над `RecordingSession` для координатора — юнит-тесты без железа |

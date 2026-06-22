@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreAudio
 import CoreMedia
 import os
 
@@ -109,19 +110,21 @@ extension DeviceDiscovery {
 // MARK: - Microphone enumeration
 
 extension DeviceDiscovery {
-    /// Enumerates all connected microphone devices that are currently able to capture.
+    /// Enumerates all connected microphone devices that are currently able to capture,
+    /// filtered by the current notebook lid state.
     ///
     /// Queries `AVCaptureDevice.DiscoverySession` for `.microphone` (macOS 14+).
     ///
-    /// Suspended devices (`isSuspended == true`) are excluded, mirroring camera
-    /// enumeration. If the built-in microphone never reports suspended (it keeps working
-    /// with the lid closed on some models), the filter is a no-op — which is correct,
-    /// because the device is genuinely usable then.
+    /// Suspended devices (`isSuspended == true`) are excluded, mirroring camera enumeration.
+    /// Additionally, the built-in microphone is hidden when the lid is closed: unlike the
+    /// built-in camera (which flips `isSuspended`), the built-in mic stays connected and
+    /// non-suspended in clamshell mode but delivers only digital silence. Lid state from
+    /// `LidState.isClosed` is the discriminating signal.
     ///
     /// - Parameter microphoneAuthorized: Pass `true` when the process holds microphone
     ///   permission. Pass `false` to receive an empty array without any AVFoundation calls.
     ///
-    /// - Returns: One `MicrophoneDevice` snapshot per non-suspended device.
+    /// - Returns: One `MicrophoneDevice` snapshot per available, non-hidden device.
     nonisolated static func microphones(microphoneAuthorized: Bool) -> [MicrophoneDevice] {
         guard microphoneAuthorized else {
             discoveryDeviceLogger.debug("Microphone enumeration skipped — microphone permission not granted")
@@ -136,24 +139,60 @@ extension DeviceDiscovery {
 
         let allDevices = session.devices
         let availableDevices = allDevices.filter { !$0.isSuspended }
-        let devices = availableDevices.map { device in
+        let mapped = availableDevices.map { device in
             Self.makeMicrophoneDevice(from: device)
         }
+
+        let lidClosed = LidState.isClosed
+        let devices = Self.microphonesAvailable(mapped, lidClosed: lidClosed)
 
         // PII policy: log counts only, never device names or uniqueIDs.
         discoveryDeviceLogger.info(
             """
             Microphone enumeration complete — count: \(devices.count), \
-            suspended filtered: \(allDevices.count - availableDevices.count)
+            suspended filtered: \(allDevices.count - availableDevices.count), \
+            lid-hidden: \(mapped.count - devices.count)
             """
         )
         return devices
     }
 
+    // MARK: - Lid-state filter (pure, testable seam)
+
+    /// Filters a mapped microphone list by the current lid state.
+    ///
+    /// When the lid is closed (clamshell mode with an external display), the built-in
+    /// microphone is removed from the list. No AVFoundation or CoreAudio property
+    /// discriminates open vs closed for the built-in mic — `isSuspended` stays `false`
+    /// and CoreAudio reports the device as alive — but the audio content is digital silence.
+    /// Empirically verified on macOS 26. See swarm-report/builtin-mic-clamshell-debug.md.
+    ///
+    /// When `lidClosed` is `false` (or on desktop Macs where `LidState.isClosed` always
+    /// returns `false`), all devices are returned unchanged.
+    ///
+    /// - Parameters:
+    ///   - devices: The full list of non-suspended `MicrophoneDevice` snapshots.
+    ///   - lidClosed: `true` when `LidState.isClosed` reports the lid is shut.
+    /// - Returns: The filtered list, with built-in mics removed when `lidClosed` is `true`.
+    nonisolated static func microphonesAvailable(
+        _ devices: [MicrophoneDevice],
+        lidClosed: Bool
+    )
+    -> [MicrophoneDevice] {
+        guard lidClosed else { return devices }
+        return devices.filter { !$0.isBuiltIn }
+    }
+
     // MARK: - Microphone pure mapper (testability seam)
 
     /// Maps a live `AVCaptureDevice` (audio) to a `MicrophoneDevice` snapshot.
+    ///
+    /// Sets `isBuiltIn` from the device's transport type: a `kAudioDeviceTransportTypeBuiltIn`
+    /// transport identifies the notebook's built-in microphone.
     nonisolated static func makeMicrophoneDevice(from device: AVCaptureDevice) -> MicrophoneDevice {
-        MicrophoneDevice(uniqueID: device.uniqueID)
+        // `AVCaptureDevice.transportType` is Int32; CoreAudio's constant is UInt32.
+        // Bit-pattern cast avoids a sign-extension mismatch on the comparison.
+        let isBuiltIn = UInt32(bitPattern: device.transportType) == UInt32(kAudioDeviceTransportTypeBuiltIn)
+        return MicrophoneDevice(uniqueID: device.uniqueID, isBuiltIn: isBuiltIn)
     }
 }

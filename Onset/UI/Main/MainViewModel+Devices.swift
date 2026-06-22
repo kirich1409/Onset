@@ -45,11 +45,15 @@ extension MainViewModel {
     /// disappears.
     ///
     /// On each event, re-runs display discovery and applies `DisplaySelectionReconciler` to
-    /// preserve or heal the current selection.  Does NOT debounce: events arrive infrequently
-    /// (human-scale hardware operations) and discovery is idempotent.
+    /// preserve or heal the current selection. Also re-evaluates capture devices: the built-in
+    /// mic's availability depends on lid state, which changes when the internal display sleeps
+    /// (lid closed → `didChangeScreenParametersNotification` fires via `screenChangeEvents()`).
+    /// Does NOT debounce: events arrive infrequently (human-scale hardware operations) and
+    /// discovery is idempotent.
     func subscribeToDisplayChanges() async {
         for await _ in self.screenChangeEvents() {
             await self.loadDisplays()
+            self.loadCamerasAndMicrophones()
         }
     }
 
