@@ -531,6 +531,115 @@ struct StageRateAggregatorDeliveryGapTests {
     }
 }
 
+// MARK: - Camera latest-snapshot (T-B.1)
+
+@Suite("StageRateAggregator — camera latest-snapshot")
+struct StageRateAggregatorCameraSnapshotTests {
+    @Test("snapshot is nil before any flush")
+    func snapshotNilInitially() {
+        let agg = StageRateAggregator(lane: "camera", stage: .capture, nominalFps: 30)
+        #expect(agg.latestCameraSnapshot == nil)
+    }
+
+    @Test("snapshot is nil after flush without a stamp")
+    func snapshotNilWithoutStamp() {
+        var agg = StageRateAggregator(lane: "camera", stage: .capture, nominalFps: 30)
+        agg.recordFresh()
+        _ = agg.flush(elapsedSeconds: 1.0)
+        // flush stores the numeric part but does not publish until stampSnapshot runs.
+        #expect(agg.latestCameraSnapshot == nil)
+    }
+
+    @Test("flush + stamp publishes the last window's delivered fps, drop/overflow rate, and gap max")
+    func snapshotReflectsLastFlush() throws {
+        var agg = StageRateAggregator(lane: "camera", stage: .capture, nominalFps: 30)
+        for _ in 0..<20 {
+            agg.recordFresh()
+        }
+        agg.recordCaptureDrop()
+        agg.recordOverflow()
+        agg.recordOverflow()
+        agg.recordDeliveryGap(durationMs: 40.0)
+        agg.recordDeliveryGap(durationMs: 90.0)
+        _ = agg.flush(elapsedSeconds: 2.0)
+        agg.stampSnapshot(monotonicSeconds: 123.5)
+
+        let snapshot = try #require(agg.latestCameraSnapshot)
+        #expect(snapshot.deliveredFps == 10.0) // 20 / 2.0
+        #expect(snapshot.dropOverflowRate == 1.5) // (1 didDrop + 2 overflow) / 2.0
+        #expect(snapshot.gapMsMax == 90.0)
+        #expect(snapshot.monotonicStampSeconds == 123.5)
+    }
+
+    @Test("reset (via flush of next window) does NOT clear the published snapshot")
+    func resetDoesNotClearSnapshot() throws {
+        var agg = StageRateAggregator(lane: "camera", stage: .capture, nominalFps: 30)
+        for _ in 0..<30 {
+            agg.recordFresh()
+        }
+        _ = agg.flush(elapsedSeconds: 1.0)
+        agg.stampSnapshot(monotonicSeconds: 10.0)
+        let first = try #require(agg.latestCameraSnapshot)
+        #expect(first.deliveredFps == 30.0)
+
+        // Next window flushes the (now zeroed) log accumulators. Without a stamp, the previously
+        // published snapshot must survive untouched — the coordinator can still pull it between flushes.
+        // Mutating flush() must run as a plain statement: inside a #require autoclosure `agg` is captured
+        // immutably, so the mutating call would not compile.
+        let secondLine = agg.flush(elapsedSeconds: 1.0)
+        let line = try #require(secondLine)
+        #expect(line.contains("fresh=0.0"))
+        let afterReset = try #require(agg.latestCameraSnapshot)
+        #expect(afterReset.deliveredFps == 30.0)
+        #expect(afterReset.monotonicStampSeconds == 10.0)
+    }
+
+    @Test("stamp advances the freshness while updating numerics across windows")
+    func snapshotUpdatesAcrossWindows() throws {
+        var agg = StageRateAggregator(lane: "camera", stage: .capture, nominalFps: 30)
+        for _ in 0..<30 {
+            agg.recordFresh()
+        }
+        _ = agg.flush(elapsedSeconds: 1.0)
+        agg.stampSnapshot(monotonicSeconds: 1.0)
+
+        for _ in 0..<5 {
+            agg.recordFresh()
+        }
+        _ = agg.flush(elapsedSeconds: 1.0)
+        agg.stampSnapshot(monotonicSeconds: 2.0)
+
+        let snapshot = try #require(agg.latestCameraSnapshot)
+        #expect(snapshot.deliveredFps == 5.0)
+        #expect(snapshot.monotonicStampSeconds == 2.0)
+    }
+
+    @Test("screen capture lane never publishes a snapshot")
+    func screenLaneNoSnapshot() {
+        var agg = StageRateAggregator(lane: "screen", stage: .capture, nominalFps: 60)
+        agg.recordFresh()
+        _ = agg.flush(elapsedSeconds: 1.0)
+        agg.stampSnapshot(monotonicSeconds: 5.0)
+        #expect(agg.latestCameraSnapshot == nil)
+    }
+
+    @Test("encoder camera lane never publishes a capture snapshot")
+    func encoderLaneNoSnapshot() {
+        var agg = StageRateAggregator(lane: "camera", stage: .encoder, nominalFps: 30)
+        agg.recordFresh()
+        _ = agg.flush(elapsedSeconds: 1.0)
+        agg.stampSnapshot(monotonicSeconds: 5.0)
+        #expect(agg.latestCameraSnapshot == nil)
+    }
+
+    @Test("stampSnapshot before any flush is a no-op")
+    func stampWithoutFlushNoOp() {
+        var agg = StageRateAggregator(lane: "camera", stage: .capture, nominalFps: 30)
+        agg.stampSnapshot(monotonicSeconds: 1.0)
+        #expect(agg.latestCameraSnapshot == nil)
+    }
+}
+
 // MARK: - Duration.totalSeconds ms conversion
 
 @Suite("Duration.totalSeconds — ms conversion")

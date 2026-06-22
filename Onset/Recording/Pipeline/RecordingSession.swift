@@ -476,6 +476,20 @@ actor RecordingSession {
             )
     }
 
+    /// The camera lane's latest rate snapshot, polled ~1 Hz by the coordinator (Phase C) to feed
+    /// `FpsCollapseDetector` (critical-recording-signals, T-B.2). Parallels `currentDrops()`: a
+    /// pure on-demand PULL, no stream / subscriber. Reads the source's own `captureRateLock` via the
+    /// `nonisolated currentRateSnapshot()` accessor — no second lock, no actor hop on the source.
+    ///
+    /// Returns `nil` before the first camera flush, when there is no camera pipeline (screen-only),
+    /// or after teardown. Only the camera lane is plumbed — encoder/writer snapshots feed no detector
+    /// (spec §Architecture). The snapshot's freshness stamp is seconds-since-session-T0 (the same
+    /// frame as the detector's tick clock), so the coordinator passes it straight in as
+    /// `FpsCollapseSample.sampleElapsedSeconds` to discard a frozen-camera reading.
+    func currentRates() -> CameraRateSnapshot? {
+        self.cameraPipeline?.source.currentRateSnapshot()
+    }
+
     // MARK: - Pipeline construction
 
     private func buildScreenPipeline(
