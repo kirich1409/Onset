@@ -50,14 +50,16 @@ drop'ов, резолв возможностей железа.
 
 | Тип | Файл | Роль |
 |---|---|---|
-| `RecordingSession` | `RecordingSession.swift` | Актор-оркестратор: владеет эпохой T0, строит источники/кодеры по плану, роутит, финализирует на stop |
+| `RecordingSession` | `RecordingSession.swift` | Актор-оркестратор: владеет эпохой T0, строит источники/кодеры по плану, роутит, финализирует на stop. Pull-швы для критических детекторов: `currentRates()` (последний `CameraRateSnapshot` камеры) и `currentSessionElapsedSeconds()` (`host_now − T0`, тот же монотонный кадр, что и стамп снапшота) — оба nonisolated, без стрима, по аналогии с `currentDrops()` |
 | `DualFileOutputStage` | `DualFileOutputStage.swift` | Актор: фан-аут закодированных video/audio в два writer'а; ретайминг, replay отложенного аудио, ленивое создание writer'ов |
 | `CapabilityResolver` | `CapabilityResolver.swift` | Чистая логика: размеры/fps экрана и камеры в рамках бюджета кодирования |
 | `CapabilityProbe` | `CapabilityProbe.swift` | Преflight (AC-6): проверка HW-кодера, финальный план через `CapabilityResolver` |
 | `DropMonitor` | `DropMonitor.swift` | Актор: учёт drop'ов и backpressure; эмитит `.normal` ↔ `.degraded` в UI; атрибутирует backpressure-потери по стадии и отдаёт `DropHealthSnapshot` (счётчики + доминирующая причина + latch `sessionEverDegraded`, на котором гейтится post-stop предупреждение) |
-| `PipelineTypes` | `PipelineTypes.swift` | Общие value-типы: `HostTimeAnchor` (T0), `VideoFrame`, `AudioSample`, `EncodedSample`, `DropEvent`, `DropCause`, `RecordingState`, `SourceEvent` |
+| `PipelineTypes` | `PipelineTypes.swift` | Общие value-типы: `HostTimeAnchor` (T0), `VideoFrame`, `AudioSample`, `EncodedSample`, `DropEvent`, `DropCause`, `RecordingState`, `SourceEvent` + критические сигналы: `CriticalIncident` (`cameraLost(scope:)`/`sustainedDrops`/`fpsCollapse`), `CriticalIncidentScope` (`cameraOnly`/`cameraAndScreen`), `CriticalSeverity` (`soft`/`hard`; `cameraLost(.cameraAndScreen)` — soft, остальное — hard) |
 | `RecordingComponentFactories` | `RecordingComponentFactories.swift` | DI-протоколы: `EncoderControlling`, `WriterControlling`, `EncoderFactory`, `WriterFactory`, `SourceFactory` + live-реализации |
-| `StageRateAggregator` | `StageRateAggregator.swift` | Телеметрия: per-stage частоты, причины drop'ов, лаги; flush в логи в конце сессии |
+| `StageRateAggregator` | `StageRateAggregator.swift` | Телеметрия: per-stage частоты, причины drop'ов, лаги; flush в логи в конце сессии. Камерная полоса публикует `CameraRateSnapshot` (deliveredFps, dropOverflowRate, gapMsMax, monotonicStampSeconds) для on-demand pull детектором fps-коллапса |
+| `FpsCollapseDetector` | `FpsCollapseDetector.swift` | Чистый nonisolated-детектор коллапса fps камеры (spec §3): скользящий baseline delivered-fps, freeze-baseline при входе в кандидат, firing по AND (dip < `fpsCollapseRatio × baseline` держится ≥ `fpsCollapseWindowSeconds` И подтверждается drop/overflow-rate ИЛИ gap > порога); отбрасывает протухшее (замёрзшая камера) чтение. Время — аргумент, без часов |
+| `SustainedDropDetector` | `SustainedDropDetector.swift` | Чистый nonisolated-детектор устойчивых потерь (spec §2): LIVE — `.degraded` держится непрерывно ≥ `criticalSustainSeconds` → hard; POST-STOP (stateless) — нормализованная интенсивность drops/мин ≥ `criticalDropRatePerMin` при длительности ≥ `criticalDropRateMinSessionSeconds` |
 
 Где искать:
 
@@ -67,6 +69,11 @@ drop'ов, резолв возможностей железа.
 - Drop'ы и состояние UI → `DropMonitor.observe()` → `recordingStateStream`; детальная модель учёта и атрибуции по причинам — [`architecture/drop-accounting.md`](architecture/drop-accounting.md).
 - Отзыв источника (AC-12) → `RecordingSession.handleSourceEvent()`.
 - Роутинг в файлы → `DualFileOutputStage.routeVideo/routeAudio()`.
+- Критические сигналы (поток данных): координатор на 1 Гц-тике делает pull
+  `currentRates()` + `currentSessionElapsedSeconds()`, прогоняет `FpsCollapseDetector`
+  и `SustainedDropDetector` (оба — чистые value-типы, время и состояние снаружи) и
+  сворачивает вердикты в свои критические значения (см. раздел UI). Детекторы живут в
+  пайплайне, оркестрация и публикация — в `RecordingCoordinator`.
 
 Конвенции:
 
@@ -121,7 +128,7 @@ TCC-разрешения, политика записи, запись MP4.
 | `EffectivePermissions` | `Permissions/EffectivePermissions.swift` | Чистый расчёт доступных режимов записи из трёх статусов |
 | `AppRouter` | `Permissions/AppRouter.swift` | Чистый роутинг стартового экрана (onboarding/allSet/main) из статусов и аргументов relaunch |
 | `AppRelauncher` | `Permissions/AppRelauncher.swift` | Self-relaunch при гранте screen recording; анти-луп флаг в UserDefaults, аргумент `--post-screen-grant` |
-| `RecordingStartNotifying` / `LiveRecordingStartNotifier` | `Permissions/RecordingStartNotifier.swift` | Тонкий сервис подтверждения старта (#242): протокол + live-реализация на `UNUserNotificationCenter`; lazy-auth (authorized → post; notDetermined → request → post; denied → silent fallback) |
+| `RecordingStartNotifying` / `LiveRecordingStartNotifier` | `Permissions/RecordingStartNotifier.swift` | Тонкий сервис уведомлений: подтверждение старта (#242) + критические сигналы. Live-канал `notifyCriticalIncident` ставит interruption level по ярусу из `incident.severity` (`hard` → `.timeSensitive` — пробивает Focus; `soft` → `.active`). Post-stop-канал `notifyPostStopSummary` — actionable: тап раскрывает технический отчёт в Finder (`activateFileViewerSelecting`, AC-12), не открывая окно (сохраняет #246). Live-реализация на `UNUserNotificationCenter`; lazy-auth (authorized → post; notDetermined → request → post; denied → silent fallback) |
 | `RecordingConfiguration` | `Configuration/RecordingConfiguration.swift` | Иммутабельная политика: HEVC-настройки, таблица VBR-битрейтов, границы fps, бюджет |
 | `OutputFolderKeys` | `Configuration/OutputFolderKeys.swift` | UserDefaults-ключ для персистирования базовой папки вывода (#225) |
 | `FileWriter` | `Storage/FileWriter.swift` | Актор: мультиплексирование HEVC+AAC в MP4 (passthrough); телеметрия drop/fault |
@@ -187,7 +194,7 @@ TCC-разрешения, политика записи, запись MP4.
 
 | Тип | Файл | Роль |
 |---|---|---|
-| `RecordingCoordinator` | `UI/RecordingCoordinator.swift` | Единственный владелец состояния записи (phase, recordingState, drops, elapsed) и единственный подписчик стримов сессии |
+| `RecordingCoordinator` | `UI/RecordingCoordinator.swift` | Единственный владелец состояния записи (phase, recordingState, drops, elapsed) и единственный подписчик стримов сессии. Оркестрирует критические сигналы на 1 Гц-тике: шагает оба детектора и держит ДВЕ оси — `liveCriticalView` (что показывает индикатор: severity × persistence — sticky one-shot camera-loss + de-escalating windowed-hard, объединённые) и `sessionMaxSeverityLatch` (макс. severity за сессию, только растёт → post-stop-уведомление). Live-уведомления гейтятся per-tier session-cap + per-window dedupe + severity-override |
 | `MainViewModel` | `UI/Main/MainViewModel.swift` | Выбор устройств и enable-логика кнопки Record (AC-2: экран обязателен, камера опциональна, guard невыбранного микрофона); список камер/микрофонов обновляется вживую через `observeDeviceChanges()` и при смене конфигурации экранов через `subscribeToDisplayChanges()` (закрытие крышки гасит внутренний дисплей → ре-энумерация устройств, скрывающая встроенный микрофон) (`MainViewModel+Devices.swift`); выбор и персистирование базовой папки вывода (#225) |
 | `outputSection` / `OutputFolderRow` | `UI/Main/MainView+Sections.swift` | Секция «ВЫВОД» главного окна: строка с текущей базовой папкой (путь сокращён через `~`) и кнопка выбора через `NSOpenPanel` (#225) |
 | `OnboardingViewModel` | `UI/Onboarding/OnboardingViewModel.swift` | Статусы карточек разрешений из `PermissionsProviding`; поллинг TCC экрана |
@@ -195,7 +202,7 @@ TCC-разрешения, политика записи, запись MP4.
 | `RecordingView` | `UI/Recording/RecordingView.swift` | Тонкий reader состояния координатора; логика статуса (индикатор деградации) в `RecordingDisplayMapper`. Drop-pill удалён — потери кадров пишутся в технический отчёт на диске |
 | `DropReportFormatter` | `Recording/Pipeline/DropReportFormatter.swift` | Чистый nonisolated-форматтер per-session технического отчёта о потерях кадров (русский plain-text); запись файла — в `RecordingOutput.writeReport` |
 | `GlobalHotKeyMonitor` | `UI/HotKey/GlobalHotKeyMonitor.swift` | Системный хоткей ⌘⌥⌃R через Carbon `RegisterEventHotKey`; зовёт `coordinator.stop()` |
-| `MenuBarLabelMapper` | `UI/MenuBar/MenuBarLabelMapper.swift` | Чистый enum: phase+state → дескриптор лейбла меню-бара (красная/жёлтая точка, таймер, accessibilityLabel) |
+| `MenuBarLabelMapper` | `UI/MenuBar/MenuBarLabelMapper.swift` | Чистый enum: phase+state(+`liveCriticalView`) → дескриптор лейбла меню-бара (красная/жёлтая точка, таймер, accessibilityLabel). Hard-критический инцидент даёт красный октагон с восклицательным глифом (`exclamationmark.octagon.fill`), приоритет hard critical > degraded > normal; soft `cameraAndScreen` октагон не рисует (экран пишется), только обновляет a11y-label |
 | `PermissionCardView` | `UI/Onboarding/PermissionCardView.swift` | Переиспользуемая карточка онбординга: иконка, статус-чип, кнопка, инструкции |
 
 Где искать:
@@ -206,6 +213,12 @@ TCC-разрешения, политика записи, запись MP4.
   `validateRecordGuards`.
 - Stop из меню-бара (AC-9) → `MenuBarMenu.recordingMenu` → `coordinator.stop()`; hotkey ⌘⌥⌃R виден в меню через `.keyboardShortcut` (#242).
 - Старт без окна (#242) → `activateRecording()` вызывает `notifier.notifyRecordingStarted()`; окно открывается вручную через «Открыть окно записи».
+- Критические сигналы (оркестрация) → `RecordingCoordinator.stepCriticalDetectors()`
+  (тик-луп, шагает `FpsCollapseDetector`/`SustainedDropDetector` на монотонном клоке
+  сессии), `handleCameraLoss(scope:)` (потеря камеры → `liveCriticalView`), gating
+  live-уведомлений → `dispatchLiveNotification()`, post-stop-итог →
+  `finalizePostStopSummary()` (сворачивает `evaluatePostStop` AC-4 в латч). Индикатор —
+  `MenuBarLabelMapper.descriptor(...,liveCriticalView:)`.
 - Lifecycle превью камеры → `MainViewModel+Preview.swift`
   (`previewGeneration` + `.task(id:)`). Пока кадров нет — плейсхолдер в
   `cameraConnectingOverlay` (`MainView+Sections.swift`): спиннер «Подключение
@@ -256,6 +269,7 @@ TCC-разрешения, политика записи, запись MP4.
 - VideoToolbox — <https://developer.apple.com/documentation/videotoolbox>
 - Swift Testing — <https://developer.apple.com/documentation/testing>
 - MenuBarExtra — <https://developer.apple.com/documentation/swiftui/menubarextra>
+- UserNotifications: уровни прерывания (Time Sensitive) — <https://developer.apple.com/documentation/usernotifications/unnotificationinterruptionlevel> и <https://developer.apple.com/documentation/usernotifications/unnotificationcontent/interruptionlevel> (проверены 2026-06-22; `.timeSensitive` требует entitlement `com.apple.developer.usernotifications.time-sensitive`)
 - Privacy manifests — <https://developer.apple.com/documentation/bundleresources/privacy-manifest-files>
 - Required-Reason API — <https://developer.apple.com/documentation/bundleresources/describing-use-of-required-reason-api>
 - Миграция на Swift 6 concurrency — <https://www.swift.org/migration/>
