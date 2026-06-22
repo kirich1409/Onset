@@ -71,10 +71,27 @@ nonisolated protocol RecordingControlling: Sendable {
     /// The session's current drop health snapshot, polled by the coordinator for the
     /// recording-window drop pill. Returns a zero / never-degraded snapshot before start / after stop.
     func currentDrops() async -> DropHealthSnapshot
+
+    /// The camera lane's latest rate snapshot, pulled ~1 Hz by the coordinator to feed
+    /// `FpsCollapseDetector` (critical-recording-signals, Phase B/C). A pure on-demand pull — no
+    /// stream, no subscriber. Returns `nil` before the first camera flush, for a screen-only session,
+    /// or after teardown. `async` like `currentDrops()` (it reads actor-isolated pipeline state); the
+    /// underlying snapshot read on the source is itself lock-based, no second lock.
+    func currentRates() async -> CameraRateSnapshot?
+
+    /// Monotonic session-relative elapsed time in seconds (`host_now − sessionT0`), where `sessionT0`
+    /// is the session anchor (`HostTimeAnchor.anchorTime`). This is the SAME clock frame as
+    /// `CameraRateSnapshot.monotonicStampSeconds`, so the coordinator passes this straight to the pure
+    /// detectors as `elapsedSeconds` and the snapshot stamp straight as `sampleElapsedSeconds` with no
+    /// conversion — the only way the staleness gate and warmup skip stay correct (critical-recording-
+    /// signals, Phase C). CoreMedia stays inside the session; the UI layer never imports it. Returns
+    /// `0` before `start()` captures the anchor or after teardown.
+    func currentSessionElapsedSeconds() async -> Double
 }
 
 // MARK: - RecordingSession conformance
 
-/// `RecordingSession` already exposes `recordingStateStream`, `start(permissions:)`, `stop()`, and
-/// `currentDrops()` with these exact signatures — conformance is a declaration only.
+/// `RecordingSession` already exposes `recordingStateStream`, `start(permissions:)`, `stop()`,
+/// `currentDrops()`, `currentRates()`, and `currentSessionElapsedSeconds()` with these exact
+/// signatures — conformance is a declaration only.
 extension RecordingSession: RecordingControlling {}
