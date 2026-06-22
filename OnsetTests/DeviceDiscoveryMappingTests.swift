@@ -300,8 +300,8 @@ struct MicrophonesAvailableTests {
 
     @Test("lid closed — built-in mic removed, external kept")
     func lidClosed_builtInRemoved_externalKept() {
-        let builtIn = makeBuiltIn(id: "builtin")
-        let external = makeExternal(id: "usb-mic")
+        let builtIn = self.makeBuiltIn(id: "builtin")
+        let external = self.makeExternal(id: "usb-mic")
         let devices = [builtIn, external]
 
         let result = DeviceDiscovery.microphonesAvailable(devices, lidClosed: true)
@@ -330,7 +330,7 @@ struct MicrophonesAvailableTests {
 
     @Test("lid open — built-in mic present in result")
     func lidOpen_builtInPresent() {
-        let builtIn = makeBuiltIn(id: "builtin")
+        let builtIn = self.makeBuiltIn(id: "builtin")
         let devices = [builtIn]
 
         let result = DeviceDiscovery.microphonesAvailable(devices, lidClosed: false)
