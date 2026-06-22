@@ -154,6 +154,35 @@ TCC-разрешения, политика записи, запись MP4.
   `AppRouter`) не импортируют AVFoundation; маппинг во framework-константы — на
   уровне кодера/writer'а/обёрток.
 
+### Выбор бэкенда записи (backend-selection seam)
+
+Per-stage шов для выбора реализации каждого звена пайплайна (захват / кодирование /
+запись в файл). Позволяет подменять реализацию через конфигурацию без изменений в
+остальном коде.
+
+| Тип | Файл | Роль |
+|---|---|---|
+| `SourceBackend` / `EncoderBackend` / `WriterBackend` | `Configuration/BackendSelectionTypes.swift` | Single-case enum'ы (`.live`) с каноническим `rawString` и `init?(rawString:)` для round-trip-персистирования. Ручной `nonisolated static func ==` обходит MainActor-инференс синтезированных conformances на enum'ах |
+| `ResolvedBackendSelection` | `Configuration/BackendSelectionTypes.swift` | Nonisolated struct: результат резолва (три поля — по одному enum'у на стадию); производится резолвером, потребляется composition root для построения конкретных фабрик |
+| `PersistedBackendSelection` | `Configuration/BackendSelectionTypes.swift` | Codable struct: сырая форма для UserDefaults; поля опциональные строки (`rawString`); `nil` = не задано → резолвер выбирает `.live` |
+| `BackendSelectionKeys` | `Configuration/BackendSelectionKeys.swift` | UserDefaults-ключ `onset.backend.selection` (единый JSON-блоб, по аналогии с `DeviceSelectionKeys`) |
+| `RecordingBackendResolver` | `Storage/RecordingBackendResolver.swift` | `nonisolated enum`, pure-функция `resolve(persisted:supported:) -> ResolvedBackendSelection`. Три ветки на стадию: `nil` → `.live`; неизвестная строка → `.live` + `warning`-лог; known-but-unsupported → `.live` + `warning`-лог. Никогда не бросает; всегда возвращает корректный результат |
+| `SupportedBackends` | `Storage/RecordingBackendResolver.swift` | Nonisolated struct: снапшот доступных бэкендов (Bool-поле на стадию); `allSupported` — продакшн-дефолт; тесты передают `false` для проверки fallback-ветки |
+| `BackendSelectionPersisting` | `Storage/BackendSelectionStore.swift` | DI-протокол: `load() -> PersistedBackendSelection?`, `save(_:)`, `clear()` |
+| `UserDefaultsBackendSelectionStore` | `Storage/BackendSelectionStore.swift` | Живая реализация: один JSON-блоб в `UserDefaults` по ключу из `BackendSelectionKeys`. Та же fail-fast XCTest-guard против засорения `UserDefaults.standard`, что и в `UserDefaultsDeviceSelectionStore` |
+
+Точка проводки — `RecordingCoordinator`:
+
+- Хранит `backendStore: any BackendSelectionPersisting` (инжектируется, дефолт —
+  `UserDefaultsBackendSelectionStore()`).
+- В `start()` вызывает `RecordingBackendResolver.resolve(persisted: backendStore.load(), supported: .allSupported)` → `ResolvedBackendSelection`.
+- Дефолтная `sessionFactory` принимает `(RecordingRequest, ResolvedBackendSelection)` и строит конкретные `Live*`-фабрики switch-ами per-stage.
+- `RecordingSession` остаётся DI-синком: принимает готовые фабрики через параметры, сам не знает о `ResolvedBackendSelection`. Writer передаётся через `writerFactoryBuilder: ((URL) -> any WriterFactory)? = nil` — builder получает session-owned `urlProvider`, что позволяет writer-фабрике знать путь файла.
+
+Что вне этой модели: fused-бэкенд, заменяющий всю топологию source→encoder→writer
+единым объектом (например, `SCRecordingOutput`), — это иная архитектурная задача,
+не покрываемая per-stage enum'ами (см. #177 / #178).
+
 ## Диагностика — `Onset/Diagnostics/`
 
 Экспорт журнала событий приложения для поддержки (#164).
