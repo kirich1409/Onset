@@ -1962,6 +1962,102 @@ struct RecordingSessionProductionNamingTests {
     }
 }
 
+// MARK: - writerFactoryBuilder DI seam
+
+/// Overload of `makeSession` that accepts a `writerFactoryBuilder` closure instead of a
+/// pre-built `writers:` factory. Allows tests to verify that the builder is called and that
+/// the URL provider it receives produces sessionDirectory-rooted paths.
+private func makeSession(
+    writerFactoryBuilder: (@Sendable (@escaping @Sendable (RecordingPipelineKind) -> URL) -> any WriterFactory)? = nil
+)
+-> RecordingSession {
+    let encoders = FakeEncoderFactory()
+    let sources = FakeSourceFactory()
+    let okProbe: @Sendable () -> ProbeResult = { .ok(SessionFixtures.plan()) }
+    return RecordingSession(
+        plan: SessionFixtures.plan(),
+        display: SessionFixtures.display(),
+        cameraDevice: SessionFixtures.cameraDevice(),
+        cameraFormat: SessionFixtures.cameraFormat(),
+        micDevice: SessionFixtures.micDevice(),
+        config: .mvpDefault,
+        probe: okProbe,
+        encoderFactory: encoders,
+        writerFactoryBuilder: writerFactoryBuilder,
+        sourceFactory: sources
+    )
+}
+
+/// Overload of `makeSession` that accepts both an explicit `writers:` factory and a
+/// `writerFactoryBuilder`, allowing tests to verify the priority chain.
+private func makeSession(
+    writers: SessionFakeWriterFactory,
+    writerFactoryBuilder: (@Sendable (@escaping @Sendable (RecordingPipelineKind) -> URL) -> any WriterFactory)? = nil
+)
+-> RecordingSession {
+    let encoders = FakeEncoderFactory()
+    let sources = FakeSourceFactory()
+    let okProbe: @Sendable () -> ProbeResult = { .ok(SessionFixtures.plan()) }
+    return RecordingSession(
+        plan: SessionFixtures.plan(),
+        display: SessionFixtures.display(),
+        cameraDevice: SessionFixtures.cameraDevice(),
+        cameraFormat: SessionFixtures.cameraFormat(),
+        micDevice: SessionFixtures.micDevice(),
+        config: .mvpDefault,
+        probe: okProbe,
+        encoderFactory: encoders,
+        writerFactory: writers,
+        writerFactoryBuilder: writerFactoryBuilder,
+        sourceFactory: sources
+    )
+}
+
+// MARK: - writerFactoryBuilder wiring tests
+
+/// Verifies the three-way priority chain: explicit `writerFactory` > `writerFactoryBuilder` >
+/// live `LiveWriterFactory`.
+///
+/// These tests exercise `RecordingSession.init` in isolation — no session start, no hardware.
+@Suite("RecordingSession — writerFactoryBuilder wiring")
+struct RecordingSessionBuilderWiringTests {
+    // MARK: - Priority: explicit writerFactory beats writerFactoryBuilder
+
+    /// When both `writerFactory` and `writerFactoryBuilder` are provided, the explicit factory
+    /// is used and the builder is never called (the `??` short-circuits).
+    @Test("writerFactory wins over writerFactoryBuilder when both provided")
+    func writerFactory_winsOverBuilder_whenBothProvided() {
+        final class BuilderInvoked: @unchecked Sendable { var called = false }
+        let invoked = BuilderInvoked()
+        let explicit = SessionFakeWriterFactory()
+        let session = makeSession(writers: explicit) { _ in
+            invoked.called = true
+            return SessionFakeWriterFactory()
+        }
+        #expect(!invoked.called)
+        _ = session // silence unused-result warning
+    }
+
+    // MARK: - writerFactoryBuilder receives a sessionDirectory-rooted URL provider
+
+    /// When `writerFactoryBuilder` is provided (and `writerFactory` is nil), the builder is
+    /// called with a URL provider whose output is a descendant of `session.sessionDirectory`.
+    @Test("writerFactoryBuilder receives a sessionDirectory-rooted URL provider")
+    func writerFactoryBuilder_receivesSessionDirRootedURLProvider() {
+        final class CapturedURL: @unchecked Sendable { var value: URL? }
+        let captured = CapturedURL()
+        let session = makeSession { urlProvider in
+            captured.value = urlProvider(.screen)
+            return LiveWriterFactory(configuration: .mvpDefault, urlProvider: urlProvider)
+        }
+        guard let url = captured.value else {
+            Issue.record("writerFactoryBuilder was not called")
+            return
+        }
+        #expect(url.path(percentEncoded: false).hasPrefix(session.sessionDirectory.path(percentEncoded: false)))
+    }
+}
+
 // swiftlint:enable no_magic_numbers
 // swiftlint:enable function_body_length
 // file_length stays disabled through EOF: it is a whole-file rule, so re-enabling it before the
