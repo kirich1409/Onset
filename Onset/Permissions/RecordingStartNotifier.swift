@@ -1,3 +1,5 @@
+import AppKit
+import Foundation
 import os
 import UserNotifications
 
@@ -52,8 +54,14 @@ protocol RecordingStartNotifying: AnyObject {
     /// Posts a POST-STOP summary notification keyed by the session's max severity (`hard` / `soft`).
     ///
     /// Non-blocking, same contract as `notifyRecordingStarted()`.
-    /// - Parameter severity: The maximum severity seen across the session.
-    func notifyPostStopSummary(severity: CriticalSeverity)
+    ///
+    /// The notification is actionable: a tap reveals `reportURL` in Finder (AC-12, macOS convention —
+    /// it does NOT force the app window open, preserving #246). When `reportURL` is `nil` the
+    /// notification is still posted but carries no reveal payload (degenerate session with no report).
+    /// - Parameters:
+    ///   - severity: The maximum severity seen across the session.
+    ///   - reportURL: The on-disk technical-report file to reveal on tap, or `nil` when unavailable.
+    func notifyPostStopSummary(severity: CriticalSeverity, reportURL: URL?)
 }
 
 // MARK: - Live implementation
@@ -68,7 +76,17 @@ protocol RecordingStartNotifying: AnyObject {
 /// The notification request uses `trigger: nil` so it fires instantly.
 /// Scheduling errors are logged at `.error` level; a failed post never aborts the recording.
 @MainActor
-final class LiveRecordingStartNotifier: RecordingStartNotifying {
+final class LiveRecordingStartNotifier: NSObject, RecordingStartNotifying {
+    // MARK: - Init
+
+    /// Registers `self` as the notification-center delegate so a tap on the post-stop notification
+    /// reaches `userNotificationCenter(_:didReceive:withCompletionHandler:)` and reveals the report
+    /// (AC-12). The delegate must be set before any notification is delivered.
+    override init() {
+        super.init()
+        UNUserNotificationCenter.current().delegate = self
+    }
+
     // MARK: - RecordingStartNotifying
 
     /// Schedules a "recording started" local notification on a fire-and-forget `Task`.
@@ -87,8 +105,11 @@ final class LiveRecordingStartNotifier: RecordingStartNotifying {
     }
 
     /// Schedules a post-stop summary notification on a fire-and-forget `Task`, keyed by max severity.
-    func notifyPostStopSummary(severity: CriticalSeverity) {
-        let content = Self.postStopContent(for: severity)
+    ///
+    /// `reportURL` (when present) is stored in the content's `userInfo` so the delegate can reveal it
+    /// on tap (AC-12).
+    func notifyPostStopSummary(severity: CriticalSeverity, reportURL: URL?) {
+        let content = Self.postStopContent(severity: severity, reportURL: reportURL)
         Task { await self.postNotification(content: content, identifier: Self.criticalPostStopIdentifier) }
     }
 
@@ -97,6 +118,9 @@ final class LiveRecordingStartNotifier: RecordingStartNotifying {
     private static let startedIdentifier = "dev.androidbroadcast.Onset.recordingStarted"
     private static let criticalLiveIdentifier = "dev.androidbroadcast.Onset.criticalLive"
     private static let criticalPostStopIdentifier = "dev.androidbroadcast.Onset.criticalPostStop"
+
+    /// `userInfo` key carrying the report file path (`String`) to reveal on tap (AC-12).
+    nonisolated private static let reportPathUserInfoKey = "dev.androidbroadcast.Onset.reportPath"
 
     // MARK: - Content builders
 
@@ -127,7 +151,7 @@ final class LiveRecordingStartNotifier: RecordingStartNotifying {
         return content
     }
 
-    private static func postStopContent(for severity: CriticalSeverity) -> UNMutableNotificationContent {
+    private static func postStopContent(severity: CriticalSeverity, reportURL: URL?) -> UNMutableNotificationContent {
         let content = UNMutableNotificationContent()
         switch severity {
         case .hard:
@@ -140,6 +164,11 @@ final class LiveRecordingStartNotifier: RecordingStartNotifying {
             content.body = "Камера отключилась во время записи; экран записан полностью."
         }
         content.interruptionLevel = severity.interruptionLevel
+        // Carry the report path for the tap-to-reveal action (AC-12). Stored as a String (a plain
+        // property-list type) so the notification payload stays serializable.
+        if let reportURL {
+            content.userInfo = [Self.reportPathUserInfoKey: reportURL.path]
+        }
         return content
     }
 
@@ -192,6 +221,35 @@ final class LiveRecordingStartNotifier: RecordingStartNotifying {
             notifierLogger.error(
                 "UN add notification failed: \(error.localizedDescription)"
             )
+        }
+    }
+}
+
+// MARK: - UNUserNotificationCenterDelegate
+
+extension LiveRecordingStartNotifier: UNUserNotificationCenterDelegate {
+    /// Handles a tap on the post-stop notification by revealing the technical report in Finder (AC-12).
+    ///
+    /// The default action (`UNNotificationDefaultActionIdentifier`) is the plain tap — the macOS
+    /// convention for "open the relevant item" without a custom action button. Revealing in Finder
+    /// (rather than opening the app window) preserves the menu-bar-first behavior of #246.
+    ///
+    /// `nonisolated`: the system invokes this on an arbitrary queue. The reveal is hopped to the main
+    /// actor (`NSWorkspace` UI work). The completion handler is always called so the system can release
+    /// the response.
+    nonisolated func userNotificationCenter(
+        _: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        defer { completionHandler() }
+        guard response.actionIdentifier == UNNotificationDefaultActionIdentifier else { return }
+        guard let path = response.notification.request.content.userInfo[Self.reportPathUserInfoKey] as? String
+        else { return }
+
+        let reportURL = URL(filePath: path)
+        Task { @MainActor in
+            NSWorkspace.shared.activateFileViewerSelecting([reportURL])
         }
     }
 }

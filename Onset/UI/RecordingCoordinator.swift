@@ -878,7 +878,7 @@ final class RecordingCoordinator {
     /// Fire-and-forget only: it must not touch `hasPendingAlert` or the window choreography (#246 /
     /// T0.1 — the existing degraded path is log-only + reveal, no UI warning surface; the critical
     /// post-stop is a separate, additive path that preserves that behavior).
-    private func finalizePostStopSummary(result: RecordingResult) {
+    private func finalizePostStopSummary(result: RecordingResult, sessionDir: URL, sessionStartDate: Date) {
         // Post-stop drop-rate (AC-4): normalized intensity over the monotonic session duration. Uses
         // encoderBackpressureDrops — the same reason that drives `degraded` (spec §2 escalation).
         let postStopHard = SustainedDropDetector.evaluatePostStop(
@@ -894,7 +894,22 @@ final class RecordingCoordinator {
             // No critical incident this session → disk-only (#246), no post-stop notification.
             return
         }
-        self.notifier.notifyPostStopSummary(severity: severity)
+        // Reconstruct the report file URL so the tap action reveals it in Finder (AC-12). The report
+        // shares the session-start timestamp and lives inside the session folder (`RecordingOutput`).
+        // `URL(filePath:relativeTo:)` REPLACES the base's last path component when the base is not
+        // flagged as a directory (e.g. `/tmp/session` → `/tmp/<report>`, dropping the session folder).
+        // Re-flag the base as a directory first so the report always resolves as a child, yielding the
+        // identical on-disk path that `RecordingOutput.writeReport(_:in:timestamp:)` produces at write
+        // time. Real session dirs are already directory-flagged (`OutputDirectoryNaming`); this guards
+        // any caller that passes a non-flagged URL.
+        let sessionDirectory = sessionDir.hasDirectoryPath
+            ? sessionDir
+            : URL(filePath: sessionDir.path(percentEncoded: false), directoryHint: .isDirectory)
+        let reportURL = URL(
+            filePath: RecordingOutput.reportFileName(timestamp: sessionStartDate),
+            relativeTo: sessionDirectory
+        )
+        self.notifier.notifyPostStopSummary(severity: severity, reportURL: reportURL)
     }
 
     // MARK: - Stop (AC-9) — funnel for all three stop paths
@@ -930,8 +945,11 @@ final class RecordingCoordinator {
         self.revocationTask = nil
         await tick?.value
 
-        // Capture sessionDirectory before the await — nonisolated let, safe to read synchronously.
+        // Capture sessionDirectory + start date before the await — nonisolated lets, safe to read
+        // synchronously. The start date derives the report file name for the actionable post-stop
+        // notification (AC-12).
         let sessionDir = session.sessionDirectory
+        let sessionStartDate = session.sessionStartDate
 
         let result = await session.stop()
 
@@ -949,7 +967,7 @@ final class RecordingCoordinator {
         // max severity, then notify by tier. AC-4: a session with high cumulative drop intensity that
         // never held degraded continuously still qualifies as hard post-stop — the live latch alone
         // would miss it, so `evaluatePostStop` runs here against the result.
-        self.finalizePostStopSummary(result: result)
+        self.finalizePostStopSummary(result: result, sessionDir: sessionDir, sessionStartDate: sessionStartDate)
 
         // Transient finished phase, then return to the origin (spec lifecycle).
         self.phase = .finished

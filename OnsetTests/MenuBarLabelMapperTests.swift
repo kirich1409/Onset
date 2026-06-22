@@ -110,6 +110,119 @@ struct MenuBarLabelMapperRecordingDegradedTests {
     }
 }
 
+// MARK: - Critical (hard) states — AC-11
+
+@Suite("MenuBarLabelMapper — critical states")
+@MainActor
+struct MenuBarLabelMapperCriticalTests {
+    @Test("sustainedDrops (hard) uses critical octagon symbol, not degraded/normal")
+    func sustainedDropsUsesOctagon() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .normal,
+            elapsed: 60,
+            liveCriticalView: .sustainedDrops
+        )
+        #expect(desc.dot == .critical)
+        #expect(desc.dot.systemName == "exclamationmark.octagon.fill")
+    }
+
+    @Test("fpsCollapse (hard) uses critical octagon symbol")
+    func fpsCollapseUsesOctagon() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .normal,
+            elapsed: 60,
+            liveCriticalView: .fpsCollapse
+        )
+        #expect(desc.dot == .critical)
+        #expect(desc.dot.systemName == "exclamationmark.octagon.fill")
+    }
+
+    @Test("cameraOnly (hard, terminal) uses octagon, drops the timer, distinct a11y")
+    func cameraOnlyUsesOctagon() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .normal,
+            elapsed: 60,
+            liveCriticalView: .cameraLost(scope: .cameraOnly)
+        )
+        #expect(desc.dot == .critical)
+        #expect(desc.elapsed == nil)
+        #expect(desc.accessibilityLabel == "Onset, критическая ошибка: камера отключена, запись остановлена")
+    }
+
+    @Test("Critical a11y label is distinct from degraded and from normal")
+    func criticalA11yDistinctFromDegradedAndNormal() {
+        let normal = MenuBarLabelMapper.descriptor(phase: .recording, recordingState: .normal, elapsed: 60)
+        let degraded = MenuBarLabelMapper.descriptor(phase: .recording, recordingState: .degraded, elapsed: 60)
+        let critical = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .normal,
+            elapsed: 60,
+            liveCriticalView: .sustainedDrops
+        )
+        #expect(critical.accessibilityLabel != degraded.accessibilityLabel)
+        #expect(critical.accessibilityLabel != normal.accessibilityLabel)
+    }
+
+    @Test("Precedence: hard critical outranks degraded — octagon, not yellow")
+    func hardOutranksDegraded() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .degraded,
+            elapsed: 60,
+            liveCriticalView: .fpsCollapse
+        )
+        #expect(desc.dot == .critical)
+        #expect(desc.dot != .yellow)
+        #expect(desc.dot.showsWarning == false)
+    }
+
+    @Test("cameraAndScreen (soft) shows NO octagon but updates the a11y label")
+    func softShowsNoOctagonButUpdatesA11y() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .normal,
+            elapsed: 60,
+            liveCriticalView: .cameraLost(scope: .cameraAndScreen)
+        )
+        #expect(desc.dot == .red)
+        #expect(desc.dot != .critical)
+        #expect(desc.accessibilityLabel == "Onset, камера отключена, запись экрана продолжается, 01:00")
+    }
+
+    @Test("cameraAndScreen (soft) over degraded keeps the yellow dot, no octagon")
+    func softOverDegradedKeepsYellow() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .degraded,
+            elapsed: 60,
+            liveCriticalView: .cameraLost(scope: .cameraAndScreen)
+        )
+        #expect(desc.dot == .yellow)
+        #expect(desc.dot != .critical)
+    }
+
+    @Test("No liveCriticalView leaves normal/degraded mapping unchanged")
+    func nilCriticalLeavesBaselineMapping() {
+        let normal = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .normal,
+            elapsed: 60,
+            liveCriticalView: nil
+        )
+        let degraded = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .degraded,
+            elapsed: 60,
+            liveCriticalView: nil
+        )
+        #expect(normal.dot == .red)
+        #expect(degraded.dot == .yellow)
+    }
+}
+
 // MARK: - Phase transitions
 
 @Suite("MenuBarLabelMapper — phase transitions")

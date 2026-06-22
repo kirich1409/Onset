@@ -8,5 +8,9 @@
 	<!-- Hardened Runtime: allow microphone/audio input (required for voice recording into video track) -->
 	<key>com.apple.security.device.audio-input</key>
 	<true/>
+	<!-- Time Sensitive notifications: post-stop/critical alerts break through Focus (hard tier →
+	     UNNotificationInterruptionLevel.timeSensitive). No Apple approval required, unlike critical-alert. -->
+	<key>com.apple.developer.usernotifications.time-sensitive</key>
+	<true/>
 </dict>
 </plist>

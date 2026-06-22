@@ -1,3 +1,4 @@
+import Foundation
 @testable import Onset
 import UserNotifications
 
@@ -25,6 +26,10 @@ final class FakeRecordingStartNotifier: RecordingStartNotifying {
     /// Post-stop summary severities recorded, in call order.
     private(set) var postStopSeverities: [CriticalSeverity] = []
 
+    /// Report URLs passed to each post-stop summary call, in call order (same index as
+    /// `postStopSeverities`). `nil` when the call carried no reveal payload (degenerate session).
+    private(set) var postStopReportURLs: [URL?] = []
+
     // MARK: - RecordingStartNotifying
 
     /// Records the call synchronously; does not post any real notification.
@@ -38,8 +43,9 @@ final class FakeRecordingStartNotifier: RecordingStartNotifying {
         self.criticalIncidentLevels.append(incident.severity.interruptionLevel)
     }
 
-    /// Records the post-stop max severity.
-    func notifyPostStopSummary(severity: CriticalSeverity) {
+    /// Records the post-stop max severity and the report URL threaded for the tap-to-reveal action.
+    func notifyPostStopSummary(severity: CriticalSeverity, reportURL: URL?) {
         self.postStopSeverities.append(severity)
+        self.postStopReportURLs.append(reportURL)
     }
 }

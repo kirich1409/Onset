@@ -1,3 +1,4 @@
+import Foundation
 @testable import Onset
 import Testing
 import UserNotifications
@@ -111,12 +112,14 @@ struct CriticalNotifierContractTests {
         #expect(fake.criticalIncidentLevels == [.active])
     }
 
-    @Test("post-stop summary records the severity passed")
-    func postStopSummary_recordsSeverity() {
+    @Test("post-stop summary records the severity and report URL passed")
+    func postStopSummary_recordsSeverityAndReportURL() {
         let fake = FakeRecordingStartNotifier()
-        fake.notifyPostStopSummary(severity: .hard)
-        fake.notifyPostStopSummary(severity: .soft)
+        let reportURL = URL(filePath: "/tmp/onset-fake-session/report.txt")
+        fake.notifyPostStopSummary(severity: .hard, reportURL: reportURL)
+        fake.notifyPostStopSummary(severity: .soft, reportURL: nil)
         #expect(fake.postStopSeverities == [.hard, .soft])
+        #expect(fake.postStopReportURLs == [reportURL, nil])
     }
 
     @Test("severity maps to interruption level via the shared mapping")

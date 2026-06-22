@@ -60,6 +60,15 @@ nonisolated protocol RecordingControlling: Sendable {
     /// `nonisolated` because `URL` is a value type and the property is set once at init.
     nonisolated var sessionDirectory: URL { get }
 
+    /// The session-start timestamp, shared with the recording files and the technical report name.
+    ///
+    /// Captured once at `init` (the same `Date` that derives `sessionDirectory`). Exposed so the
+    /// coordinator can reconstruct the report file URL for the actionable post-stop notification
+    /// (AC-12) without holding a reference to the session after `stop()`.
+    ///
+    /// `nonisolated` because `Date` is a value type and the property is set once at init.
+    nonisolated var sessionStartDate: Date { get }
+
     /// Starts the session. Throws `RecordingError` on the AC-6 / AC-11 blocking paths. Never throws
     /// `.budgetExceeded` — the session self-adopts the reduced profile (research §3.1).
     func start(permissions: EffectivePermissions) async throws

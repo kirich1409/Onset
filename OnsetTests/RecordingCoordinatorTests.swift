@@ -40,8 +40,13 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
     nonisolated let captureActiveStream: AsyncStream<Void>
     private let captureActiveContinuation: AsyncStream<Void>.Continuation
 
-    /// Fake session directory — a sentinel path used in coordinator tests.
-    nonisolated let sessionDirectory = URL(filePath: "/tmp/onset-fake-session")
+    /// Fake session directory — a sentinel path used in coordinator tests. Flagged as a directory to
+    /// match real session dirs (`OutputDirectoryNaming.uniqueSessionDirectory` builds them with
+    /// `directoryHint: .isDirectory`); without the flag, child-path resolution drops the folder.
+    nonisolated let sessionDirectory = URL(filePath: "/tmp/onset-fake-session", directoryHint: .isDirectory)
+
+    /// Fake session-start timestamp — a fixed sentinel for deterministic report-URL derivation.
+    nonisolated let sessionStartDate = Date(timeIntervalSince1970: 0)
 
     private(set) var startCalled = false
     private(set) var stopCalled = false
@@ -1445,6 +1450,33 @@ struct RecordingCoordinatorPostStopTests {
         #expect(notifier.postStopSeverities == [.soft], "soft-only session → soft post-stop summary (not hard)")
     }
 
+    @Test("T-E.1: post-stop summary carries the report URL inside the session folder (AC-12 wiring)")
+    func postStop_carriesReportURL() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let notifier = FakeRecordingStartNotifier()
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake }, notifier: notifier)
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        fake.emitRevocation(.sourceRevoked(.camera))
+        let softSeen = await eventuallyMain { coordinator.sessionMaxSeverityLatch == .soft }
+        #expect(softSeen, "prerequisite: soft latch set by the camera revoke")
+
+        await coordinator.stop()
+
+        // The report URL is the session folder + the timestamped report name shared with the files.
+        let expectedReportURL = URL(
+            filePath: RecordingOutput.reportFileName(timestamp: fake.sessionStartDate),
+            relativeTo: fake.sessionDirectory
+        )
+        #expect(notifier.postStopReportURLs == [expectedReportURL])
+        // The deterministic deeper check: the reveal target lives inside the revealed session folder.
+        #expect(
+            notifier.postStopReportURLs.first??.deletingLastPathComponent().standardizedFileURL
+                == fake.sessionDirectory.standardizedFileURL,
+            "report URL must resolve inside the session folder so the tap reveals the on-disk report"
+        )
+    }
+
     @Test("AC-8: minor (sub-threshold) drops → no post-stop summary (disk-only, #246)")
     func postStop_minorDrops_noSummary() async throws {
         // 1 backpressure drop over a long session: well under criticalDropRatePerMin → no post-stop hard.
@@ -1494,7 +1526,7 @@ struct RecordingCoordinatorPostStopTests {
 private final class NoOpNotifier: RecordingStartNotifying {
     func notifyRecordingStarted() {}
     func notifyCriticalIncident(_: CriticalIncident) {}
-    func notifyPostStopSummary(severity _: CriticalSeverity) {}
+    func notifyPostStopSummary(severity _: CriticalSeverity, reportURL _: URL?) {}
 }
 
 // swiftlint:enable no_magic_numbers
