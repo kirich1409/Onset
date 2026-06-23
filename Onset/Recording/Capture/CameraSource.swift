@@ -209,8 +209,20 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
         }
         self.captureState = .stopped
         NotificationCenter.default.removeObserver(shims.video)
-        session.stopRunning()
+        self.releaseRunning(shims: shims, session: session)
         cameraSourceLogger.info("Capture stopped")
+    }
+
+    /// Releases the held configuration lock (if any) and stops the session.
+    ///
+    /// Single teardown point for the `.record` device lock that `buildAndStartSession` holds
+    /// from `setActiveFormat` through the whole session (#265). `shims.lockedDevice` is `nil`
+    /// for `.preview` (already unlocked) — the optional-chained `unlockForConfiguration()` is
+    /// then a no-op. `unlockForConfiguration()` on a disconnected/faulted device is also a safe
+    /// no-op, so the disconnect/fault teardown paths may call this unconditionally.
+    private func releaseRunning(shims: CameraCaptureShims, session: AVCaptureSession) {
+        shims.lockedDevice?.unlockForConfiguration()
+        session.stopRunning()
     }
 
     // MARK: - Terminal-stop handling
@@ -222,7 +234,7 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
         guard case let .running(session, shims) = self.captureState else { return }
         self.captureState = .stopped
         NotificationCenter.default.removeObserver(shims.video)
-        session.stopRunning()
+        self.releaseRunning(shims: shims, session: session)
         cameraSourceLogger.error("Camera device disconnected — stopping")
         self.eventsContinuation.yield(.cameraDisconnected)
         self.finishAllStreams()
@@ -243,7 +255,7 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
         guard case let .running(session, shims) = self.captureState else { return }
         self.captureState = .stopped
         NotificationCenter.default.removeObserver(shims.video)
-        session.stopRunning()
+        self.releaseRunning(shims: shims, session: session)
         cameraSourceLogger.error("Camera session fault — stopping: \(reason, privacy: .public)")
         self.eventsContinuation.yield(.cameraDisconnected)
         self.finishAllStreams()

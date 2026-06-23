@@ -10,7 +10,40 @@ extension CameraSource {
 
     func buildAndStartSession(anchor: HostTimeAnchor) async throws {
         let session = AVCaptureSession()
-        try self.configureSession(session)
+        let device = try self.resolveCameraDevice()
+
+        // Hold the device configuration lock from BEFORE configureSession through to
+        // either the preview unlock or the .record hand-off to teardown. Releasing the
+        // lock before startRunning() makes AVFoundation reconcile activeFormat back to a
+        // session default, silently reverting a 4K format to 1080p (#265, OBS format-path).
+        //
+        // INVARIANT (load-bearing — build does NOT enforce it): there must be NO `await`
+        // between this lockForConfiguration() and the transition to `.running`. The body
+        // below is synchronous from the actor's perspective (the only `await`s live inside
+        // the @Sendable onDisconnect/onSessionFault closures, which run later). An `await`
+        // here would stretch the lock across an actor suspension and open reentrancy /
+        // deadlock with stop().
+        do {
+            try device.lockForConfiguration()
+        } catch {
+            cameraSourceLogger.error("lockForConfiguration failed: \(error)")
+            throw RecordingError.captureSetupFailed(error)
+        }
+        // Single ownership flag. Cleared at exactly one of: the preview unlock below, or the
+        // `.record` hand-off to teardown. The defer fires only if neither happened (an error
+        // before either point) → exactly one unlock on every path, including preview-throw.
+        var locked = true
+        defer { if locked { device.unlockForConfiguration() } }
+
+        try self.configureSession(session, device: device)
+
+        // Preview never holds the lock while running: release immediately after configuration
+        // (still before startRunning, so no revert risk for preview's ≤1080p format). Record
+        // keeps the lock — ownership moves to teardown at the `.running` hand-off below.
+        if self.role == .preview {
+            device.unlockForConfiguration()
+            locked = false
+        }
 
         // Capture the synchronisation clock AFTER commitConfiguration so the session
         // has adopted whatever clock it will use (commonly the audio device clock).
@@ -25,12 +58,15 @@ extension CameraSource {
                 await self?.handleCameraSessionFault(reason: reason)
             }
 
+        // The locked device is bundled into the shims only for `.record`; preview passes nil
+        // (it already released the lock). Teardown reads it back to unlock via releaseRunning().
         let shims = self.makeShims(
             session: session,
             sessionStart: anchor.anchorTime,
             syncClock: syncClock,
             onDisconnect: onDisconnect,
-            onSessionFault: onSessionFault
+            onSessionFault: onSessionFault,
+            lockedDevice: self.role == .record ? device : nil
         )
         try self.attachOutputs(to: session, shims: shims)
 
@@ -45,6 +81,8 @@ extension CameraSource {
         // was suspended (before .running was set), captureState is now .stopped. Continuing
         // would overwrite it with .running and create a zombie session whose streams are
         // already finished. Observer is not yet registered, so no removal is needed here.
+        // The lock (if record still holds it) is released by the `defer` above — `locked`
+        // is still true on this abort path.
         guard case .starting = self.captureState else {
             session.stopRunning()
             cameraSourceLogger.info("Capture aborted — stop() called during startup")
@@ -54,23 +92,24 @@ extension CameraSource {
         // Observers registered after startRunning so a failed-start path never needs to remove them.
         self.registerDisconnectObserver(shims: shims, session: session)
         self.captureState = .running(session: session, shims: shims)
+        // Hand the lock's ownership to teardown: from here releaseRunning() in stop() /
+        // disconnect / fault is responsible for unlocking, so the defer must NOT fire.
+        locked = false
         cameraSourceLogger.info(
             "Capture started — dims: \(self.format.pixelWidth)×\(self.format.pixelHeight)"
         )
     }
 
-    /// Performs `beginConfiguration` / addInputs / `lockForConfiguration` / setActiveFormat
-    /// / `commitConfiguration`. Throws on any failure.
-    func configureSession(_ session: AVCaptureSession) throws {
-        session.beginConfiguration()
-        try self.addCameraInput(to: session)
-        if let mic = self.micDevice {
-            try self.addMicInput(mic: mic, to: session)
-        }
-        session.commitConfiguration()
-    }
-
-    func addCameraInput(to session: AVCaptureSession) throws {
+    /// Resolves and validates the configured camera `AVCaptureDevice` before session setup.
+    ///
+    /// Lifted out of `addCameraInput` so `buildAndStartSession` can acquire the configuration
+    /// lock on the resolved device before `configureSession` and hold it through `startRunning`
+    /// (#265). The device is passed down into `configureSession` / `addCameraInput` /
+    /// `makeCameraInput` / `activateFormat` rather than re-resolved.
+    ///
+    /// - Throws: `RecordingError.captureSetupFailed` with `.deviceNotFound` (no device for the
+    ///   configured `uniqueID`) or `.deviceSuspended` (lid closed after the picker populated).
+    func resolveCameraDevice() throws -> AVCaptureDevice {
         guard let device = AVCaptureDevice(uniqueID: self.cameraDevice.uniqueID) else {
             cameraSourceLogger.error("Camera device not found for configured uniqueID")
             throw RecordingError.captureSetupFailed(CameraSourceError.deviceNotFound)
@@ -82,6 +121,22 @@ extension CameraSource {
             cameraSourceLogger.error("Camera device is suspended — refusing capture setup")
             throw RecordingError.captureSetupFailed(CameraSourceError.deviceSuspended)
         }
+        return device
+    }
+
+    /// Performs `beginConfiguration` / addInputs / setActiveFormat / `commitConfiguration`.
+    /// Operates on the already-locked `device` resolved by `buildAndStartSession`; the
+    /// configuration lock is acquired and released by the caller, not here. Throws on any failure.
+    func configureSession(_ session: AVCaptureSession, device: AVCaptureDevice) throws {
+        session.beginConfiguration()
+        try self.addCameraInput(to: session, device: device)
+        if let mic = self.micDevice {
+            try self.addMicInput(mic: mic, to: session)
+        }
+        session.commitConfiguration()
+    }
+
+    func addCameraInput(to session: AVCaptureSession, device: AVCaptureDevice) throws {
         let input = try self.makeCameraInput(device)
         guard session.canAddInput(input) else {
             cameraSourceLogger.error("Cannot add camera input to session")
@@ -99,7 +154,7 @@ extension CameraSource {
             )
             throw RecordingError.noSuitableCameraFormat
         }
-        try self.activateFormat(liveFormat, fps: targetFps, on: device)
+        self.activateFormat(liveFormat, fps: targetFps, on: device)
         return input
     }
 
@@ -118,17 +173,17 @@ extension CameraSource {
         }
     }
 
+    /// Sets `activeFormat` and the min/max frame durations on an ALREADY-LOCKED device.
+    ///
+    /// The configuration lock is owned by `buildAndStartSession` (acquired before
+    /// `configureSession`, held through `startRunning` for `.record`) — this helper must not
+    /// lock or unlock, or it would drop the lock before start and let AVFoundation revert the
+    /// 4K format (#265).
     func activateFormat(
         _ liveFormat: AVCaptureDevice.Format,
         fps: Double,
         on device: AVCaptureDevice
-    ) throws {
-        do {
-            try device.lockForConfiguration()
-        } catch {
-            cameraSourceLogger.error("lockForConfiguration failed: \(error)")
-            throw RecordingError.captureSetupFailed(error)
-        }
+    ) {
         device.activeFormat = liveFormat
 
         // Use the frame duration from the matching AVFrameRateRange rather than
@@ -152,7 +207,6 @@ extension CameraSource {
             device.activeVideoMinFrameDuration = frameDuration
             device.activeVideoMaxFrameDuration = frameDuration
         }
-        device.unlockForConfiguration()
     }
 
     func addMicInput(mic: MicrophoneDevice, to session: AVCaptureSession) throws {
@@ -173,7 +227,8 @@ extension CameraSource {
         sessionStart: CMTime,
         syncClock: CMClock,
         onDisconnect: @escaping @Sendable () async -> Void,
-        onSessionFault: @escaping @Sendable (String) async -> Void
+        onSessionFault: @escaping @Sendable (String) async -> Void,
+        lockedDevice: AVCaptureDevice?
     )
     -> CameraCaptureShims {
         let video = VideoOutputShim(
@@ -193,7 +248,7 @@ extension CameraSource {
             audioSamplesContinuation: self.audioSamplesContinuation,
             dropsContinuation: self.dropsContinuation
         )
-        return CameraCaptureShims(video: video, audio: audio)
+        return CameraCaptureShims(video: video, audio: audio, lockedDevice: lockedDevice)
     }
 
     func attachOutputs(to session: AVCaptureSession, shims: CameraCaptureShims) throws {
