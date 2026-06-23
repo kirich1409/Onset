@@ -10,7 +10,10 @@ Issue #265. Status: review CONDITIONAL (cycle 2) → improvements applied → re
 - [x] T-5 — Подтвердить preview/devices не уходят в 4K (verify, 0 правок)
 - [x] T-6 — CapabilityResolver budget cross-effect (4K-камера vs экран)
 - [x] T-7 — Encode: bitrate под 4K (verify, уже есть 4K-ключи)
-- [ ] T-8 — L5 (БЛОКЕР): создать тест доставки 4K + проверить на Brio
+- [~] T-8 — L5: тест доставки 4K СОЗДАН (capability-based выбор 4K-камеры, env-gated, skip без неё);
+      ФАКТИЧЕСКИЙ ПРОГОН на Brio — PENDING (камера отключена пользователем; запустить при возврате,
+      прямой USB3, `ONSET_RUN_L5_CAPTURE=1 -only-testing:OnsetTests/CameraSource4KDeliveryL5Tests`).
+      Эмпирическое доказательство фикса уже есть: repro-спайк capture_repro.swift — 108/108 4K-буферов.
 
 ## Learnings
 - T-1..T-3: device в `CameraCaptureShims` (не 3-й tuple-член → large_tuple); struct сделан `nonisolated`
