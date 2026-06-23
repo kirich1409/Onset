@@ -7,6 +7,13 @@ import Testing
 
 // L5 4K-delivery verification (issue #265, plan camera-4k-lock-lifecycle T-8).
 //
+// L2 coverage gap (explicit): the imperative lock-ownership logic in buildAndStartSession —
+// the single `locked` flag, ownership hand-off to teardown, and prevention of double-unlock /
+// lock leak — is verified by code review plus this L5 test, but is NOT covered by an L2 unit
+// test. The reason: that logic is tightly bound to a live AVCaptureDevice
+// (lockForConfiguration on real hardware), and introducing a mock seam purely to unit-test an
+// internal lock flag would be disproportionate over-engineering relative to the benefit.
+//
 // This file is the ONLY gate that closes the "4K is really delivered" contract — neither L2
 // nor CI can close it (no camera on the runners). It drives a real camera (MX Brio on a DIRECT
 // USB3 connection — a hub silently caps to 1080p) through the PRODUCTION path:
@@ -201,8 +208,8 @@ private func pickFourKCapableCamera(from cameras: [CameraDevice]) -> CameraDevic
     }
 
     // Optional override: prefer a name-matched 4K-capable camera when the env var is present.
-    if let nameFilter = fourKCameraName(),
-       let nameMatched = nameMatchedCamera(from: fourKCapable, nameFilter: nameFilter) {
+    let nameMatched = fourKCameraName().flatMap { nameMatchedCamera(from: fourKCapable, nameFilter: $0) }
+    if let nameMatched {
         fourKL5Logger.notice("L5_4K_CAMERA_PICK name_matched=true")
         logMaxFormat(of: nameMatched)
         return nameMatched

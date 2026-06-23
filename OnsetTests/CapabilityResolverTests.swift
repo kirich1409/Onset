@@ -345,4 +345,5 @@ struct CapabilityResolverTests {
         #expect(plan.screenHeight.isMultiple(of: 2))
     }
 }
+
 // swiftlint:enable type_body_length

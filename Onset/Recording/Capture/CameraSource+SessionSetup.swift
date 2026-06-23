@@ -5,6 +5,17 @@ import os
 
 // MARK: - CameraSource session setup
 
+/// Bundles the two session-lifecycle callbacks passed to `makeShims`, reducing its parameter count.
+///
+/// - `onDisconnect`: Invoked when the capture device is physically disconnected mid-session.
+/// - `onSessionFault`: Invoked when AVFoundation raises a session-level runtime error.
+struct CameraSessionCallbacks {
+    /// Called when the capture device is physically disconnected mid-session.
+    let onDisconnect: @Sendable () async -> Void
+    /// Called when AVFoundation raises a session-level runtime error.
+    let onSessionFault: @Sendable (String) async -> Void
+}
+
 extension CameraSource {
     // MARK: - Session setup (decomposed to keep functions ≤ 40 lines)
 
@@ -23,12 +34,7 @@ extension CameraSource {
         // the @Sendable onDisconnect/onSessionFault closures, which run later). An `await`
         // here would stretch the lock across an actor suspension and open reentrancy /
         // deadlock with stop().
-        do {
-            try device.lockForConfiguration()
-        } catch {
-            cameraSourceLogger.error("lockForConfiguration failed: \(error)")
-            throw RecordingError.captureSetupFailed(error)
-        }
+        try self.acquireConfigurationLock(on: device)
         // Single ownership flag. Cleared at exactly one of: the preview unlock below, or the
         // `.record` hand-off to teardown. The defer fires only if neither happened (an error
         // before either point) → exactly one unlock on every path, including preview-throw.
@@ -40,6 +46,15 @@ extension CameraSource {
         // Preview never holds the lock while running: release immediately after configuration
         // (still before startRunning, so no revert risk for preview's ≤1080p format). Record
         // keeps the lock — ownership moves to teardown at the `.running` hand-off below.
+        //
+        // A .record session holds an EXCLUSIVE AVCaptureDevice configuration lock for its
+        // entire duration. Any second consumer of the same camera (a second session, or a
+        // concurrent .preview source over the same device) would hit a lock conflict at
+        // lockForConfiguration(). This is safe today because the app explicitly tears down
+        // the previewSource before record starts (see MainViewModel.startRecording —
+        // `await preview.stop()`), so no second consumer coexists with the held lock.
+        // Future features that add a concurrent consumer of the recording camera must account
+        // for this exclusive lock.
         if self.role == .preview {
             device.unlockForConfiguration()
             locked = false
@@ -49,14 +64,10 @@ extension CameraSource {
         // has adopted whatever clock it will use (commonly the audio device clock).
         let syncClock = session.synchronizationClock ?? CMClockGetHostTimeClock()
 
-        let onDisconnect: @Sendable ()
-            async -> Void = { [weak self] in
-                await self?.handleCameraDisconnect()
-            }
-        let onSessionFault: @Sendable (String)
-            async -> Void = { [weak self] reason in
-                await self?.handleCameraSessionFault(reason: reason)
-            }
+        let callbacks = CameraSessionCallbacks(
+            onDisconnect: { [weak self] in await self?.handleCameraDisconnect() },
+            onSessionFault: { [weak self] reason in await self?.handleCameraSessionFault(reason: reason) }
+        )
 
         // The locked device is bundled into the shims only for `.record`; preview passes nil
         // (it already released the lock). Teardown reads it back to unlock via releaseRunning().
@@ -64,18 +75,12 @@ extension CameraSource {
             session: session,
             sessionStart: anchor.anchorTime,
             syncClock: syncClock,
-            onDisconnect: onDisconnect,
-            onSessionFault: onSessionFault,
+            callbacks: callbacks,
             lockedDevice: self.role == .record ? device : nil
         )
         try self.attachOutputs(to: session, shims: shims)
 
-        session.startRunning()
-        guard session.isRunning else {
-            let err = CameraSourceError.sessionDidNotStart
-            cameraSourceLogger.error("AVCaptureSession did not start")
-            throw RecordingError.captureSetupFailed(err)
-        }
+        try self.startSessionOrThrow(session)
 
         // Close the stop()-during-.starting race: if stop() ran while buildAndStartSession
         // was suspended (before .running was set), captureState is now .stopped. Continuing
@@ -98,6 +103,34 @@ extension CameraSource {
         cameraSourceLogger.info(
             "Capture started — dims: \(self.format.pixelWidth)×\(self.format.pixelHeight)"
         )
+    }
+
+    /// Acquires `AVCaptureDevice.lockForConfiguration()`, wrapping the error in `RecordingError`.
+    ///
+    /// Extracted from `buildAndStartSession` to reduce its body length. This helper is
+    /// intentionally synchronous — the INVARIANT in `buildAndStartSession` requires no `await`
+    /// between the lock acquisition and the `.running` transition.
+    func acquireConfigurationLock(on device: AVCaptureDevice) throws {
+        do {
+            try device.lockForConfiguration()
+        } catch {
+            cameraSourceLogger.error("lockForConfiguration failed: \(error)")
+            throw RecordingError.captureSetupFailed(error)
+        }
+    }
+
+    /// Calls `startRunning()` and throws if the session did not reach the running state.
+    ///
+    /// Extracted from `buildAndStartSession` to reduce its body length. Synchronous — must not
+    /// be made `async` (the INVARIANT in `buildAndStartSession` requires no suspension between
+    /// `lockForConfiguration` and the `.running` transition).
+    func startSessionOrThrow(_ session: AVCaptureSession) throws {
+        session.startRunning()
+        guard session.isRunning else {
+            let err = CameraSourceError.sessionDidNotStart
+            cameraSourceLogger.error("AVCaptureSession did not start")
+            throw RecordingError.captureSetupFailed(err)
+        }
     }
 
     /// Resolves and validates the configured camera `AVCaptureDevice` before session setup.
@@ -226,8 +259,7 @@ extension CameraSource {
         session: AVCaptureSession,
         sessionStart: CMTime,
         syncClock: CMClock,
-        onDisconnect: @escaping @Sendable () async -> Void,
-        onSessionFault: @escaping @Sendable (String) async -> Void,
+        callbacks: CameraSessionCallbacks,
         lockedDevice: AVCaptureDevice?
     )
     -> CameraCaptureShims {
@@ -236,8 +268,8 @@ extension CameraSource {
             syncClock: syncClock,
             framesContinuation: self.framesContinuation,
             dropsContinuation: self.dropsContinuation,
-            onDisconnect: onDisconnect,
-            onSessionFault: onSessionFault,
+            onDisconnect: callbacks.onDisconnect,
+            onSessionFault: callbacks.onSessionFault,
             cameraUniqueID: self.cameraDevice.uniqueID,
             captureSessionID: ObjectIdentifier(session),
             rateLock: self.captureRateLock

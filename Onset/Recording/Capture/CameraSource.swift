@@ -215,11 +215,12 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
 
     /// Releases the held configuration lock (if any) and stops the session.
     ///
-    /// Single teardown point for the `.record` device lock that `buildAndStartSession` holds
-    /// from `setActiveFormat` through the whole session (#265). `shims.lockedDevice` is `nil`
-    /// for `.preview` (already unlocked) — the optional-chained `unlockForConfiguration()` is
-    /// then a no-op. `unlockForConfiguration()` on a disconnected/faulted device is also a safe
-    /// no-op, so the disconnect/fault teardown paths may call this unconditionally.
+    /// Single teardown point for the `.record` device lock that `buildAndStartSession` acquires
+    /// before `configureSession` and holds through the whole record session (#265).
+    /// `shims.lockedDevice` is `nil` for `.preview` (already unlocked) — the optional-chained
+    /// `unlockForConfiguration()` is then a no-op. `unlockForConfiguration()` on a
+    /// disconnected/faulted device is also a safe no-op, so the disconnect/fault teardown paths
+    /// may call this unconditionally.
     private func releaseRunning(shims: CameraCaptureShims, session: AVCaptureSession) {
         shims.lockedDevice?.unlockForConfiguration()
         session.stopRunning()
