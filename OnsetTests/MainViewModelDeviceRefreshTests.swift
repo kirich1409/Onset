@@ -65,7 +65,9 @@ struct MainViewModelDeviceRefreshTests {
         )
         return MainViewModel(
             permissions: perms,
-            coordinator: RecordingCoordinator(),
+            coordinator: RecordingCoordinator {
+                UserDefaultsBackendSelectionStore(defaults: defaults)
+            },
             discoverDisplays: { _ in [] },
             discoverCameras: { _ in box.value },
             discoverMicrophones: { _ in [] },

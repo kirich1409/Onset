@@ -9,7 +9,6 @@
 // verified without a real RecordingSession.
 //
 // swiftlint:disable no_magic_numbers
-// swiftlint:disable trailing_closure
 // swiftlint:disable file_length
 // swiftlint:disable type_body_length
 // Rationale: synthetic fixture dimensions / drop counts are inherent test data (no_magic_numbers);
@@ -286,7 +285,11 @@ struct RecordingCoordinatorTests {
         let notifier = FakeRecordingStartNotifier()
         var openedRecording = false
         var dismissedMain = false
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake }, notifier: notifier)
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            notifier: notifier
+        )
         coordinator.bindWindowActions(
             openRecordingWindow: { openedRecording = true },
             dismissMainWindow: { dismissedMain = true },
@@ -313,7 +316,10 @@ struct RecordingCoordinatorTests {
     @Test("checklist rows are nil when source absent — nil-gating preserved")
     func start_checklistNilGating() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         // Default request: only screenDescription is non-nil; camera + mic are nil.
         try await coordinator.start(CoordinatorFixtures.request())
@@ -328,7 +334,10 @@ struct RecordingCoordinatorTests {
     @Test("state stream is consumed — a .degraded transition updates recordingState")
     func stateStream_updatesRecordingState() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         #expect(coordinator.recordingState == .normal, "starts normal")
@@ -344,7 +353,10 @@ struct RecordingCoordinatorTests {
     @Test("elapsed increments while recording")
     func elapsed_increments() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         // elapsed starts at 0; the tick loop derives it from the start Date. After ~1.1s it is ≥ 1.
@@ -359,7 +371,8 @@ struct RecordingCoordinatorTests {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
         var revealed: [URL]?
         let coordinator = RecordingCoordinator(
-            sessionFactory: { _ in fake },
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
             revealInFinder: { revealed = $0 }
         )
 
@@ -379,7 +392,10 @@ struct RecordingCoordinatorTests {
     @Test("stop → phase returns to .idle when started from the menu bar")
     func stop_returnsToIdleOrigin() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request(origin: .menuBar))
         await coordinator.stop()
@@ -395,7 +411,10 @@ struct RecordingCoordinatorTests {
             result: CoordinatorFixtures.result(backpressureDrops: 64)
         )
         let openCounter = Counter()
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
         coordinator.bindWindowActions(
             openRecordingWindow: {},
             dismissMainWindow: {},
@@ -415,7 +434,10 @@ struct RecordingCoordinatorTests {
     func stop_menuBarWithWriteError_opensMainWindow() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.failedWriteResult())
         let openCounter = Counter()
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
         coordinator.bindWindowActions(
             openRecordingWindow: {},
             dismissMainWindow: {},
@@ -438,7 +460,10 @@ struct RecordingCoordinatorTests {
         let fake = FakeRecordingControlling(
             result: CoordinatorFixtures.result(backpressureDrops: 128, sessionEverDegraded: false)
         )
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         await coordinator.stop()
@@ -455,7 +480,10 @@ struct RecordingCoordinatorTests {
         let fake = FakeRecordingControlling(
             result: CoordinatorFixtures.result(backpressureDrops: 1, sessionEverDegraded: false)
         )
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         await coordinator.stop()
@@ -467,7 +495,10 @@ struct RecordingCoordinatorTests {
     @Test("stop is idempotent across concurrent paths — teardown runs once")
     func stop_idempotentAcrossPaths() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
 
@@ -490,10 +521,13 @@ struct RecordingCoordinatorTests {
         // satisfies the compiler — the box is only written from @MainActor via the coordinator.
         let factoryCounter = Counter()
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in
-            factoryCounter.increment()
-            return fake
-        })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in
+                factoryCounter.increment()
+                return fake
+            }
+        )
 
         // Two concurrent start() calls (e.g. double-click on Record button). The synchronous
         // isStarting guard must let only one through; session.start() must be called exactly once.
@@ -514,7 +548,10 @@ struct RecordingCoordinatorTests {
     @Test("elapsed is frozen after stop — the tick loop is cancelled")
     func elapsed_frozenAfterStop() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         // Wait until at least one tick so elapsed > 0 and the loop is confirmed running.
@@ -546,10 +583,13 @@ struct RecordingCoordinatorTests {
         let callCounter = Counter()
         // Single coordinator instance — reused across both sessions to verify the FIX 2 reset.
         // A fresh coordinator2 would default false and could never catch stale carry-over.
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in
-            callCounter.increment()
-            return callCounter.value == 1 ? fake1 : fake2
-        })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in
+                callCounter.increment()
+                return callCounter.value == 1 ? fake1 : fake2
+            }
+        )
 
         // --- Session 1: degraded stop ---
         try await coordinator.start(CoordinatorFixtures.request())
@@ -577,7 +617,10 @@ struct RecordingCoordinatorTests {
     @Test("stop with write-failed result sets lastWriteError; acknowledge clears it")
     func stop_writeFailure_setsError() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.failedWriteResult())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         await coordinator.stop()
@@ -591,7 +634,10 @@ struct RecordingCoordinatorTests {
     @Test("stop with clean result leaves lastWriteError nil")
     func stop_cleanResult_noWriteError() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         await coordinator.stop()
@@ -604,10 +650,13 @@ struct RecordingCoordinatorTests {
         let fake1 = FakeRecordingControlling(result: CoordinatorFixtures.failedWriteResult())
         let fake2 = FakeRecordingControlling(result: CoordinatorFixtures.result())
         let callCounter2 = Counter()
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in
-            callCounter2.increment()
-            return callCounter2.value == 1 ? fake1 : fake2
-        })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in
+                callCounter2.increment()
+                return callCounter2.value == 1 ? fake1 : fake2
+            }
+        )
 
         // Session 1: ends with a write error.
         try await coordinator.start(CoordinatorFixtures.request())
@@ -626,7 +675,10 @@ struct RecordingCoordinatorTests {
     func start_failureRethrows() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
         fake.startError = RecordingError.noVideoSource
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
         coordinator.enterMain() // begin in .main
 
         var threw = false
@@ -646,9 +698,12 @@ struct RecordingCoordinatorTests {
     func menuBarRecordIntent_installedClosureRuns() {
         // Verifies that the coordinator stores and dispatches the intent closure exactly as set.
         // This is the seam wiring test: MainView installs the closure; this proves it fires.
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in
-            FakeRecordingControlling(result: CoordinatorFixtures.result())
-        })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in
+                FakeRecordingControlling(result: CoordinatorFixtures.result())
+            }
+        )
 
         var ran = false
         coordinator.menuBarRecordIntent = { ran = true }
@@ -662,9 +717,12 @@ struct RecordingCoordinatorTests {
         // When no main window is mounted, intent is nil and the menu bar falls back to
         // openWindow. This test proves the coordinator does not crash on nil intent.
         // The SwiftUI Button else-branch (openWindow) has no unit-test seam — L5 only.
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in
-            FakeRecordingControlling(result: CoordinatorFixtures.result())
-        })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in
+                FakeRecordingControlling(result: CoordinatorFixtures.result())
+            }
+        )
 
         // intent is nil by default; optional-call must be a no-op without crashing.
         coordinator.menuBarRecordIntent?()
@@ -680,7 +738,10 @@ struct RecordingCoordinatorRevocationTests {
     @Test(".sourceRevoked(.screen) → screen liveness false, camera+mic live, phase still .recording")
     func screenRevoked_updatesLiveness() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         #expect(coordinator.sourceLiveness == .allLive, "starts fully live")
@@ -701,7 +762,10 @@ struct RecordingCoordinatorRevocationTests {
     @Test(".sourceRevoked(.camera) → camera + mic liveness false, screen live, phase still .recording")
     func cameraRevoked_updatesCameraAndMicLiveness() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         #expect(coordinator.sourceLiveness == .allLive, "starts fully live")
@@ -722,7 +786,10 @@ struct RecordingCoordinatorRevocationTests {
     @Test(".allVideoSourcesLost → coordinator calls stop(), phase transitions away from .recording")
     func allVideoSourcesLost_stopsSession() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
         coordinator.enterMain() // set origin=.main so we can assert phase==.main after stop
         coordinator.bindWindowActions(
             openRecordingWindow: {},
@@ -752,10 +819,13 @@ struct RecordingCoordinatorRevocationTests {
         let fake1 = FakeRecordingControlling(result: CoordinatorFixtures.result())
         let fake2 = FakeRecordingControlling(result: CoordinatorFixtures.result())
         let callCounter = Counter()
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in
-            callCounter.increment()
-            return callCounter.value == 1 ? fake1 : fake2
-        })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in
+                callCounter.increment()
+                return callCounter.value == 1 ? fake1 : fake2
+            }
+        )
         coordinator.bindWindowActions(
             openRecordingWindow: {},
             dismissMainWindow: {},
@@ -794,7 +864,10 @@ struct RecordingCoordinatorHotKeyTests {
     @Test("recording in progress — handleHotKey triggers stop()")
     func handleHotKey_whileRecording_triggerStop() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
         coordinator.bindWindowActions(
             openRecordingWindow: {},
             dismissMainWindow: {},
@@ -821,9 +894,12 @@ struct RecordingCoordinatorHotKeyTests {
     func handleHotKey_notRecording_intentInstalled_callsIntent() {
         let intentCounter = Counter()
         let openWindowCounter = Counter()
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in
-            FakeRecordingControlling(result: CoordinatorFixtures.result())
-        })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in
+                FakeRecordingControlling(result: CoordinatorFixtures.result())
+            }
+        )
         coordinator.bindWindowActions(
             openRecordingWindow: {},
             dismissMainWindow: {},
@@ -844,7 +920,10 @@ struct RecordingCoordinatorHotKeyTests {
     func handleHotKey_notRecording_noIntent_opensMainWindow() {
         let openWindowCounter = Counter()
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
         coordinator.bindWindowActions(
             openRecordingWindow: {},
             dismissMainWindow: {},
@@ -864,7 +943,10 @@ struct RecordingCoordinatorHotKeyTests {
     @Test("double handleHotKey while recording — stop() runs exactly once")
     func handleHotKey_doubleTap_stopsExactlyOnce() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
         coordinator.bindWindowActions(
             openRecordingWindow: {},
             dismissMainWindow: {},
@@ -896,7 +978,10 @@ struct RecordingCoordinatorWriterFailedTests {
     @Test(".writerFailed(.screen) → screen liveness false, camera + mic unchanged, phase still .recording")
     func screenWriterFailed_flipsScreenLiveness() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         #expect(coordinator.sourceLiveness == .allLive, "starts fully live")
@@ -915,7 +1000,10 @@ struct RecordingCoordinatorWriterFailedTests {
     @Test(".writerFailed(.camera) → camera + mic liveness false, screen unchanged, phase still .recording")
     func cameraWriterFailed_flipsCameraAndMicLiveness() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         #expect(coordinator.sourceLiveness == .allLive, "starts fully live")
@@ -959,7 +1047,10 @@ struct RecordingCoordinatorConsentOrderingTests {
 
         var openedRecording = false
         var dismissedMain = false
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
         coordinator.bindWindowActions(
             openRecordingWindow: { openedRecording = true },
             dismissMainWindow: { dismissedMain = true },
@@ -1004,7 +1095,8 @@ struct RecordingCoordinatorConsentOrderingTests {
         // Use a LARGE timeout (100 s) so that if stream-finish is NOT the trigger, the test would
         // block for 100 s (deterministic proof that fix #1 drives the revert, not the timeout).
         let coordinator = RecordingCoordinator(
-            sessionFactory: { _ in fake },
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
             activationTimeoutSeconds: 100
         )
         coordinator.enterMain()
@@ -1057,7 +1149,8 @@ struct RecordingCoordinatorConsentOrderingTests {
 
         // Use a tiny timeout (50 ms) so the test does not take 30 s.
         let coordinator = RecordingCoordinator(
-            sessionFactory: { _ in fake },
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
             activationTimeoutSeconds: 0.05
         )
         coordinator.enterMain()
@@ -1080,7 +1173,8 @@ struct RecordingCoordinatorConsentOrderingTests {
         fake.simulateCaptureNeverActivates = true
 
         let coordinator = RecordingCoordinator(
-            sessionFactory: { _ in fake },
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
             activationTimeoutSeconds: 100
         )
         coordinator.enterMain()
@@ -1124,7 +1218,8 @@ struct RecordingCoordinatorConsentOrderingTests {
 
         var openedRecording = false
         let coordinator = RecordingCoordinator(
-            sessionFactory: { _ in fake },
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
             activationTimeoutSeconds: 100
         )
         coordinator.enterMain()
@@ -1181,7 +1276,8 @@ struct RecordingCoordinatorConsentOrderingTests {
 
         var openedRecording = false
         let coordinator = RecordingCoordinator(
-            sessionFactory: { _ in fake },
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
             activationTimeoutSeconds: 100
         )
         coordinator.enterMain()
@@ -1215,8 +1311,29 @@ struct RecordingCoordinatorConsentOrderingTests {
         #expect(coordinator.phase == .main, "phase must be .main after cancel-flag revert")
         #expect(!openedRecording, "recording window must NOT open when cancel flag is set")
     }
+
+    // MARK: - Default sessionFactory wiring
+
+    @Test("defaultSessionFactory_buildsRecordingSessionFromResolvedSelection")
+    func defaultSessionFactory_buildsRecordingSessionFromResolvedSelection() {
+        // Constructs a coordinator WITHOUT injecting sessionFactory so the PRODUCTION default
+        // closure (the one that switches on resolved.encoder/source/writer and builds Live*
+        // factories) is stored. Calls that closure directly with a known ResolvedBackendSelection
+        // and asserts it produces a RecordingSession — exercising the resolved→factory wiring
+        // without calling session.start() (which would touch capture hardware).
+        //
+        // The switch today always yields .live for every stage (single-case enums), so this cannot
+        // behaviourally distinguish "consumes resolved" from "ignores it" until a second backend
+        // case is added. The test is forward-looking: it guards the wiring and will catch a
+        // regression the moment another case exists.
+        let coordinator = RecordingCoordinator {
+            UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults())
+        }
+        let resolved = ResolvedBackendSelection(source: .live, encoder: .live, writer: .live)
+        let session = coordinator.sessionFactory(CoordinatorFixtures.request(), resolved)
+        #expect(session is RecordingSession, "production default sessionFactory must produce a RecordingSession")
+    }
 }
 
 // swiftlint:enable no_magic_numbers
-// swiftlint:enable trailing_closure
 // swiftlint:enable type_body_length

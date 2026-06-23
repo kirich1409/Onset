@@ -46,7 +46,9 @@ struct DeviceSelectionPersistenceTests {
             camera: .authorized,
             microphone: .authorized
         )
-        let coordinator = RecordingCoordinator()
+        let coordinator = RecordingCoordinator {
+            UserDefaultsBackendSelectionStore(defaults: defaults)
+        }
         return MainViewModel(
             permissions: perms,
             coordinator: coordinator,
@@ -152,7 +154,9 @@ struct DeviceSelectionPersistenceTests {
                 camera: .authorized,
                 microphone: .authorized
             )
-            let coordinator = RecordingCoordinator()
+            let coordinator = RecordingCoordinator {
+                UserDefaultsBackendSelectionStore(defaults: defaults)
+            }
             let sut = MainViewModel(
                 permissions: perms,
                 coordinator: coordinator,

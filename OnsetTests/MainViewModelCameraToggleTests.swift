@@ -37,7 +37,9 @@ struct MainViewModelCameraToggleTests {
     )
     -> MainViewModel {
         let perms = FakePermissionsService(screen: screen, camera: camera, microphone: microphone)
-        let coordinator = RecordingCoordinator()
+        let coordinator = RecordingCoordinator {
+            UserDefaultsBackendSelectionStore(defaults: defaults)
+        }
         return MainViewModel(
             permissions: perms,
             coordinator: coordinator,
@@ -440,7 +442,9 @@ struct MainViewModelCameraToggleTests {
         let outputDefaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: perms,
-            coordinator: RecordingCoordinator(),
+            coordinator: RecordingCoordinator {
+                UserDefaultsBackendSelectionStore(defaults: outputDefaults)
+            },
             discoverDisplays: { _ in [Self.makeDisplay()] },
             discoverCameras: { _ in [cam] },
             discoverMicrophones: { _ in [] },
@@ -472,7 +476,9 @@ struct MainViewModelCameraToggleTests {
         let outputDefaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: perms,
-            coordinator: RecordingCoordinator(),
+            coordinator: RecordingCoordinator {
+                UserDefaultsBackendSelectionStore(defaults: outputDefaults)
+            },
             discoverDisplays: { _ in [Self.makeDisplay()] },
             discoverCameras: { _ in [cam] },
             discoverMicrophones: { _ in [] },
@@ -505,7 +511,9 @@ struct MainViewModelCameraToggleTests {
             let perms = FakePermissionsService(screen: .authorized, camera: .authorized, microphone: .notDetermined)
             let sut = MainViewModel(
                 permissions: perms,
-                coordinator: RecordingCoordinator(),
+                coordinator: RecordingCoordinator {
+                    UserDefaultsBackendSelectionStore(defaults: defaults)
+                },
                 discoverDisplays: { _ in [Self.makeDisplay()] },
                 // Camera list is empty — the saved device has gone away.
                 discoverCameras: { _ in [] },
@@ -533,7 +541,9 @@ struct MainViewModelCameraToggleTests {
         let outputDefaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: perms,
-            coordinator: RecordingCoordinator(),
+            coordinator: RecordingCoordinator {
+                UserDefaultsBackendSelectionStore(defaults: outputDefaults)
+            },
             discoverDisplays: { _ in [Self.makeDisplay()] },
             discoverCameras: { _ in [cam] },
             discoverMicrophones: { _ in [] },
@@ -605,8 +615,10 @@ private final class CameraSaveSpy: DeviceSelectionPersisting {
 struct MainViewModelCameraConnectingTests {
     private func makeSUT(cameras: [CameraDevice] = []) -> MainViewModel {
         let perms = FakePermissionsService(screen: .authorized, camera: .authorized, microphone: .notDetermined)
-        let coordinator = RecordingCoordinator()
         let defaults = InMemoryUserDefaults()
+        let coordinator = RecordingCoordinator {
+            UserDefaultsBackendSelectionStore(defaults: defaults)
+        }
         return MainViewModel(
             permissions: perms,
             coordinator: coordinator,

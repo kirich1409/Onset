@@ -39,7 +39,9 @@ struct MainViewModelTests {
     )
     -> (sut: MainViewModel, perms: FakePermissionsService) {
         let perms = FakePermissionsService(screen: screen, camera: camera, microphone: microphone)
-        let coordinator = RecordingCoordinator()
+        let coordinator = RecordingCoordinator {
+            UserDefaultsBackendSelectionStore(defaults: defaults)
+        }
         let sut = MainViewModel(
             permissions: perms,
             coordinator: coordinator,
@@ -373,7 +375,9 @@ struct MainViewModelTests {
 struct MainViewModelBuildChecklistTests {
     private func makeSUT() -> MainViewModel {
         let perms = FakePermissionsService()
-        let coordinator = RecordingCoordinator()
+        let coordinator = RecordingCoordinator {
+            UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults())
+        }
         let store = InMemoryUserDefaults()
         return MainViewModel(
             permissions: perms,
@@ -443,7 +447,9 @@ struct MainViewModelStaleCameraIDTests {
     func staleID_healedToFirstCamera() {
         let store = InMemoryUserDefaults()
         let perms = FakePermissionsService()
-        let coordinator = RecordingCoordinator()
+        let coordinator = RecordingCoordinator {
+            UserDefaultsBackendSelectionStore(defaults: store)
+        }
         let cam = Self.makeCamera(id: "cam-new")
         let sut = MainViewModel(
             permissions: perms,
@@ -468,7 +474,9 @@ struct MainViewModelStaleCameraIDTests {
     func validID_notReplaced() {
         let store = InMemoryUserDefaults()
         let perms = FakePermissionsService()
-        let coordinator = RecordingCoordinator()
+        let coordinator = RecordingCoordinator {
+            UserDefaultsBackendSelectionStore(defaults: store)
+        }
         let cam1 = Self.makeCamera(id: "cam-1")
         let cam2 = Self.makeCamera(id: "cam-2")
         let sut = MainViewModel(
@@ -494,7 +502,9 @@ struct MainViewModelStaleCameraIDTests {
     func nilID_selectsFirst() {
         let store = InMemoryUserDefaults()
         let perms = FakePermissionsService()
-        let coordinator = RecordingCoordinator()
+        let coordinator = RecordingCoordinator {
+            UserDefaultsBackendSelectionStore(defaults: store)
+        }
         let cam = Self.makeCamera(id: "cam-only")
         let sut = MainViewModel(
             permissions: perms,
