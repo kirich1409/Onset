@@ -153,9 +153,10 @@ extension WriterBackend {
 
 /// The resolved backend selection for a single recording session.
 ///
-/// Produced by `RecordingBackendResolver` after applying fallback logic; all fields
-/// are guaranteed to be supported values. Consumed by the composition root to construct
-/// the concrete pipeline stages.
+/// Produced by `RecordingBackendResolver` after applying fallback logic; each field is the
+/// best-effort resolved selection, falling back to `.live` even when `.live` itself is
+/// unsupported (a warning is logged in that case). Consumed by the composition root to
+/// construct the concrete pipeline stages.
 ///
 /// Declared `nonisolated` so that `RecordingBackendResolver` — a `nonisolated enum` — can
 /// construct and return this type without a `MainActor` hop, matching the pattern of

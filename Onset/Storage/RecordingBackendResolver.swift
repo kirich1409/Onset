@@ -14,6 +14,8 @@ nonisolated let recordingBackendResolverLogger = Logger(
 
 // MARK: - SupportedBackends
 
+// TODO: migrate from per-stage Bool fields to a per-stage Set/Map when any stage
+// gains a 2nd–3rd backend (Bool-per-stage stops scaling then).
 /// A snapshot of which backend variants the current runtime environment supports.
 ///
 /// Passed to `RecordingBackendResolver.resolve(persisted:supported:)` so the resolver
@@ -46,8 +48,8 @@ nonisolated struct SupportedBackends {
 
 // MARK: - RecordingBackendResolver
 
-/// Pure resolver that converts a persisted backend selection into a fully resolved,
-/// guaranteed-supported `ResolvedBackendSelection`.
+/// Pure resolver that converts a persisted backend selection into a best-effort resolved
+/// `ResolvedBackendSelection`.
 ///
 /// Each pipeline stage (source / encoder / writer) is resolved independently:
 /// - `nil` persisted value or `nil` raw string → `.live` (default, no warning).
@@ -65,7 +67,8 @@ nonisolated enum RecordingBackendResolver {
     ///   - persisted: The raw persisted selection from `UserDefaults`, or `nil` when
     ///     no selection has been stored (first launch, or after a clear).
     ///   - supported: A snapshot of which backends the current runtime environment supports.
-    /// - Returns: A `ResolvedBackendSelection` where every stage is a known, supported backend.
+    /// - Returns: A `ResolvedBackendSelection` where every stage is best-effort resolved,
+    ///   falling back to `.live` even when `.live` is unsupported (a warning is logged).
     nonisolated static func resolve(
         persisted: PersistedBackendSelection?,
         supported: SupportedBackends

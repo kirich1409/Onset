@@ -1311,6 +1311,28 @@ struct RecordingCoordinatorConsentOrderingTests {
         #expect(coordinator.phase == .main, "phase must be .main after cancel-flag revert")
         #expect(!openedRecording, "recording window must NOT open when cancel flag is set")
     }
+
+    // MARK: - Default sessionFactory wiring
+
+    @Test("defaultSessionFactory_buildsRecordingSessionFromResolvedSelection")
+    func defaultSessionFactory_buildsRecordingSessionFromResolvedSelection() {
+        // Constructs a coordinator WITHOUT injecting sessionFactory so the PRODUCTION default
+        // closure (the one that switches on resolved.encoder/source/writer and builds Live*
+        // factories) is stored. Calls that closure directly with a known ResolvedBackendSelection
+        // and asserts it produces a RecordingSession — exercising the resolved→factory wiring
+        // without calling session.start() (which would touch capture hardware).
+        //
+        // The switch today always yields .live for every stage (single-case enums), so this cannot
+        // behaviourally distinguish "consumes resolved" from "ignores it" until a second backend
+        // case is added. The test is forward-looking: it guards the wiring and will catch a
+        // regression the moment another case exists.
+        let coordinator = RecordingCoordinator {
+            UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults())
+        }
+        let resolved = ResolvedBackendSelection(source: .live, encoder: .live, writer: .live)
+        let session = coordinator.sessionFactory(CoordinatorFixtures.request(), resolved)
+        #expect(session is RecordingSession, "production default sessionFactory must produce a RecordingSession")
+    }
 }
 
 // swiftlint:enable no_magic_numbers

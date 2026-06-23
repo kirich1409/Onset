@@ -207,7 +207,7 @@ final class RecordingCoordinator {
 
     /// Builds a `RecordingControlling` for a request. Live = `RecordingSession`; tests inject a fake.
     @ObservationIgnored
-    private let sessionFactory: @Sendable (RecordingRequest, ResolvedBackendSelection) -> any RecordingControlling
+    let sessionFactory: @Sendable (RecordingRequest, ResolvedBackendSelection) -> any RecordingControlling
 
     /// Factory that vends the persisted recording-backend selection store on demand.
     ///
