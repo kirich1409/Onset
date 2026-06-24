@@ -192,6 +192,82 @@ final class RecordingCoordinator {
     /// write failure means the file was not saved cleanly. Reset on `start()` / `acknowledgeWriteError()`.
     private(set) var lastWriteError: String?
 
+    // MARK: - Critical signals (critical-recording-signals, Phase C)
+
+    /// The current DE-ESCALATING critical view for the menu-bar indicator (Phase D reads this as its
+    /// second input). Holds the live incident the indicator should reflect RIGHT NOW, not the worst
+    /// ever seen. Derived from two independent live concerns with different lifecycles, returning the
+    /// higher-severity active one (spec §Архитектура "две оси — severity × persistence"):
+    ///  - a camera-loss view (`cameraLossView`) is one-shot and sticky (the camera does not return) —
+    ///    `cameraOnly` (hard, terminal) latches until stop; `cameraAndScreen` (soft) persists too so
+    ///    its a11y-label doesn't flicker off on a quiet tick (AC-1);
+    ///  - a windowed-hard view (`windowedHardView`, `sustainedDrops` / `fpsCollapse`) DE-ESCALATES to
+    ///    `nil` once the detector stops firing — the indicator must not pulse "fire" hours after a
+    ///    passed 10 s spike.
+    ///
+    /// A live windowed-hard always outranks a soft camera-loss; `cameraOnly` (hard, terminal) outranks
+    /// everything. Distinct from `sessionMaxSeverityLatch`, which only climbs and feeds the post-stop
+    /// branch — conflating them would stick the indicator on "fire" for the rest of the session.
+    var liveCriticalView: CriticalIncident? {
+        // hard outranks soft; among the two live concerns, return the higher-severity active incident.
+        switch (self.cameraLossView, self.windowedHardView) {
+        case let (cameraLoss?, windowedHard?):
+            cameraLoss.severity == .hard ? cameraLoss : windowedHard
+
+        case let (cameraLoss?, nil):
+            cameraLoss
+
+        case let (nil, windowedHard?):
+            windowedHard
+
+        case (nil, nil):
+            nil
+        }
+    }
+
+    /// Sticky one-shot camera-loss view (set by the revocation path, never de-escalated). Backs
+    /// `liveCriticalView`.
+    private(set) var cameraLossView: CriticalIncident?
+
+    /// De-escalating windowed-hard view (set/cleared each detector tick). Backs `liveCriticalView`.
+    private(set) var windowedHardView: CriticalIncident?
+
+    /// The maximum `CriticalSeverity` seen across the WHOLE session — climbs only, never de-escalates.
+    /// Feeds the POST-STOP summary branch exclusively (`notifyPostStopSummary`), never the live
+    /// indicator. `nil` when no critical incident occurred (minor-drop sessions stay disk-only, #246).
+    private(set) var sessionMaxSeverityLatch: CriticalSeverity?
+
+    /// Pure fps-collapse detector value, stepped each tick on the monotonic session clock. Reset per
+    /// session in `activateRecording`.
+    @ObservationIgnored
+    private var fpsDetector = FpsCollapseDetector()
+
+    /// Pure sustained-drop detector value, evaluated each tick on the monotonic session clock. Reset
+    /// per session in `activateRecording`.
+    @ObservationIgnored
+    private var sustainedDetector = SustainedDropDetector()
+
+    /// Monotonic session-relative elapsed seconds at the most recent tick — captured so `stop()` can
+    /// use it as the session duration for the post-stop drop-rate criterion (`evaluatePostStop`).
+    /// `0` until the first tick. Reset per session.
+    @ObservationIgnored
+    private(set) var lastMonotonicElapsedSeconds: Double = 0
+
+    /// Monotonic elapsed time at which the last LIVE critical notification was dispatched, per the
+    /// per-window dedupe (`criticalNotificationDedupeSeconds`). `nil` when none dispatched this window.
+    @ObservationIgnored
+    private var lastLiveNotificationElapsedSeconds: Double?
+
+    /// Session-level cap flags: each tier posts AT MOST one live notification per session. A recurrent
+    /// windowed-hard after de-escalation updates the indicator but does NOT post a second Focus banner
+    /// (spec §Дедуп "session-level cap"). Reset per session.
+    @ObservationIgnored
+    private var hardLiveNotificationPosted = false
+
+    /// Soft-tier session cap counterpart of `hardLiveNotificationPosted`.
+    @ObservationIgnored
+    private var softLiveNotificationPosted = false
+
     /// `true` when a post-stop alert is pending and has not yet been acknowledged.
     /// Used by `stop()` to decide whether to surface the main window after a menu-bar-origin stop
     /// (#131): a pending alert requires the window so `MainView` can present it.
@@ -549,6 +625,16 @@ final class RecordingCoordinator {
         self.lastDroppedFrames = 0
         self.dominantCause = .notDegraded
         self.lastWriteError = nil
+        // Reset all critical-signal state — structural invariant: no stale carry-over across sessions.
+        self.cameraLossView = nil
+        self.windowedHardView = nil
+        self.sessionMaxSeverityLatch = nil
+        self.fpsDetector = FpsCollapseDetector()
+        self.sustainedDetector = SustainedDropDetector()
+        self.lastMonotonicElapsedSeconds = 0
+        self.lastLiveNotificationElapsedSeconds = nil
+        self.hardLiveNotificationPosted = false
+        self.softLiveNotificationPosted = false
         self.phase = .recording
 
         self.startStateSubscription(session)
@@ -630,6 +716,9 @@ final class RecordingCoordinator {
                     self.sourceLiveness.camera = false
                     self.sourceLiveness.microphone = false
                     coordinatorLogger.notice("AC-12: camera source revoked — camera + mic liveness updated")
+                    // Critical signal (soft): the screen keeps recording, so this is `cameraAndScreen`.
+                    // `.allVideoSourcesLost` (below) is the hard `cameraOnly` counterpart.
+                    self.handleCameraLoss(scope: .cameraAndScreen)
 
                 case .writerFailed(.screen):
                     // Writer hard-fault: reuse the same "stopped" liveness indicator as AC-12.
@@ -644,14 +733,25 @@ final class RecordingCoordinator {
 
                 case .allVideoSourcesLost:
                     coordinatorLogger.notice("AC-12: all video sources lost — stopping session")
+                    // Critical signal (hard, terminal): the camera was the only video source; its loss
+                    // stops the session. Latch the indicator + post the timeSensitive live notification
+                    // BEFORE stop() tears the loop down, so the signal reaches the user.
+                    self.handleCameraLoss(scope: .cameraOnly)
                     await self.stop()
                 }
             }
         }
     }
 
-    /// One ~1 Hz loop: bumps `elapsed` from `startedAt` and polls the session's drop health. Both
-    /// readouts tick at the same cadence, so they share one task (one cancel point).
+    /// One ~1 Hz loop: bumps `elapsed` from `startedAt`, polls the session's drop health, and steps
+    /// the critical detectors on the MONOTONIC session clock. Both readouts tick at the same cadence,
+    /// so they share one task (one cancel point).
+    ///
+    /// Two clocks, deliberately distinct (spec §P2):
+    ///  - `Date()` drives `elapsed`, the human-facing UI timer ONLY.
+    ///  - `session.currentSessionElapsedSeconds()` (host-time since session T0) drives the detector
+    ///    windows + dedupe. It shares `CameraRateSnapshot.monotonicStampSeconds`' frame, so the
+    ///    detectors' staleness gate and warmup skip stay correct. `Date()` must never feed the windows.
     private func startTickLoop(_ session: any RecordingControlling) {
         self.tickTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -659,10 +759,190 @@ final class RecordingCoordinator {
                 if let startedAt = self.startedAt {
                     self.elapsed = Int(Date().timeIntervalSince(startedAt))
                 }
-                self.drops = await session.currentDrops().counters
+                let health = await session.currentDrops()
+                self.drops = health.counters
+                let monotonicElapsed = await session.currentSessionElapsedSeconds()
+                let rates = await session.currentRates()
+                self.lastMonotonicElapsedSeconds = monotonicElapsed
+                self.stepCriticalDetectors(
+                    isDegraded: self.recordingState == .degraded,
+                    rates: rates,
+                    monotonicElapsed: monotonicElapsed
+                )
                 try? await Task.sleep(for: .seconds(1))
             }
         }
+    }
+
+    /// Steps both pure detectors for one tick and folds their verdicts into the two critical values
+    /// (`liveCriticalView` de-escalating, `sessionMaxSeverityLatch` climbing) plus the live-notification
+    /// dispatch (critical-recording-signals, T-C.1/T-C.2).
+    ///
+    /// Both windowed-hard incidents (`sustainedDrops`, `fpsCollapse`) DE-ESCALATE: when neither fires
+    /// this tick the live view returns to `nil`. A camera-loss view (either scope) is owned by the
+    /// revocation path and PRESERVED here — camera loss is one-shot (the camera does not return), so a
+    /// quiet detector tick must not wipe it (otherwise the soft a11y-label would flicker off; spec
+    /// AC-1). Only a windowed-hard view is subject to de-escalation. The session latch only climbs.
+    ///
+    /// `internal` (not `private`) so L2 tests drive the across-tick state machine by direct
+    /// synchronous calls — the only deterministic way to exercise de-escalation / cap / override
+    /// (the live 1 Hz loop's `Task.sleep` is non-deterministic, and the soft→hard override path is
+    /// unreachable through the revocation streams, which only deliver the terminal `cameraOnly`).
+    func stepCriticalDetectors(
+        isDegraded: Bool,
+        rates: CameraRateSnapshot?,
+        monotonicElapsed: Double
+    ) {
+        let config = RecordingConfiguration.mvpDefault
+
+        let sustained = self.sustainedDetector.evaluateLive(
+            isDegraded: isDegraded,
+            elapsedSeconds: monotonicElapsed,
+            config: config
+        )
+        self.sustainedDetector = sustained.next
+
+        var fpsCollapsed = false
+        if let rates {
+            let sample = FpsCollapseSample(
+                deliveredFps: rates.deliveredFps,
+                dropOverflowRate: rates.dropOverflowRate,
+                gapMsMax: rates.gapMsMax,
+                sampleElapsedSeconds: rates.monotonicStampSeconds
+            )
+            let step = self.fpsDetector.step(sample: sample, elapsedSeconds: monotonicElapsed, config: config)
+            self.fpsDetector = step.next
+            fpsCollapsed = step.verdict.collapsed
+        }
+
+        // Pick the windowed-hard incident firing this tick (either qualifies as `.hard`). When both
+        // fire, `sustainedDrops` is reported first — they share a tier, so the choice is cosmetic.
+        let firedIncident: CriticalIncident? = switch (sustained.fired, fpsCollapsed) {
+        case (true, _): .sustainedDrops
+        case (false, true): .fpsCollapse
+        case (false, false): nil
+        }
+
+        // De-escalation: the windowed-hard view tracks THIS tick's verdict (incident or nil) — a
+        // passed drop-storm clears it. The sticky camera-loss view is untouched here (owned by the
+        // revocation path). `liveCriticalView` derives the displayed incident from both.
+        self.windowedHardView = firedIncident
+
+        if let firedIncident {
+            self.escalateLatch(to: firedIncident.severity)
+            self.dispatchLiveNotification(firedIncident, monotonicElapsed: monotonicElapsed)
+        }
+    }
+
+    /// Raises `sessionMaxSeverityLatch` to `severity` if it is higher (or first). `hard > soft`; the
+    /// latch only ever climbs — it feeds the post-stop branch, never the live indicator.
+    private func escalateLatch(to severity: CriticalSeverity) {
+        switch (self.sessionMaxSeverityLatch, severity) {
+        case (nil, _), (.soft, .hard):
+            self.sessionMaxSeverityLatch = severity
+
+        case (.soft, .soft), (.hard, _):
+            break // already at or above the incoming tier
+        }
+    }
+
+    /// Dispatches a LIVE critical notification under the dedupe + session-cap policy (T-C.4 / AC-9 /
+    /// AC-3(б)):
+    ///  - SESSION CAP: each tier (`hard` / `soft`) posts at most ONCE per session. A recurrent
+    ///    windowed-hard after de-escalation updates the indicator (caller) but posts no second banner.
+    ///  - PER-WINDOW SUPPRESS: within `criticalNotificationDedupeSeconds` of the last dispatch, a
+    ///    same-or-lower tier is suppressed.
+    ///  - SEVERITY OVERRIDE: a higher tier always breaks through suppression (soft shown → hard posts).
+    ///
+    /// The notifier handles the per-tier interruption level; the coordinator owns only the gating.
+    /// `internal` so L2 tests exercise the override / cap paths by direct call (see
+    /// `stepCriticalDetectors` rationale).
+    func dispatchLiveNotification(_ incident: CriticalIncident, monotonicElapsed: Double) {
+        let severity = incident.severity
+
+        // Session cap: this tier already posted once → indicator-only, no second banner.
+        if severity == .hard, self.hardLiveNotificationPosted { return }
+        if severity == .soft, self.softLiveNotificationPosted { return }
+
+        // Per-window suppress + severity-override: inside the dedupe window, suppress unless THIS tier
+        // is strictly higher than what the cap shows was already posted (override). A hard breaks
+        // through a window opened by a soft; a soft inside any window is suppressed.
+        let dedupeWindow = RecordingConfiguration.mvpDefault.criticalNotificationDedupeSeconds
+        let insideWindow = self.lastLiveNotificationElapsedSeconds.map { monotonicElapsed - $0 < dedupeWindow }
+            ?? false
+        let isHardOverridingSoft = severity == .hard && !self.hardLiveNotificationPosted
+        if insideWindow, !isHardOverridingSoft { return }
+
+        self.notifier.notifyCriticalIncident(incident)
+        self.lastLiveNotificationElapsedSeconds = monotonicElapsed
+        switch severity {
+        case .hard:
+            self.hardLiveNotificationPosted = true
+
+        case .soft:
+            self.softLiveNotificationPosted = true
+        }
+    }
+
+    /// Maps a camera-loss revocation to a `CriticalIncident` and drives BOTH critical values
+    /// (T-C.3 / AC-1 / AC-2). `cameraOnly` (hard, terminal) latches the live view until stop;
+    /// `cameraAndScreen` (soft, transient) surfaces briefly without latching. Both climb the session
+    /// latch and dispatch a live notification under the same dedupe/cap policy. `internal` so AC-1/AC-2
+    /// L2 tests can drive scope mapping directly (the soft scope is unreachable through the streams).
+    func handleCameraLoss(scope: CriticalIncidentScope) {
+        let incident = CriticalIncident.cameraLost(scope: scope)
+        // Sticky camera-loss view (one-shot — the camera does not return). A terminal `cameraOnly`
+        // (hard) overrides a prior soft `cameraAndScreen`; never the reverse (severity only climbs in
+        // the displayed view via `liveCriticalView`'s derivation, and the camera lifecycle is one-way).
+        if self.cameraLossView?.severity != .hard {
+            self.cameraLossView = incident
+        }
+        self.escalateLatch(to: incident.severity)
+        self.dispatchLiveNotification(incident, monotonicElapsed: self.lastMonotonicElapsedSeconds)
+    }
+
+    /// Emits the post-stop summary notification keyed by the session's final max severity (T-C.4 /
+    /// AC-13 / AC-8). Folds the post-stop drop-rate criterion (`evaluatePostStop`, AC-4) into the live
+    /// latch, then:
+    ///  - any hard → `notifyPostStopSummary(.hard)`;
+    ///  - soft only → `.soft`;
+    ///  - none → nothing (minor drops stay disk-only, #246 — and this NEVER forces the window open).
+    ///
+    /// Fire-and-forget only: it must not touch `hasPendingAlert` or the window choreography (#246 /
+    /// T0.1 — the existing degraded path is log-only + reveal, no UI warning surface; the critical
+    /// post-stop is a separate, additive path that preserves that behavior).
+    private func finalizePostStopSummary(result: RecordingResult, sessionDir: URL, sessionStartDate: Date) {
+        // Post-stop drop-rate (AC-4): normalized intensity over the monotonic session duration. Uses
+        // encoderBackpressureDrops — the same reason that drives `degraded` (spec §2 escalation).
+        let postStopHard = SustainedDropDetector.evaluatePostStop(
+            totalDrops: result.drops.encoderBackpressureDrops,
+            durationSeconds: self.lastMonotonicElapsedSeconds,
+            config: RecordingConfiguration.mvpDefault
+        )
+        if postStopHard {
+            self.escalateLatch(to: .hard)
+        }
+
+        guard let severity = self.sessionMaxSeverityLatch else {
+            // No critical incident this session → disk-only (#246), no post-stop notification.
+            return
+        }
+        // Reconstruct the report file URL so the tap action reveals it in Finder (AC-12). The report
+        // shares the session-start timestamp and lives inside the session folder (`RecordingOutput`).
+        // `URL(filePath:relativeTo:)` REPLACES the base's last path component when the base is not
+        // flagged as a directory (e.g. `/tmp/session` → `/tmp/<report>`, dropping the session folder).
+        // Re-flag the base as a directory first so the report always resolves as a child, yielding the
+        // identical on-disk path that `RecordingOutput.writeReport(_:in:timestamp:)` produces at write
+        // time. Real session dirs are already directory-flagged (`OutputDirectoryNaming`); this guards
+        // any caller that passes a non-flagged URL.
+        let sessionDirectory = sessionDir.hasDirectoryPath
+            ? sessionDir
+            : URL(filePath: sessionDir.path(percentEncoded: false), directoryHint: .isDirectory)
+        let reportURL = URL(
+            filePath: RecordingOutput.reportFileName(timestamp: sessionStartDate),
+            relativeTo: sessionDirectory
+        )
+        self.notifier.notifyPostStopSummary(severity: severity, reportURL: reportURL)
     }
 
     // MARK: - Stop (AC-9) — funnel for all three stop paths
@@ -698,8 +978,11 @@ final class RecordingCoordinator {
         self.revocationTask = nil
         await tick?.value
 
-        // Capture sessionDirectory before the await — nonisolated let, safe to read synchronously.
+        // Capture sessionDirectory + start date before the await — nonisolated lets, safe to read
+        // synchronously. The start date derives the report file name for the actionable post-stop
+        // notification (AC-12).
         let sessionDir = session.sessionDirectory
+        let sessionStartDate = session.sessionStartDate
 
         let result = await session.stop()
 
@@ -712,6 +995,12 @@ final class RecordingCoordinator {
         self.lastWriteError = result.writeFailureReason
         self.session = nil
         self.startedAt = nil
+
+        // Post-stop critical summary (T-C.4): fold the post-stop drop-rate criterion into the session
+        // max severity, then notify by tier. AC-4: a session with high cumulative drop intensity that
+        // never held degraded continuously still qualifies as hard post-stop — the live latch alone
+        // would miss it, so `evaluatePostStop` runs here against the result.
+        self.finalizePostStopSummary(result: result, sessionDir: sessionDir, sessionStartDate: sessionStartDate)
 
         // Transient finished phase, then return to the origin (spec lifecycle).
         self.phase = .finished

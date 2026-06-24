@@ -4,13 +4,15 @@ import SwiftUI
 
 /// Reactive status-item label for the menu bar (#38).
 ///
-/// Three visual states driven by `RecordingCoordinator`:
+/// Visual states driven by `RecordingCoordinator`:
 /// - **Idle** — hollow circle `○`.
 /// - **Recording / normal** — red filled circle `●` + elapsed timer (e.g. `04:17`).
 /// - **Recording / degraded** — yellow filled circle `●` + warning triangle `⚠` + elapsed timer.
+/// - **Recording / hard critical** — red filled octagon `⛔` + elapsed timer (spec: hard incident).
 ///
-/// Reads only `coordinator.phase`, `coordinator.recordingState`, and `coordinator.elapsed`
-/// so the per-property `@Observable` tracking fires only on those changes.
+/// Reads `coordinator.phase`, `coordinator.recordingState`, `coordinator.elapsed`, and
+/// `coordinator.liveCriticalView` (the de-escalating windowed-hard view); per-property `@Observable`
+/// tracking fires only on those changes.
 @MainActor
 struct MenuBarLabel: View {
     // MARK: - Metrics
@@ -23,11 +25,12 @@ struct MenuBarLabel: View {
     let coordinator: RecordingCoordinator
 
     var body: some View {
-        // Resolve once per render so body reads exactly three coordinator properties.
+        // Resolve once per render so body reads exactly the coordinator properties the mapper needs.
         let desc = MenuBarLabelMapper.descriptor(
             phase: self.coordinator.phase,
             recordingState: self.coordinator.recordingState,
-            elapsed: self.coordinator.elapsed
+            elapsed: self.coordinator.elapsed,
+            liveCriticalView: self.coordinator.liveCriticalView
         )
 
         HStack(spacing: Metrics.elementSpacing) {

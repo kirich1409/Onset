@@ -19,6 +19,7 @@
 import Foundation
 @testable import Onset
 import Testing
+import UserNotifications
 
 // MARK: - Fake RecordingControlling
 
@@ -38,8 +39,13 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
     nonisolated let captureActiveStream: AsyncStream<Void>
     private let captureActiveContinuation: AsyncStream<Void>.Continuation
 
-    /// Fake session directory — a sentinel path used in coordinator tests.
-    nonisolated let sessionDirectory = URL(filePath: "/tmp/onset-fake-session")
+    /// Fake session directory — a sentinel path used in coordinator tests. Flagged as a directory to
+    /// match real session dirs (`OutputDirectoryNaming.uniqueSessionDirectory` builds them with
+    /// `directoryHint: .isDirectory`); without the flag, child-path resolution drops the folder.
+    nonisolated let sessionDirectory = URL(filePath: "/tmp/onset-fake-session", directoryHint: .isDirectory)
+
+    /// Fake session-start timestamp — a fixed sentinel for deterministic report-URL derivation.
+    nonisolated let sessionStartDate = Date(timeIntervalSince1970: 0)
 
     private(set) var startCalled = false
     private(set) var stopCalled = false
@@ -63,6 +69,15 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
         sessionEverDegraded: false,
         dominantCause: .notDegraded
     )
+
+    /// The camera rate snapshot returned by `currentRates()`. `nil` → screen-only (no fps detector).
+    var liveRates: CameraRateSnapshot?
+
+    /// The monotonic session-relative elapsed seconds returned by `currentSessionElapsedSeconds()`.
+    /// Injected as a plain Double so the detector clock is deterministic in L2 — no real wall-clock
+    /// wait, and it can be set INDEPENDENTLY of `liveRates.monotonicStampSeconds` to drive the
+    /// staleness gate / sustain windows.
+    var liveSessionElapsedSeconds: Double = 0
 
     /// The result returned by `stop()`.
     var result: RecordingResult
@@ -124,6 +139,14 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
 
     func currentDrops() async -> DropHealthSnapshot {
         self.liveDrops
+    }
+
+    func currentRates() async -> CameraRateSnapshot? {
+        self.liveRates
+    }
+
+    func currentSessionElapsedSeconds() async -> Double {
+        self.liveSessionElapsedSeconds
     }
 
     /// Test hook: push a state transition into the stream (the coordinator is the sole consumer).
@@ -1333,6 +1356,295 @@ struct RecordingCoordinatorConsentOrderingTests {
         let session = coordinator.sessionFactory(CoordinatorFixtures.request(), resolved)
         #expect(session is RecordingSession, "production default sessionFactory must produce a RecordingSession")
     }
+}
+
+// MARK: - Critical signals (critical-recording-signals, Phase C)
+
+/// L2 for the coordinator's critical-signal wiring: scope→tier mapping, de-escalation, the two
+/// values (live view vs session latch), live-notification dedupe + severity-override + session cap,
+/// and the post-stop summary branch.
+///
+/// The pure detectors (`FpsCollapseDetector` / `SustainedDropDetector`) are tested in isolation in
+/// their own suites — here the across-tick state machine is driven by DIRECT synchronous calls to
+/// `stepCriticalDetectors` / `dispatchLiveNotification` / `handleCameraLoss`, the only deterministic
+/// way to exercise de-escalation / cap / override (the live 1 Hz loop's `Task.sleep` is
+/// non-deterministic, and the soft→hard path is unreachable through the revocation streams).
+@Suite("RecordingCoordinator — critical signals (Phase C)")
+@MainActor
+struct RecordingCoordinatorCriticalTests {
+    private static let sustainSeconds = RecordingConfiguration.mvpDefault.criticalSustainSeconds
+    private static let dedupeSeconds = RecordingConfiguration.mvpDefault.criticalNotificationDedupeSeconds
+
+    private func makeCoordinator(
+        notifier: FakeRecordingStartNotifier
+    )
+    -> RecordingCoordinator {
+        RecordingCoordinator(
+            sessionFactory: { _ in FakeRecordingControlling(result: CoordinatorFixtures.result()) },
+            notifier: notifier
+        )
+    }
+
+    // MARK: - AC-1 / AC-2 scope → tier mapping
+
+    @Test("AC-1: cameraAndScreen loss → soft, active notification, NO latch (screen track intact)")
+    func cameraLoss_cameraAndScreen_isSoftNoLatch() {
+        let notifier = FakeRecordingStartNotifier()
+        let coordinator = self.makeCoordinator(notifier: notifier)
+
+        coordinator.handleCameraLoss(scope: .cameraAndScreen)
+
+        #expect(coordinator.liveCriticalView == .cameraLost(scope: .cameraAndScreen), "soft view surfaced")
+        #expect(coordinator.sessionMaxSeverityLatch == .soft, "session latch climbs to soft")
+        #expect(notifier.criticalIncidents == [.cameraLost(scope: .cameraAndScreen)], "one soft incident")
+        #expect(notifier.criticalIncidentLevels == [.active], "soft → active interruption level")
+    }
+
+    @Test("AC-2: cameraOnly loss → hard, timeSensitive notification, view latched")
+    func cameraLoss_cameraOnly_isHardLatched() {
+        let notifier = FakeRecordingStartNotifier()
+        let coordinator = self.makeCoordinator(notifier: notifier)
+
+        coordinator.handleCameraLoss(scope: .cameraOnly)
+
+        #expect(coordinator.liveCriticalView == .cameraLost(scope: .cameraOnly), "hard terminal view latched")
+        #expect(coordinator.sessionMaxSeverityLatch == .hard, "session latch climbs to hard")
+        #expect(notifier.criticalIncidentLevels == [.timeSensitive], "hard → timeSensitive interruption level")
+    }
+
+    @Test("AC-1: soft camera-loss view persists across a quiet detector tick (a11y must not flicker)")
+    func cameraLoss_softView_persistsAcrossQuietTick() {
+        let coordinator = self.makeCoordinator(notifier: FakeRecordingStartNotifier())
+
+        coordinator.handleCameraLoss(scope: .cameraAndScreen)
+        // A quiet detector tick (not degraded, no rates) must NOT wipe the sticky soft view.
+        coordinator.stepCriticalDetectors(isDegraded: false, rates: nil, monotonicElapsed: 1)
+
+        #expect(
+            coordinator.liveCriticalView == .cameraLost(scope: .cameraAndScreen),
+            "soft camera-loss view is one-shot/sticky — a quiet tick must not clear it (AC-1)"
+        )
+    }
+
+    // MARK: - AC-3(в) de-escalation + two-value split
+
+    @Test("AC-3(в): windowed-hard fires then recovers → live view de-escalates, session latch retained")
+    func sustainedDrops_deEscalates_butLatchRetainedForPostStop() {
+        let coordinator = self.makeCoordinator(notifier: FakeRecordingStartNotifier())
+
+        // Degraded held continuously past the sustain threshold → fires (windowed-hard live view).
+        coordinator.stepCriticalDetectors(isDegraded: true, rates: nil, monotonicElapsed: 0)
+        coordinator.stepCriticalDetectors(isDegraded: true, rates: nil, monotonicElapsed: Self.sustainSeconds + 1)
+        #expect(coordinator.liveCriticalView == .sustainedDrops, "fires while degraded holds past threshold")
+        #expect(coordinator.sessionMaxSeverityLatch == .hard, "session latch climbs to hard")
+
+        // Recovery: degraded clears → live view de-escalates to nil; session latch is retained.
+        coordinator.stepCriticalDetectors(isDegraded: false, rates: nil, monotonicElapsed: Self.sustainSeconds + 2)
+        #expect(coordinator.liveCriticalView == nil, "live view de-escalates on recovery (no stuck fire)")
+        #expect(coordinator.sessionMaxSeverityLatch == .hard, "session latch retains hard for the post-stop branch")
+    }
+
+    @Test("AC-8: sub-threshold degraded → no live view, latch empty, notifier never called")
+    func subThresholdDegraded_staysQuiet() {
+        let notifier = FakeRecordingStartNotifier()
+        let coordinator = self.makeCoordinator(notifier: notifier)
+
+        // Degraded but well under the sustain threshold (transient) → no fire.
+        coordinator.stepCriticalDetectors(isDegraded: true, rates: nil, monotonicElapsed: 0)
+        coordinator.stepCriticalDetectors(isDegraded: true, rates: nil, monotonicElapsed: Self.sustainSeconds - 1)
+
+        #expect(coordinator.liveCriticalView == nil, "transient degraded → no critical view")
+        #expect(coordinator.sessionMaxSeverityLatch == nil, "latch stays empty for sub-threshold")
+        #expect(notifier.criticalIncidents.isEmpty, "Fake notifier must NOT be called for sub-threshold drops (#246)")
+    }
+
+    // MARK: - AC-9 dedupe + severity override
+
+    @Test("AC-9: two hard incidents inside the dedupe window → one notification (suppress)")
+    func dedupe_twoHardInWindow_oneNotification() {
+        let notifier = FakeRecordingStartNotifier()
+        let coordinator = self.makeCoordinator(notifier: notifier)
+
+        coordinator.dispatchLiveNotification(.sustainedDrops, monotonicElapsed: 0)
+        coordinator.dispatchLiveNotification(.fpsCollapse, monotonicElapsed: 1) // inside window, same tier
+
+        #expect(notifier.criticalIncidents == [.sustainedDrops], "second hard in window is suppressed")
+    }
+
+    @Test("AC-9: soft shown, then hard inside window → hard delivered via severity-override")
+    func dedupe_softThenHard_hardOverrides() {
+        let notifier = FakeRecordingStartNotifier()
+        let coordinator = self.makeCoordinator(notifier: notifier)
+
+        coordinator.dispatchLiveNotification(.cameraLost(scope: .cameraAndScreen), monotonicElapsed: 0)
+        coordinator.dispatchLiveNotification(.sustainedDrops, monotonicElapsed: 1) // higher tier, in window
+
+        #expect(
+            notifier.criticalIncidents == [.cameraLost(scope: .cameraAndScreen), .sustainedDrops],
+            "a hard tier breaks through a window opened by a soft (severity-override)"
+        )
+        #expect(notifier.criticalIncidentLevels == [.active, .timeSensitive])
+    }
+
+    // MARK: - AC-3(б) session-level cap
+
+    @Test("AC-3(б): recurrent hard after de-escalation → no second live banner (session cap)")
+    func sessionCap_recurrentHard_postsOnce() {
+        let notifier = FakeRecordingStartNotifier()
+        let coordinator = self.makeCoordinator(notifier: notifier)
+
+        coordinator.dispatchLiveNotification(.sustainedDrops, monotonicElapsed: 0)
+        // Far outside the dedupe window (recurrence on the 30th minute) — the session cap still blocks.
+        coordinator.dispatchLiveNotification(.sustainedDrops, monotonicElapsed: Self.dedupeSeconds * 200)
+
+        #expect(notifier.criticalIncidents == [.sustainedDrops], "each tier posts at most once per session")
+    }
+
+    // MARK: - AC-10 (coordinator half): indicator independent of notification auth
+
+    @Test("AC-10: notifier denied/no-op → live view still reflects hard; no crash")
+    func deniedNotifier_indicatorStillReflectsHard() {
+        // A no-op notifier stands in for the denied path (the live notifier silently drops when denied).
+        let coordinator = RecordingCoordinator(
+            sessionFactory: { _ in FakeRecordingControlling(result: CoordinatorFixtures.result()) },
+            notifier: NoOpNotifier()
+        )
+
+        coordinator.handleCameraLoss(scope: .cameraOnly)
+
+        #expect(
+            coordinator.liveCriticalView == .cameraLost(scope: .cameraOnly),
+            "indicator state is independent of notification delivery (octagon is the fallback channel)"
+        )
+    }
+
+    @Test("AC-10: soft + denied notifier → no crash, disk-only by design")
+    func deniedNotifier_soft_noCrash() {
+        let coordinator = RecordingCoordinator(
+            sessionFactory: { _ in FakeRecordingControlling(result: CoordinatorFixtures.result()) },
+            notifier: NoOpNotifier()
+        )
+
+        // Must not crash; soft + denied stays disk-only by design.
+        coordinator.handleCameraLoss(scope: .cameraAndScreen)
+        #expect(coordinator.liveCriticalView == .cameraLost(scope: .cameraAndScreen))
+    }
+
+    // MARK: - tick loop feeds the MONOTONIC clock (item-1 guard)
+
+    @Test("tick loop threads currentSessionElapsedSeconds() (monotonic), not Date()")
+    func tickLoop_feedsMonotonicElapsed() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        fake.liveSessionElapsedSeconds = 42 // injected monotonic clock, distinct from Date()-elapsed
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        let threaded = await eventuallyMain { coordinator.lastMonotonicElapsedSeconds == 42 }
+        #expect(threaded, "the tick loop must pull and thread the session's monotonic elapsed")
+
+        await coordinator.stop()
+    }
+}
+
+// MARK: - AC-13 / AC-4 / AC-8 post-stop summary
+
+@Suite("RecordingCoordinator — post-stop critical summary (Phase C)")
+@MainActor
+struct RecordingCoordinatorPostStopTests {
+    @Test("AC-13: soft-only session → notifyPostStopSummary(.soft), not hard")
+    func postStop_softOnly_softSummary() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let notifier = FakeRecordingStartNotifier()
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake }, notifier: notifier)
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        // Soft camera loss during the session, no hard incident.
+        fake.emitRevocation(.sourceRevoked(.camera))
+        let softSeen = await eventuallyMain { coordinator.sessionMaxSeverityLatch == .soft }
+        #expect(softSeen, "prerequisite: soft latch set by the camera revoke")
+
+        await coordinator.stop()
+
+        #expect(notifier.postStopSeverities == [.soft], "soft-only session → soft post-stop summary (not hard)")
+    }
+
+    @Test("T-E.1: post-stop summary carries the report URL inside the session folder (AC-12 wiring)")
+    func postStop_carriesReportURL() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let notifier = FakeRecordingStartNotifier()
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake }, notifier: notifier)
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        fake.emitRevocation(.sourceRevoked(.camera))
+        let softSeen = await eventuallyMain { coordinator.sessionMaxSeverityLatch == .soft }
+        #expect(softSeen, "prerequisite: soft latch set by the camera revoke")
+
+        await coordinator.stop()
+
+        // The report URL is the session folder + the timestamped report name shared with the files.
+        let expectedReportURL = URL(
+            filePath: RecordingOutput.reportFileName(timestamp: fake.sessionStartDate),
+            relativeTo: fake.sessionDirectory
+        )
+        #expect(notifier.postStopReportURLs == [expectedReportURL])
+        // The deterministic deeper check: the reveal target lives inside the revealed session folder.
+        #expect(
+            notifier.postStopReportURLs.first??.deletingLastPathComponent().standardizedFileURL
+                == fake.sessionDirectory.standardizedFileURL,
+            "report URL must resolve inside the session folder so the tap reveals the on-disk report"
+        )
+    }
+
+    @Test("AC-8: minor (sub-threshold) drops → no post-stop summary (disk-only, #246)")
+    func postStop_minorDrops_noSummary() async throws {
+        // 1 backpressure drop over a long session: well under criticalDropRatePerMin → no post-stop hard.
+        let fake = FakeRecordingControlling(
+            result: CoordinatorFixtures.result(backpressureDrops: 1)
+        )
+        fake.liveSessionElapsedSeconds = 600 // long session; 1 drop / 10 min ≪ 600/min floor
+        let notifier = FakeRecordingStartNotifier()
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake }, notifier: notifier)
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        _ = await eventuallyMain { coordinator.lastMonotonicElapsedSeconds == 600 }
+        await coordinator.stop()
+
+        #expect(notifier.postStopSeverities.isEmpty, "minor drops stay disk-only — no post-stop notification (#246)")
+        #expect(!coordinator.hasPendingAlert, "critical post-stop must NOT force the window open (#246)")
+    }
+
+    @Test("AC-4: high drop-rate over a long session → post-stop hard summary even without live latch")
+    func postStop_highDropRate_hardSummary() async throws {
+        // 600 drops / 60 s = 600/min == criticalDropRatePerMin, duration well above the floor.
+        let drops = RecordingConfiguration.mvpDefault.criticalDropRatePerMin
+        let fake = FakeRecordingControlling(
+            result: CoordinatorFixtures.result(backpressureDrops: drops)
+        )
+        fake.liveSessionElapsedSeconds = 60
+        let notifier = FakeRecordingStartNotifier()
+        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake }, notifier: notifier)
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        _ = await eventuallyMain { coordinator.lastMonotonicElapsedSeconds == 60 }
+        await coordinator.stop()
+
+        #expect(
+            notifier.postStopSeverities == [.hard],
+            "post-stop drop-rate criterion (AC-4) yields hard summary even when degraded never held continuously"
+        )
+    }
+}
+
+// MARK: - No-op notifier (AC-10 denied/no-delivery stand-in)
+
+/// A `RecordingStartNotifying` that silently drops every call — stands in for the denied-notifications
+/// path (the live notifier no-ops when authorization is denied). Used to prove the indicator state is
+/// independent of notification delivery.
+@MainActor
+private final class NoOpNotifier: RecordingStartNotifying {
+    func notifyRecordingStarted() {}
+    func notifyCriticalIncident(_: CriticalIncident) {}
+    func notifyPostStopSummary(severity _: CriticalSeverity, reportURL _: URL?) {}
 }
 
 // swiftlint:enable no_magic_numbers

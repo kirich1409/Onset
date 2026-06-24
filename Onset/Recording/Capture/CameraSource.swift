@@ -194,7 +194,7 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
         // Gate on .running too: the stop()-during-start abort path returns normally with
         // state .stopped (stop() already ran its cancel), so telemetry must not start — #203.
         if shouldStartCaptureTelemetry(role: self.role, state: self.captureState) {
-            self.startCaptureTelemetryTask()
+            self.startCaptureTelemetryTask(anchor: anchor)
         }
     }
 
@@ -264,7 +264,10 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
 
     // MARK: - Telemetry task
 
-    func startCaptureTelemetryTask() {
+    func startCaptureTelemetryTask(anchor: HostTimeAnchor) {
+        // T0 in host-clock seconds; the snapshot freshness stamp is expressed relative to it so it
+        // shares the session-relative frame the coordinator's `elapsedSeconds` uses (see below).
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
         self.captureTelemetryTask = Task { [weak self] in
             let clock = ContinuousClock()
             var lastInstant = clock.now
@@ -274,13 +277,36 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
                 let now = clock.now
                 let elapsedSeconds = (now - lastInstant).totalSeconds
                 lastInstant = now
-                if let line = self.captureRateLock.withLock({ $0.flush(elapsedSeconds: elapsedSeconds) }) {
+                // Freshness stamp = seconds since session T0 (host_now − T0). This matches the
+                // SESSION-RELATIVE frame of FpsCollapseDetector's `elapsedSeconds` (zero at start),
+                // so the coordinator can pass `snapshot.monotonicStampSeconds` straight in as
+                // `sampleElapsedSeconds` with no conversion — and `pastWarmup`/staleness stay correct.
+                let monotonicSeconds = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock())) - anchorSeconds
+                // Single lock acquisition: flush stores the numeric snapshot (and resets the log
+                // accumulators); stampSnapshot publishes it with the freshness stamp atomically.
+                let line = self.captureRateLock.withLock { aggregator -> String? in
+                    let line = aggregator.flush(elapsedSeconds: elapsedSeconds)
+                    aggregator.stampSnapshot(monotonicSeconds: monotonicSeconds)
+                    return line
+                }
+                if let line {
                     telemetryLogger.notice("\(line, privacy: .public)")
                 } else {
                     cameraSourceLogger.debug("flushTelemetry: skipped (elapsed ≤ 0)")
                 }
             }
         }
+    }
+
+    // MARK: - Rate snapshot pull (T-B.2)
+
+    /// Returns the latest camera rate snapshot under `captureRateLock`.
+    ///
+    /// `nonisolated`: the snapshot lives behind `captureRateLock` (the same point that synchronizes
+    /// the `VideoOutputShim` writes and the flush tick), so this needs no actor hop and acquires no
+    /// new lock — it reuses the existing one. Returns `nil` until the first flush + stamp pair runs.
+    nonisolated func currentRateSnapshot() -> CameraRateSnapshot? {
+        self.captureRateLock.withLock { $0.latestCameraSnapshot }
     }
 
     // MARK: - Stream teardown
