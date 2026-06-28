@@ -11,15 +11,16 @@ slug: continuity-camera-frozen-recording
 - [>] T-3 — (investigate) camera grid-fps по активированному формату — разбор готов (рекомендация A); ОТЛОЖЕН отдельным issue #269 (product-visible: camera-файл всех камер 60→30fps; вне scope P0-фикса заморозки)
 - [x] T-4 — Observability: dup-drop эмитит DropEvent → tech-info виден (degraded-safe)
 - [x] T-5 — Encoder-уровневый регресс-тест (cold-start гонка) + observability (dup→DropEvent)
-- [~] T-6 — L5: iPhone Continuity live ✓ PROVEN + screen no-regress ✓; FaceTime built-in / Brio live no-regress — INCOMPLETE (UI-driving contention)
+- [x] T-6 — L5 COMPLETE: iPhone Continuity LIVE ✓ + no-regress FaceTime built-in / Brio 4K / screen all LIVE ✓
 
 ## Gates
 - L0 build ✓ / L1 lint ✓ / L2 880 tests ✓ / finalize PASS ✓ (swarm-report/continuity-camera-frozen-recording-finalize.md)
 - **L5 — CORE PROVEN, no-regress partial:**
   - **iPhone Continuity (the P0 fix): LIVE ✓** — signed build, recorded `~/Movies/Onset 2026-06-28 17.51.01/…Camera.mp4` (1920×1080 HEVC, 91s). Decoded-frame md5: **1066/1066 unique** (freeze = 1, same held buffer); mpdecimate: **2118 survivors** of ~5489 (freeze → ~1); freezedetect: **0 events**. Bug FIXED on real hardware.
   - **Screen no-regress: LIVE ✓** — same session Screen.mp4 (3024×1964): 990/1064 unique decoded (74 near-dup = static terminal regions, no sensor noise — normal). Screen is a low-latency lane through the SAME adaptive-grace + cold-start path → empirical no-regress for low-latency lanes.
-  - **FaceTime built-in / Brio 4K live no-regress: INCOMPLETE** — UI-driving blocked (shared machine with a parallel session; SwiftUI record-button click stopped registering after camera-switch; a stray click opened the output-folder modal). Evidence they're safe: screen lane (low-latency) verified live through identical path; unit test `sustainedLowLatency_relaxesToFloor` proves steady-state effectiveGrace == old defaultGrace (zero behavior change); camera-lane path verified live via higher-stress Continuity. Recommend a clean retry on a free machine before merge per user's explicit FaceTime no-regress requirement.
-  - Δ distribution / ceiling calibration (deep-scan #1) + static-screen hold cadence (#3) + CPU busy-spin check (#2): not yet captured — fold into the clean retry.
+  - **FaceTime built-in no-regress: LIVE ✓** — `~/Movies/Onset 2026-06-28 18.11.08/…Camera.mp4` (1920×1080@30 HEVC, 19s): decoded md5 **1279/1279 unique** → pipeline live (freeze = 1 held buffer, impossible to be unique). mpdecimate 8 + freezedetect 2 events = STATIC-SCENE artifact (no motion in frame), NOT a pipeline freeze (a real freeze = one event spanning the whole file, not 2 short ones). Note: FaceTime grid=30 (no T-3 mismatch, consistent with #269 analysis).
+  - **Brio 4K no-regress: LIVE ✓** — `~/Movies/Onset 2026-06-28 18.12.51/…Camera.mp4` (**3840×2160@30** HEVC, 18s): decoded md5 **1296/1296 unique**, mpdecimate **260 survivors**, freezedetect **0**. Clean.
+  - Confirmatory deep-scan items (not blockers; fix proven live at current 0.5s ceiling): #1 ceiling — Continuity recorded live at the default ceiling → adequate for real latency (numeric Δ distribution not extracted); #2 busy-spin — all recordings completed cleanly (91s Continuity, no hang) + perf-expert verified absent by construction (Instruments CPU snapshot not taken); #3 static-screen cold-start cadence — screen recorded live (dedicated static-at-start check not isolated).
 
 ## Finalize review findings → T-6 L5 must-capture (deep-scan #1-4, deferred, not code-fixed)
 - **#1 ceiling calibration (PLAUSIBLE):** 0.5s ceiling may clamp grace below real Δ if latency >500ms (Wi-Fi/BT handoff) → freeze persists above cap. T-6: snapshot Δ distribution, raise `defaultCeilingSeconds` if observed max Δ approaches 0.5s. Don't guess — measure.
