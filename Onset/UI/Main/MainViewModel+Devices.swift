@@ -144,17 +144,38 @@ extension MainViewModel {
             self.cameraEnabled = true
             self.selectedCameraID = id
             self.disconnectedCameraName = nil
+            // A selected camera is present this session — arm the live-disconnect announcement (#256).
+            self.hasObservedPresentCamera = true
             mainViewModelLogger.debug("Restored camera selection — device present")
 
         case let .disconnected(name):
             self.cameraEnabled = true
             self.selectedCameraID = nil
+            // Edge-trigger on the nil→non-nil transition: loadCamerasAndMicrophones re-runs on every
+            // device-change event, so the still-unplugged camera re-enters .disconnected on each
+            // reload. Announcing only on the edge prevents VoiceOver spam from unrelated device
+            // changes while the camera stays absent (#256).
+            let wasConnected = self.disconnectedCameraName == nil
             self.disconnectedCameraName = name
             mainViewModelLogger.info("Saved camera not available — showing disconnected notice")
+            // The dominant disconnect flow nils selectedCameraID → preview goes .idle (no announce)
+            // and CameraUnavailableRow is silent. Announce explicitly here (the single real
+            // live-unplug site); gated so a saved-but-absent camera at launch stays silent (#256).
+            let announcement = cameraDisconnectAnnouncement(
+                name: name,
+                hasObservedPresentCamera: self.hasObservedPresentCamera
+            )
+            if wasConnected, let announcement {
+                self.postAnnouncementSeam(announcement)
+            }
 
         case .noSavedSelection:
             // First launch or explicitly cleared — apply the first-camera default.
             self.selectFirstCameraIfNeeded()
+            // Arm the announcement only if a real camera actually got auto-selected.
+            if self.selectedCamera != nil {
+                self.hasObservedPresentCamera = true
+            }
         }
 
         switch DeviceSelectionResolver.resolve(

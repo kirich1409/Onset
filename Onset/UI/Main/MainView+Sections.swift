@@ -145,12 +145,14 @@ extension MainView {
     }
 
     /// Visible and accessibility label for the camera placeholder — iPhone-specific when applicable.
+    ///
+    /// Thin wrapper over `CameraPreviewLabel.text` so the visible label and the VoiceOver
+    /// announcement (`previewAnnouncement`) read the SAME source (#256). `nil` only for `.live`,
+    /// where the placeholder is not shown; the connecting copy is the safe fallback.
     private var cameraPlaceholderLabel: String {
         let isPhone = self.model.activeCamera?.isContinuityCamera == true
-        if self.model.previewFailed {
-            return isPhone ? "Не удалось подключить iPhone" : "Не удалось подключить камеру"
-        }
-        return isPhone ? "Подключение iPhone…" : "Подключение камеры…"
+        return CameraPreviewLabel.text(for: self.model.previewState, isContinuity: isPhone)
+            ?? (isPhone ? "Подключение iPhone…" : "Подключение камеры…")
     }
 
     /// Placeholder shown while the preview session is starting or has failed.
@@ -175,8 +177,10 @@ extension MainView {
                     .foregroundStyle(.primary)
             }
         }
+        // `.accessibilityLabel` gives the on-demand current-state read; the frequent-updates
+        // trait was removed (#256) — it re-spoke the label for a focused user on top of the
+        // explicit VoiceOver announcement (double speech).
         .accessibilityLabel(self.cameraPlaceholderLabel)
-        .accessibilityAddTraits(.updatesFrequently)
     }
 
     // MARK: - Microphone section
