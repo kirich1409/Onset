@@ -8,9 +8,9 @@ slug: continuity-camera-frozen-recording
 ## Tasks
 - [x] T-1 — Чистый `LatencyGraceEstimator` (огибающая + пессимистичный init) + pure L2
 - [x] T-2 — Интеграция в VideoEncoder: Δ на всех кадрах до ветвления + effectiveGrace в ОБОИХ потребителях grace (+ grace-pin константный режим, ingest Δ-шов)
-- [~] T-3 — (investigate) camera grid-fps по активированному формату — разбор готов (рекомендация A), решение по включению pending
+- [>] T-3 — (investigate) camera grid-fps по активированному формату — разбор готов (рекомендация A); ОТЛОЖЕН отдельным issue #269 (product-visible: camera-файл всех камер 60→30fps; вне scope P0-фикса заморозки)
 - [x] T-4 — Observability: dup-drop эмитит DropEvent → tech-info виден (degraded-safe)
-- [ ] T-5 — Encoder-уровневый регресс-тест (cold-start гонка) + observability
+- [x] T-5 — Encoder-уровневый регресс-тест (cold-start гонка) + observability (dup→DropEvent)
 - [ ] T-6 — L5: iPhone Continuity live + no-regress (FaceTime built-in, Brio 4K, screen)
 
 ## Learnings

@@ -1196,6 +1196,116 @@ struct VideoEncoderTests {
         // Aggregator cap-overflow counter must be 1.
         #expect(await encoder.aggregatorCapOverflowCount == 1)
     }
+
+    // MARK: - #268 cold-start latency race (T-5)
+
+    /// Regression for #268: a high-latency lane (Continuity Camera, capture→ingest Δ ≈ 150 ms)
+    /// must NOT freeze on frame 0 from cold start. The wall-clock CFR frontier (`clockTick`)
+    /// advances synthetic holds while real frames map to slots by their *capture-PTS*, which lags
+    /// the wall-clock by Δ. With the former static grace the frontier raced ahead of the late
+    /// frames and dup-swallowed every one of them; the latency-aware grace estimator widens grace
+    /// to cover Δ so each real frame still wins its capture-PTS slot.
+    ///
+    /// ### Why this is RED on the old static-grace logic / GREEN with the fix (fps = 30)
+    /// Per round `n` the late frame for slot `n` ingests at `now = anchor + n/fps + Δ`. A
+    /// `clockTick(now)` fired first computes
+    /// `eligibleThrough = floor(n + (Δ − grace)·fps − 0.5)`:
+    /// - OLD static grace = `defaultGrace(30)` = 0.0667 s: `(Δ − grace)·fps = (0.15 − 0.0667)·30
+    ///   = 2.5`, so `eligibleThrough ≈ n + 2` → the frontier already covered slot `n` → the real
+    ///   frame is dup-dropped (`cfrNormalizationDrops` grows, only frame 0 ever encodes — frozen).
+    /// - NEW adaptive grace: the upper-envelope peak detector keeps `grace ≥ Δ` (it never decays
+    ///   below the observed Δ), so `(Δ − grace) ≤ 0` → `eligibleThrough ≤ n − 1 = lastEmittedSlot`
+    ///   → `catchUpHolds` emits nothing and the real frame for slot `n` encodes. Holds-free by
+    ///   construction for any frame count.
+    ///
+    /// The interleaved `clockTick(now)` BEFORE each `ingest` is load-bearing: it is the frontier
+    /// race that froze the file. Ingest alone produces only monotonically-new slots and never a
+    /// dup, so without the clockTick this assertion would pass on the old logic too (vacuous).
+    ///
+    /// Scope note: this pins adaptive-vs-static-grace (T-5's contract). It does NOT separately
+    /// pin the pessimistic cold-start `init = ceiling` — fast-attack jumps the envelope to Δ on
+    /// frame 0's observation, so a floor-initialised adaptive estimator would also survive from
+    /// frame 1; the init nuance is covered by `LatencyGraceEstimatorTests` (T-1). Busy-spin is
+    /// NOT covered here either — `clockTick(nowSeconds:)` bypasses the `startClock` sleep loop
+    /// where the spin lives; that is an L5 CPU check (T-6).
+    @Test("highLatencyIngest_fromColdStart_encodesRealFrames_notFrozen")
+    func highLatencyIngest_fromColdStart_encodesRealFrames_notFrozen() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        // grace: nil → the adaptive latency-aware estimator (the production path). An explicit
+        // grace would pin a CONSTANT estimator and the cold-start race would not reproduce.
+        let encoder = await makeEncoder(mock: mock, anchor: anchor, grace: nil)
+        try await encoder.start()
+
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        // Continuity capture→ingest latency. floor(defaultGrace@30 = 0.0667) < Δ < ceiling(0.5).
+        let latency = 0.15
+        let frameCount = 10
+
+        var ingestedBuffers: [CVPixelBuffer] = []
+        for slot in 0..<frameCount {
+            let capturePTS = anchorSeconds + Double(slot) / Double(testFps)
+            let now = capturePTS + latency
+            // Wall-clock frontier races ahead first — this is what froze the file pre-fix.
+            await encoder.clockTick(nowSeconds: now)
+            // The late real frame arrives Δ after its capture-PTS, mapping to its capture-PTS slot.
+            let frame = makeFrame(slotIndex: slot, anchor: anchor)
+            ingestedBuffers.append(frame.pixelBuffer)
+            await encoder.ingest(frame, nowSeconds: now)
+        }
+
+        // Post-fix contract: every late real frame reached its capture-PTS slot and encoded.
+        // makePixelBuffer() is a fresh allocation per frame, so identity (===) uniquely matches a
+        // real frame — holds re-submit a prior buffer and never match a later ingested frame.
+        let realEncoded = ingestedBuffers.count { buffer in
+            mock.encodedBuffers.contains { $0 === buffer }
+        }
+        // OLD logic: only frame 0 encodes (realEncoded == 1) — camera frozen on frame 0.
+        #expect(realEncoded == frameCount)
+        // No frame was dup-swallowed. OLD logic: cfrNormalizationDropCount == frameCount − 1.
+        #expect(await encoder.cfrNormalizationDropCount == 0)
+        // Real encodes grow with ingests; adaptive grace emits zero synthetic holds here, so the
+        // submitted count equals the real-frame count exactly. OLD logic: 1 real + a run of holds.
+        #expect(mock.encodedBuffers.count == frameCount)
+    }
+
+    /// Observability for #268 (T-4): a CFR duplicate-slot drop must surface as a
+    /// `DropEvent(reason: .cfrNormalizationDrops)` on the `drops` stream so DropMonitor /
+    /// tech-info ("Нормализация CFR") is no longer blind to the freeze. The dedicated cold-start
+    /// test above produces no dups (the fix prevents them), so the dup→DropEvent path is pinned
+    /// here with a deterministic same-slot duplicate.
+    @Test("Duplicate-slot frame emits DropEvent(.cfrNormalizationDrops) on the drops stream (#268 T-4)")
+    func duplicateFrame_emitsCfrNormalizationDropEvent() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        let encoder = await makeEncoder(mock: mock, anchor: anchor)
+        try await encoder.start()
+
+        // Collect every drop reason emitted over the session.
+        let dropTask = Task { () -> [DropReason] in
+            var reasons: [DropReason] = []
+            for await event in await encoder.drops {
+                reasons.append(event.reason)
+            }
+            return reasons
+        }
+
+        // Two frames into the SAME slot 0 → the second is a CFR duplicate-slot drop.
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+        await encoder.stop() // finishes the drops stream so the collector terminates
+
+        let reasons = await dropTask.value
+        // Match via switch: the InferIsolatedConformances trap makes DropReason's Equatable
+        // conformance unusable from the nonisolated context (mirrors the backpressure test).
+        let cfrDropCount = reasons.count { reason in
+            if case .cfrNormalizationDrops = reason { return true }
+            return false
+        }
+        #expect(cfrDropCount == 1)
+        // The separate telemetry counter still moves (no double-count: distinct sinks).
+        #expect(await encoder.cfrNormalizationDropCount == 1)
+    }
 }
 
 // MARK: - L5 opt-in condition
