@@ -147,12 +147,15 @@ struct RecordingContentView: View {
     // MARK: Timer section
 
     private var timerSection: some View {
-        Text(ElapsedFormatter.string(from: self.elapsed))
+        // Format once per render: the same string feeds both the visible text and the VoiceOver
+        // label, avoiding a second `String` allocation each tick (#152).
+        let elapsedText = ElapsedFormatter.string(from: self.elapsed)
+        return Text(elapsedText)
             .font(.system(size: self.timerFontSize, weight: .regular, design: .monospaced))
             .foregroundStyle(.primary)
             .frame(maxWidth: .infinity)
             .padding(.bottom, Metrics.timerBottomPadding)
-            .accessibilityLabel("Время записи \(ElapsedFormatter.string(from: self.elapsed))")
+            .accessibilityLabel("Время записи \(elapsedText)")
             .accessibilityAddTraits(.updatesFrequently)
     }
 
