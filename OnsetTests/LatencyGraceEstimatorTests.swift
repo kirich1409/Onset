@@ -57,4 +57,22 @@ struct LatencyGraceEstimatorTests {
 
         #expect(grace >= 0.3)
     }
+
+    /// (e) Constant mode: `effectiveGrace` returns the fixed value verbatim for any fps — no
+    /// per-fps lower bound, no ceiling — and `observe` does not move it.
+    @Test
+    func constantMode_returnsFixedGrace_andIgnoresObserve() {
+        var estimator = LatencyGraceEstimator(constant: 0.005)
+
+        // Pinned exactly, even where defaultGrace(fps) would be far higher (0.0667 at 30 fps).
+        #expect(estimator.effectiveGrace(fps: 30) == 0.005)
+        #expect(estimator.effectiveGrace(fps: 60) == 0.005)
+
+        // observe is a no-op in constant mode — neither a spike nor a long low run shifts it.
+        estimator.observe(latencySeconds: 0.4)
+        for _ in 0..<500 {
+            estimator.observe(latencySeconds: 0.001)
+        }
+        #expect(estimator.effectiveGrace(fps: 30) == 0.005)
+    }
 }

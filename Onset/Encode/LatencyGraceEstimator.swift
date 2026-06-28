@@ -56,6 +56,20 @@ import Foundation
 /// lanes (FaceTime built-in, Brio, screen) at their natural per-fps grace (no
 /// behaviour change); the ceiling caps growth so a stalled source cannot inflate
 /// grace without bound.
+///
+/// ## Modes: adaptive vs constant
+///
+/// Two modes share one type, selected at init:
+///
+/// - **Adaptive** (`init(floor:ceiling:)`) — the latency-aware envelope described
+///   above. The production path (`VideoEncoder` with no explicit `grace:`) uses this.
+/// - **Constant** (`init(constant:)`) — `effectiveGrace(fps:)` returns the supplied
+///   value *exactly*, with no per-fps lower bound and no ceiling, and `observe` is a
+///   no-op. This reproduces the encoder's former direct use of a fixed `graceSeconds`.
+///   It backs lanes that pin a static grace and the deterministic hold-scheduler tests:
+///   an explicit `grace:` means "do not adapt", so the value must pin precisely (e.g.
+///   `grace: 0.005` at 30 fps must stay 0.005, not be lifted to `defaultGrace == 0.0667`,
+///   or synthetic-hold cadences in those tests would not line up).
 nonisolated struct LatencyGraceEstimator {
     // MARK: - Tuning constants
 
@@ -92,12 +106,16 @@ nonisolated struct LatencyGraceEstimator {
 
     /// Current upper-envelope estimate of Δ (seconds). Initialised to `ceiling`
     /// (pessimistic), driven by `observe(latencySeconds:)`: fast-attack up,
-    /// slow-decay down.
+    /// slow-decay down. Unused in constant mode.
     private var envelope: Double
+
+    /// Fixed grace for constant mode, in seconds; `nil` in adaptive mode. When set,
+    /// `effectiveGrace(fps:)` returns it verbatim and `observe` is a no-op.
+    private let constant: Double?
 
     // MARK: - Init
 
-    /// Creates an estimator with the given grace bounds.
+    /// Creates an **adaptive** estimator with the given grace bounds.
     ///
     /// The envelope starts at `ceiling` (pessimistic cold-start), so `effectiveGrace`
     /// reports `ceiling` until observations relax it downward.
@@ -110,6 +128,23 @@ nonisolated struct LatencyGraceEstimator {
         self.floor = floor
         self.ceiling = ceiling
         self.envelope = ceiling
+        self.constant = nil
+    }
+
+    /// Creates a **constant** estimator whose `effectiveGrace(fps:)` always returns
+    /// `constant` verbatim (no per-fps lower bound, no ceiling) and whose `observe` is a
+    /// no-op. Reproduces the encoder's former fixed `graceSeconds` for static-grace lanes
+    /// and deterministic hold-scheduler tests.
+    ///
+    /// - Parameter constant: The fixed effective grace, in seconds. Must be non-negative.
+    init(constant: Double) {
+        precondition(constant >= 0, "constant grace must be non-negative")
+        // Adaptive fields are unused in constant mode; seed them with `constant` so the
+        // struct is fully initialised without exposing a separate sentinel.
+        self.floor = constant
+        self.ceiling = constant
+        self.envelope = constant
+        self.constant = constant
     }
 
     // MARK: - Observation
@@ -124,6 +159,10 @@ nonisolated struct LatencyGraceEstimator {
     ///
     /// - Parameter latencySeconds: The observed Δ = `clockNow − capturePTS`, in seconds.
     mutating func observe(latencySeconds: Double) {
+        // Constant mode does not adapt — an explicit grace means "do not adapt".
+        guard self.constant == nil else {
+            return
+        }
         guard latencySeconds.isFinite, latencySeconds >= 0 else {
             return
         }
@@ -135,12 +174,18 @@ nonisolated struct LatencyGraceEstimator {
 
     /// The grace to use for the given frame rate, in seconds.
     ///
-    /// Clamps the current envelope into `[max(floor, defaultGrace(fps:)), ceiling]`.
-    /// The caller (`VideoEncoder`) reads this fresh every scheduling cycle.
+    /// In adaptive mode, clamps the current envelope into
+    /// `[max(floor, defaultGrace(fps:)), ceiling]`. In constant mode, returns the fixed
+    /// `constant` verbatim — no per-fps lower bound, no ceiling. The caller
+    /// (`VideoEncoder`) reads this fresh every scheduling cycle.
     ///
     /// - Parameter fps: The lane's target frame rate. Must be > 0.
-    /// - Returns: The clamped effective grace in seconds.
+    /// - Returns: The effective grace in seconds.
     func effectiveGrace(fps: Int) -> Double {
+        // Constant mode pins the value exactly (test determinism / static-grace lanes).
+        if let constant = self.constant {
+            return constant
+        }
         let lowerBound = max(self.floor, Self.defaultGrace(fps: fps))
         return min(max(self.envelope, lowerBound), self.ceiling)
     }
