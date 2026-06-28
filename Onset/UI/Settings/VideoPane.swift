@@ -13,7 +13,7 @@ import SwiftUI
 struct VideoPane: View {
     var body: some View {
         Form {
-            Section("Формат записи") {
+            Section("Формат записи экрана") {
                 LabeledContent("Кодек", value: "HEVC")
                 LabeledContent("Контейнер", value: "MP4")
                 LabeledContent("Разрешение", value: "Исходное")

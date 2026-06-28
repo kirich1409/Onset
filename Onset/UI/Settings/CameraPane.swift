@@ -4,9 +4,13 @@ import SwiftUI
 
 /// The «Камера» settings pane.
 ///
-/// Hosts the camera-mirror toggle — a `.nextRecordingStart` control: the live preview reflects a
-/// change instantly, but a recording honors the value captured at its next start. During an active
-/// recording the control is locked. Camera resolution is a read-only `LabeledContent` row in v1.
+/// Hosts the camera-mirror toggle — a `.nextRecordingStart` control: outside a recording, a mirror
+/// change takes effect from the next recording's start. During an active recording the control is
+/// locked — not because of any preview divergence (the main window, the sole camera-preview
+/// carrier, is dismissed at recording start, so no live preview is on screen), but because the
+/// one-shot pipeline cannot reconfigure mid-record: an editable toggle would silently have NO
+/// effect on the in-progress file, which is worse than a clearly-disabled control. Camera
+/// resolution is a read-only `LabeledContent` row in v1.
 @MainActor
 struct CameraPane: View {
     /// The shared settings model. `@Bindable` so `$appSettings.cameraMirror` writes through to the
@@ -26,7 +30,9 @@ struct CameraPane: View {
     }
 
     /// The caption shown beneath the mirror toggle, explaining either why it is locked or when the
-    /// change takes effect. Also mirrored into the control's `accessibilityHint`.
+    /// change takes effect. Rendered as the always-visible `Section` footer, which VoiceOver already
+    /// announces with the control — so it is the single explanatory channel (no `accessibilityHint`
+    /// duplicate, which would make VoiceOver read the same text twice).
     private var mirrorCaption: String {
         switch self.mirrorAvailability {
         case .disabled: "Недоступно во время записи"
@@ -39,7 +45,6 @@ struct CameraPane: View {
             Section {
                 Toggle("Зеркальное отображение", isOn: self.$appSettings.cameraMirror)
                     .disabled(self.mirrorAvailability == .disabled)
-                    .accessibilityHint(self.mirrorCaption)
             } footer: {
                 Text(self.mirrorCaption)
                     .font(.caption)

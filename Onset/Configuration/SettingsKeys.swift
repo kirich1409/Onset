@@ -14,4 +14,8 @@ enum SettingsKeys {
     /// Key for the "mirror the camera horizontally" toggle (`Bool`).
     /// Absent or non-`Bool` → resolves to `SettingsDefaults.cameraMirror`.
     static let cameraMirror = "onset.settings.cameraMirror"
+
+    /// Key for the last-selected Settings tab (`String`, a `SettingsTab.rawValue`).
+    /// Absent or unknown → resolves to `SettingsTab.indication`.
+    static let selectedTab = "onset.settings.selectedTab"
 }

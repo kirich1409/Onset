@@ -19,6 +19,13 @@ struct IndicationPane: View {
             Section("Строка меню") {
                 Toggle("Показывать таймер записи", isOn: self.$appSettings.showMenuBarTimer)
             }
+
+            Section("Dock") {
+                // Read-only stub in v1: the Dock-icon indicator is not yet implemented, shown as a
+                // static `LabeledContent` row (no chevron, non-interactive) like the other panes'
+                // read-only rows.
+                LabeledContent("Значок в Dock во время записи", value: "Выкл")
+            }
         }
     }
 }

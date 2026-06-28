@@ -57,6 +57,11 @@ enum SettingsTab: String {
 enum SettingsLayout {
     /// The fixed content width of the Settings window, matching macOS HIG preference panes.
     static let width: CGFloat = 480
+
+    /// The fixed content height of the Settings window. Sized to comfortably fit the tallest pane
+    /// (Камера: gated toggle + wrapping footer + resolution row) so single-control tabs (Индикация,
+    /// Общие) do not collapse to a thin strip and switching tabs keeps a stable, non-jumping height.
+    static let height: CGFloat = 360
 }
 
 // MARK: - SettingsView
@@ -80,7 +85,7 @@ struct SettingsView: View {
     let coordinator: RecordingCoordinator
 
     /// Persisted raw value of the last-selected tab. Defaults to `SettingsTab.indication`.
-    @AppStorage("settings.selectedTab")
+    @AppStorage(SettingsKeys.selectedTab)
     private var selectedTabRaw: String = SettingsTab.indication.rawValue
 
     /// Two-way binding that maps the persisted raw string to a `SettingsTab`.
@@ -118,7 +123,7 @@ struct SettingsView: View {
                 .tag(SettingsTab.audio)
         }
         .formStyle(.grouped)
-        .frame(width: SettingsLayout.width)
+        .frame(width: SettingsLayout.width, height: SettingsLayout.height)
     }
 }
 
