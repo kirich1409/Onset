@@ -11,7 +11,17 @@ slug: continuity-camera-frozen-recording
 - [>] T-3 — (investigate) camera grid-fps по активированному формату — разбор готов (рекомендация A); ОТЛОЖЕН отдельным issue #269 (product-visible: camera-файл всех камер 60→30fps; вне scope P0-фикса заморозки)
 - [x] T-4 — Observability: dup-drop эмитит DropEvent → tech-info виден (degraded-safe)
 - [x] T-5 — Encoder-уровневый регресс-тест (cold-start гонка) + observability (dup→DropEvent)
-- [ ] T-6 — L5: iPhone Continuity live + no-regress (FaceTime built-in, Brio 4K, screen)
+- [ ] T-6 — L5: iPhone Continuity live + no-regress (FaceTime built-in, Brio 4K, screen) — ОСТАЁТСЯ (целевой Mac + iPhone/Brio)
+
+## Gates
+- L0 build ✓ / L1 lint ✓ / L2 880 tests ✓ / finalize PASS ✓ (swarm-report/continuity-camera-frozen-recording-finalize.md)
+- L5 (T-6) — PENDING (mandatory before merge, recording hot-path)
+
+## Finalize review findings → T-6 L5 must-capture (deep-scan #1-4, deferred, not code-fixed)
+- **#1 ceiling calibration (PLAUSIBLE):** 0.5s ceiling may clamp grace below real Δ if latency >500ms (Wi-Fi/BT handoff) → freeze persists above cap. T-6: snapshot Δ distribution, raise `defaultCeilingSeconds` if observed max Δ approaches 0.5s. Don't guess — measure.
+- **#2 Δ contamination (PLAUSIBLE):** Δ = dequeue-time − capturePTS includes actor-queue/backpressure delay, not only delivery latency → may inflate grace under backpressure, prolonging stutter. T-6: observe grace/holds under induced backpressure; potential follow-up to timestamp at stream-enqueue.
+- **#3 screen-lane cold-start (PLAUSIBLE):** pessimistic ceiling applies to screen lane too (out-of-scope), delaying synthetic holds ~0.5s at session start vs ~0.067s. Already on T-6 checklist (static-screen hold cadence). Accepted (cold-start not reopened).
+- **#4 DropEvent UX:** per-dup `.cfrNormalizationDrops` makes tech-info «Нормализация CFR» non-zero (was 0). Deliberate (plan decision #6); after fix dup→~0 so non-zero = real event. Watch for noise in L5.
 
 ## Learnings
 - T-1: `LatencyGraceEstimator` — peak-detector (max-with-decay): fast-attack up, geometric slow-decay (factor 0.95) down, pessimistic init=ceiling(0.5s). `effectiveGrace` clamps envelope into `[max(floor, defaultGrace(fps)), ceiling]`. 4 pure L2 tests (a–d) green; lint clean.
