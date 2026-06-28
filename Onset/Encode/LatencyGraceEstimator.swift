@@ -47,22 +47,27 @@ import Foundation
 /// converged upward from the floor instead, the self-clocked frontier would race
 /// `lastEmittedSlot` to the wall-present while the estimate was still small → a
 /// start-of-session freeze. Starting high and relaxing down avoids that by
-/// construction; low-latency lanes converge to their floor within ~1–2 s.
+/// construction; low-latency lanes converge to their per-fps floor (`defaultGrace(fps)`)
+/// within ~1 s (60 fps) – ~1.3 s (30 fps).
 ///
 /// ## Grace clamping
 ///
-/// `effectiveGrace(fps:)` clamps the envelope into
-/// `[max(floor, defaultGrace(fps:)), ceiling]`. The lower bound keeps low-latency
-/// lanes (FaceTime built-in, Brio, screen) at their natural per-fps grace (no
-/// behaviour change); the ceiling caps growth so a stalled source cannot inflate
-/// grace without bound.
+/// `effectiveGrace(fps:)` clamps the envelope into `[defaultGrace(fps:), ceiling]`:
+/// `defaultGrace(fps:)` is the **hard** per-fps lower bound (floor) and `ceiling` the
+/// upper bound. The floor keeps low-latency lanes (FaceTime built-in, Brio, screen) at
+/// their natural per-fps grace (no behaviour change); the ceiling caps growth so a
+/// stalled source cannot inflate grace without bound. The clamp applies the ceiling
+/// first, then the floor, so on a degenerate `defaultGrace(fps:) > ceiling` the floor
+/// still wins (it is the hard lower bound) — on real inputs (`defaultGrace < ceiling`)
+/// the order is immaterial.
 ///
 /// ## Modes: adaptive vs constant
 ///
 /// Two modes share one type, selected at init:
 ///
-/// - **Adaptive** (`init(floor:ceiling:)`) — the latency-aware envelope described
-///   above. The production path (`VideoEncoder` with no explicit `grace:`) uses this.
+/// - **Adaptive** (`init(ceiling:)`) — the latency-aware envelope described above; the
+///   per-fps lower bound is `defaultGrace(fps)`. The production path (`VideoEncoder`
+///   with no explicit `grace:`) uses this.
 /// - **Constant** (`init(constant:)`) — `effectiveGrace(fps:)` returns the supplied
 ///   value *exactly*, with no per-fps lower bound and no ceiling, and `observe` is a
 ///   no-op. This reproduces the encoder's former direct use of a fixed `graceSeconds`.
@@ -70,6 +75,12 @@ import Foundation
 ///   an explicit `grace:` means "do not adapt", so the value must pin precisely (e.g.
 ///   `grace: 0.005` at 30 fps must stay 0.005, not be lifted to `defaultGrace == 0.0667`,
 ///   or synthetic-hold cadences in those tests would not line up).
+///
+///   Why constant mode is a distinct mode and not just `floor == ceiling == constant`:
+///   with the hard per-fps floor now in the adaptive clamp, a sub-floor pin (e.g.
+///   `grace: 0.005`, below `defaultGrace(30) == 0.0667`) is unreachable in adaptive
+///   mode — the floor would lift it. Only an explicit constant mode can express a
+///   sub-floor grace.
 nonisolated struct LatencyGraceEstimator {
     // MARK: - Tuning constants
 
@@ -89,16 +100,12 @@ nonisolated struct LatencyGraceEstimator {
 
     /// Per-observation geometric decay applied to the envelope when Δ is below it
     /// (slow-decay). Each low-Δ frame multiplies the envelope by this factor, so it
-    /// relaxes toward the current Δ over tens of frames (~1–2 s at 30–60 fps) rather
-    /// than collapsing instantly — this is the "slow" half of the peak detector.
+    /// relaxes toward the current Δ over tens of frames (effective grace converges to the
+    /// floor in ~1 s (60 fps) – ~1.3 s (30 fps)) rather than collapsing instantly — this
+    /// is the "slow" half of the peak detector.
     static let decayFactor = 0.95
 
     // MARK: - State
-
-    /// Absolute lower bound for the effective grace (seconds), supplied at init.
-    /// In integration this is `grace ?? defaultGrace(fps)` from `VideoEncoder`; it is
-    /// combined with the per-fps `defaultGrace(fps:)` as the clamp's lower bound.
-    private let floor: Double
 
     /// Upper bound for the effective grace (seconds), supplied at init. Caps the
     /// envelope and is the pessimistic cold-start value.
@@ -115,17 +122,15 @@ nonisolated struct LatencyGraceEstimator {
 
     // MARK: - Init
 
-    /// Creates an **adaptive** estimator with the given grace bounds.
+    /// Creates an **adaptive** estimator with the given ceiling.
     ///
     /// The envelope starts at `ceiling` (pessimistic cold-start), so `effectiveGrace`
-    /// reports `ceiling` until observations relax it downward.
+    /// reports `ceiling` until observations relax it downward; the per-fps lower bound is
+    /// `defaultGrace(fps)`, applied in `effectiveGrace(fps:)`.
     ///
-    /// - Parameters:
-    ///   - floor: Absolute lower bound for the effective grace, in seconds.
-    ///   - ceiling: Upper bound for the effective grace, in seconds. Also the
-    ///     pessimistic cold-start envelope value.
-    init(floor: Double, ceiling: Double) {
-        self.floor = floor
+    /// - Parameter ceiling: Upper bound for the effective grace, in seconds. Also the
+    ///   pessimistic cold-start envelope value.
+    init(ceiling: Double) {
         self.ceiling = ceiling
         self.envelope = ceiling
         self.constant = nil
@@ -141,7 +146,6 @@ nonisolated struct LatencyGraceEstimator {
         precondition(constant >= 0, "constant grace must be non-negative")
         // Adaptive fields are unused in constant mode; seed them with `constant` so the
         // struct is fully initialised without exposing a separate sentinel.
-        self.floor = constant
         self.ceiling = constant
         self.envelope = constant
         self.constant = constant
@@ -153,9 +157,9 @@ nonisolated struct LatencyGraceEstimator {
     ///
     /// Peak-detector update: `envelope = max(Δ, envelope × decayFactor)`. When Δ rises
     /// above the (decayed) envelope it is adopted immediately (fast-attack); when Δ is
-    /// low the envelope decays geometrically toward it (slow-decay). Negative or
-    /// non-finite Δ (NaN, ∞ — e.g. a pre-anchor PTS artifact) are ignored so they
-    /// cannot poison the envelope.
+    /// low the envelope decays geometrically toward it (slow-decay). A negative Δ
+    /// (clock inversion — `clockNow` behind `capturePTS`) or a non-finite Δ (NaN, ∞ from
+    /// an invalid `CMTime`) is ignored so it cannot poison the envelope.
     ///
     /// - Parameter latencySeconds: The observed Δ = `clockNow − capturePTS`, in seconds.
     mutating func observe(latencySeconds: Double) {
@@ -174,20 +178,22 @@ nonisolated struct LatencyGraceEstimator {
 
     /// The grace to use for the given frame rate, in seconds.
     ///
-    /// In adaptive mode, clamps the current envelope into
-    /// `[max(floor, defaultGrace(fps:)), ceiling]`. In constant mode, returns the fixed
-    /// `constant` verbatim — no per-fps lower bound, no ceiling. The caller
-    /// (`VideoEncoder`) reads this fresh every scheduling cycle.
+    /// In adaptive mode, clamps the current envelope into `[defaultGrace(fps:), ceiling]`:
+    /// the ceiling is applied first, then `defaultGrace(fps:)` as the **hard** floor, so a
+    /// degenerate `defaultGrace(fps:) > ceiling` still floors at `defaultGrace` (on real
+    /// inputs `defaultGrace < ceiling`, where the order is immaterial). In constant mode,
+    /// returns the fixed `constant` verbatim — no per-fps lower bound, no ceiling. The
+    /// caller (`VideoEncoder`) reads this fresh every scheduling cycle.
     ///
     /// - Parameter fps: The lane's target frame rate. Must be > 0.
     /// - Returns: The effective grace in seconds.
     func effectiveGrace(fps: Int) -> Double {
-        // Constant mode pins the value exactly (test determinism / static-grace lanes).
+        // Constant mode pins the value exactly (test determinism / static-grace lanes) —
+        // an early return that bypasses the per-fps floor, so a sub-floor pin stays exact.
         if let constant = self.constant {
             return constant
         }
-        let lowerBound = max(self.floor, Self.defaultGrace(fps: fps))
-        return min(max(self.envelope, lowerBound), self.ceiling)
+        return max(min(self.envelope, self.ceiling), Self.defaultGrace(fps: fps))
     }
 
     /// The per-fps grace floor: `max(minimumGraceSeconds, frameMultiplier / fps)`.

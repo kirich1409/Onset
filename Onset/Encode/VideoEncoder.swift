@@ -165,28 +165,18 @@ actor VideoEncoder {
     /// their capture-PTS slot before a synthetic hold fills it. Read FRESH every scheduling
     /// cycle by both grace consumers; fed via `observe` on every post-anchor frame.
     ///
-    /// An explicit `grace:` pins a CONSTANT estimator (deterministic tests / static-grace
-    /// lanes — "do not adapt"). `grace == nil` (the production path) builds an ADAPTIVE
-    /// estimator with `floor = defaultGrace(fps)` and the pessimistic cold-start `ceiling`,
-    /// capping envelope growth so a stalled source cannot inflate grace without bound.
+    /// `grace == nil` (default, production) builds an ADAPTIVE latency-aware estimator: a
+    /// pessimistic cold-start at `ceiling` (≈ 0.5 s) relaxing toward the per-fps floor
+    /// `LatencyGraceEstimator.defaultGrace(fps)`, with the ceiling capping envelope growth
+    /// so a stalled source cannot inflate grace without bound. An explicit `grace:` pins a
+    /// CONSTANT estimator (deterministic tests / static-grace lanes — "do not adapt").
     /// Replaces the former static `graceSeconds` field.
     private var graceEstimator: LatencyGraceEstimator
 
-    /// Minimum grace floor: 5 ms, enough to absorb scheduler jitter even at 60 fps (half-slot
-    /// = 8.33 ms). Never go below this regardless of fps.
-    private static let minGraceSeconds = 0.005
-
-    /// Grace expressed as a fraction of the slot duration: 2 slots of silence required before
-    /// a hold is emitted. At 30 fps this is ≈ 66.7 ms; at 60 fps ≈ 33.3 ms.
-    private static let graceSlotMultiplier = 2.0
-
-    /// Derives the fps-dependent default grace window: `max(minGraceSeconds, 2 slots)`.
-    ///
-    /// - Parameter fps: The CFR grid rate (must be > 0).
-    /// - Returns: Grace in seconds.
-    static func defaultGrace(fps: Int) -> Double {
-        max(self.minGraceSeconds, self.graceSlotMultiplier / Double(fps))
-    }
+    /// Whether the capture→ingest Δ anomaly (clock inversion / invalid `CMTime`) has already
+    /// been logged this session. The grace estimator silently ignores such a Δ; this latch
+    /// surfaces it ONCE via the logger without spamming the 30–60/s ingest hot path (#268).
+    private var loggedLatencyAnomaly = false
 
     /// Session T0 in seconds, derived once at init from `anchor.anchorTime`.
     /// Avoids repeated `CMTimeGetSeconds` calls in hot paths (`ingest`, `clockTick`, `secondsUntilNextDeadline`).
@@ -227,7 +217,10 @@ actor VideoEncoder {
     /// routed by `DropMonitor` as never-degrading, so it is visible in tech-info without flipping
     /// the degraded latch.
     ///
-    /// Unbounded until #35 (DropMonitor) attaches a consumer; bounding is deferred to #35.
+    /// Intentionally `.unbounded` (do NOT change the buffering policy): the consumer is
+    /// `DropMonitor` (#36, `RecordingSession.swift:517,574`), which counts EVERY drop event —
+    /// a `.bufferingNewest` policy would undercount `cfrNormalizationDrops` and corrupt the
+    /// user-facing counter, where per-event accuracy matters.
     nonisolated let drops: AsyncStream<DropEvent>
     private let dropsContinuation: AsyncStream<DropEvent>.Continuation
 
@@ -250,9 +243,10 @@ actor VideoEncoder {
     ///     steady-state pending depth is ≤2, so 4 is a conservative headroom bound rather than a
     ///     tight calibration against the B-frame reorder window.
     ///   - grace: Source-silence threshold in seconds — the clock waits this long after a slot's
-    ///     midpoint before synthesising a hold. `nil` (default) derives the value from fps via
-    ///     `defaultGrace(fps:)` (2 slots, floored at 5 ms). Pass an explicit value only when
-    ///     overriding the default in tests or production experiments.
+    ///     midpoint before synthesising a hold. `nil` (default, production) builds an adaptive
+    ///     latency-aware estimator (pessimistic cold-start at ceiling ≈ 0.5 s, relaxing to the
+    ///     per-fps floor `LatencyGraceEstimator.defaultGrace(fps)`). An explicit value pins a
+    ///     constant grace (tests / static-grace lanes) — pass one only to override the default.
     ///   - selfClocked: Whether `start()` spawns the standalone CFR clock. `true` (default) for
     ///     standalone use; `false` when an external coordinator (#34) or a test drives
     ///     `clockTick()`.
@@ -289,10 +283,7 @@ actor VideoEncoder {
         if let grace {
             self.graceEstimator = LatencyGraceEstimator(constant: grace)
         } else {
-            self.graceEstimator = LatencyGraceEstimator(
-                floor: Self.defaultGrace(fps: fps),
-                ceiling: LatencyGraceEstimator.defaultCeilingSeconds
-            )
+            self.graceEstimator = LatencyGraceEstimator(ceiling: LatencyGraceEstimator.defaultCeilingSeconds)
         }
         self.selfClocked = selfClocked
         self.label = label
@@ -653,6 +644,17 @@ actor VideoEncoder {
         // (`ContinuousClock.now` above is a different clock, for telemetry only). Feeds the grace
         // estimator on every post-anchor frame below (#268).
         let delta = nowSeconds - ptsSeconds
+
+        // Diagnostic (project rule: suppression must not be silent). `observe` silently ignores a
+        // clock-inversion (Δ < 0) or invalid-`CMTime` (NaN / ∞) Δ; surface it ONCE per session so a
+        // clock-domain desync is visible in logs without spamming the 30–60/s hot path. Pure
+        // diagnostic — it does not alter the flow.
+        if !delta.isFinite || delta < 0, !self.loggedLatencyAnomaly {
+            self.loggedLatencyAnomaly = true
+            self.logger.warning(
+                "capture→ingest Δ anomaly (Δ=\(delta)s): clock-domain desync or invalid CMTime — grace ignores it"
+            )
+        }
 
         // Route duplicates and pre-anchor frames through processFrame for accounting only.
         // slotFor uses the same round() mapping as processFrame, so agreement is guaranteed.
