@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import os
 import SwiftUI
 
@@ -335,17 +336,26 @@ struct SectionCard<Content: View>: View {
 
 /// `NSViewRepresentable` wrapper for `CameraPreviewView`.
 ///
-/// `CameraPreviewView.init` wires the `AVCaptureVideoPreviewLayer`; `updateNSView` is a no-op
-/// by design. Force recreation by toggling `.id(model.previewGeneration)` on the call site.
+/// `CameraPreviewView.init` wires the `AVCaptureVideoPreviewLayer`; the device-change recreation
+/// is forced by toggling `.id(model.previewGeneration)` on the call site. `updateNSView` is the
+/// SOLE writer of the preview connection's `isVideoMirrored`: driven by `cameraMirror` (observed
+/// from `AppSettings`), it flips the preview live as a cheap layer transform — no session
+/// reconfiguration, no `CameraSource` rebuild, no flicker.
 struct CameraPreviewRepresentable: NSViewRepresentable {
     let sessionHandle: SessionHandle?
+
+    /// Whether the live preview is horizontally mirrored. Sourced from `AppSettings.cameraMirror`
+    /// at the call site so SwiftUI re-invokes `updateNSView` when the toggle changes.
+    let cameraMirror: Bool
 
     func makeNSView(context: Context) -> CameraPreviewView {
         CameraPreviewView(sessionHandle: self.sessionHandle)
     }
 
     func updateNSView(_ nsView: CameraPreviewView, context: Context) {
-        // No-op: CameraPreviewView wires the layer in init.
-        // Caller must use .id() to force recreation when sessionHandle changes.
+        // Sole writer of the preview connection's mirror state. The layer itself is wired in
+        // CameraPreviewView.init (which also disables automatic mirroring); device changes are
+        // handled by .id()-driven recreation at the call site.
+        nsView.previewLayer?.connection?.isVideoMirrored = self.cameraMirror
     }
 }

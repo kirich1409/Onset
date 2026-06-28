@@ -56,6 +56,17 @@ struct OnsetApp: App {
     /// Window actions are wired into it from `WindowActionsBridge` once the env actions exist.
     @State private var coordinator = RecordingCoordinator()
 
+    /// The single `@Observable` settings model — in-memory source of truth for app-wide settings.
+    ///
+    /// Owned here at the composition root and injected into every consumer (`RootView` →
+    /// `MainViewModel`, `MenuBarLabel`) so a toggle in the Settings window propagates live.
+    /// Under XCTest an `InMemorySettingsStore` is injected: this `@State` initial value is
+    /// evaluated even though the windows render `EmptyView`, and a `UserDefaults.standard`-backed
+    /// store would trap (see `UserDefaultsSettingsStore` / `OnsetTests/CLAUDE.md`).
+    @State private var appSettings = AppSettings(
+        store: isRunningUnderXCTest ? InMemorySettingsStore() as any SettingsPersisting : UserDefaultsSettingsStore()
+    )
+
     /// System-wide hotkey monitor (#67 / AC-9 third stop path). Created at app-init time;
     /// registered once from `WindowActionsBridge.onAppear` after the coordinator is wired.
     /// Suppressed under XCTest — a test host must not grab the system-wide ⌘⌥⌃R shortcut
@@ -84,6 +95,7 @@ struct OnsetApp: App {
                 RootView(
                     permissionsService: self.permissionsService,
                     coordinator: self.coordinator,
+                    appSettings: self.appSettings,
                     hasPostScreenGrantArg: CommandLine.arguments.contains(AppRelauncher.postScreenGrantArg)
                 )
                 // Capture the env window actions into the coordinator (a plain class cannot read
@@ -117,7 +129,7 @@ struct OnsetApp: App {
         MenuBarExtra(isInserted: .constant(!isRunningUnderXCTest)) {
             MenuBarMenu(coordinator: self.coordinator, diagnosticsCoordinator: self.diagnosticsCoordinator)
         } label: {
-            MenuBarLabel(coordinator: self.coordinator)
+            MenuBarLabel(coordinator: self.coordinator, appSettings: self.appSettings)
         }
     }
 }
@@ -203,6 +215,10 @@ struct RootView: View {
     let permissionsService: PermissionsService
     let coordinator: RecordingCoordinator
 
+    /// The shared settings model, forwarded into the `MainViewModel` so the record seam and
+    /// camera preview read the same instance the Settings window mutates.
+    let appSettings: AppSettings
+
     // MARK: - Transient routing state
 
     /// Whether the process was launched with `--post-screen-grant`.
@@ -234,14 +250,17 @@ struct RootView: View {
     init(
         permissionsService: PermissionsService,
         coordinator: RecordingCoordinator,
+        appSettings: AppSettings,
         hasPostScreenGrantArg: Bool
     ) {
         self.permissionsService = permissionsService
         self.coordinator = coordinator
+        self.appSettings = appSettings
         _hasPostScreenGrantArg = State(initialValue: hasPostScreenGrantArg)
         _onboardingViewModel = State(initialValue: OnboardingViewModel(permissions: permissionsService))
         _mainViewModel = State(initialValue: MainViewModel(
             permissions: permissionsService,
+            appSettings: appSettings,
             coordinator: coordinator
         ))
     }

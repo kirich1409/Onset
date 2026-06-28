@@ -5,11 +5,11 @@
 ## Status
 - [x] T-1 — Domain types in Configuration/ (SettingApplyPolicy, SettingsKeys) ✅ build+L2 green
 - [x] T-2 — Per-key settings store (timer, mirror) ✅ build+L2 green
-- [ ] T-3 — Shared @Observable AppSettings (in-memory source of truth)
+- [x] T-3 — Shared @Observable AppSettings (in-memory source of truth) ✅ build+L2 green (901 tests)
 - [x] T-4 — Add cameraMirror to RecordingConfiguration ✅ build+L2 green
-- [ ] T-5 — Read mirror at record seam + provide AppSettings to preview
-- [ ] T-6 — Menu-bar timer toggle (consumer)
-- [ ] T-7 — Camera mirror (recording path + live preview)
+- [x] T-5 — Read mirror at record seam + provide AppSettings to preview ✅ build green
+- [x] T-6 — Menu-bar timer toggle (consumer) ✅ build+L2 green (timer-toggle suite)
+- [~] T-7 — Camera mirror (recording path + live preview) ✅ impl+build green; ⚠ L5 (flip + zero-copy on MX Brio) pending → T-10
 - [~] T-8 — Observable recording-active + availability classifier ✅ impl+classifier L2 green; ⚠ coordinator regression test still pending (follow-up)
 - [ ] T-9a — Settings scene, tabs, discoverability, real controls
 - [ ] T-9b — Read-only stub panes + during-recording gating

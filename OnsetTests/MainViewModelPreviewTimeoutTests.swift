@@ -99,6 +99,7 @@ struct MainViewModelPreviewTimeoutTests {
         let defaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: coordinator,
             discoverDisplays: { _ in [] },
             discoverCameras: { _ in cameras },

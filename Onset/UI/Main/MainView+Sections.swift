@@ -104,12 +104,15 @@ extension MainView {
                 // Live preview — always mounted when active so the NSView layer is warm.
                 // `.id(previewGeneration)` forces recreation when the camera device changes;
                 // until the handle arrives the layer paints black (covered by the overlay below).
-                CameraPreviewRepresentable(sessionHandle: self.model.previewHandle)
-                    .id(self.model.previewGeneration)
-                    .accessibilityLabel("Предварительный просмотр камеры")
-                    // Hide the black NSView layer from VoiceOver while the placeholder is shown
-                    // so the user only hears the status label, not both.
-                    .accessibilityHidden(pending)
+                CameraPreviewRepresentable(
+                    sessionHandle: self.model.previewHandle,
+                    cameraMirror: self.model.appSettings.cameraMirror
+                )
+                .id(self.model.previewGeneration)
+                .accessibilityLabel("Предварительный просмотр камеры")
+                // Hide the black NSView layer from VoiceOver while the placeholder is shown
+                // so the user only hears the status label, not both.
+                .accessibilityHidden(pending)
 
                 // Placeholder — shown while `previewHandle == nil` (source not yet started or failed).
                 // Fades in/out via the ZStack-level `.animation` driven by `cameraPlaceholderPending`.

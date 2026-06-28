@@ -299,6 +299,7 @@ extension CameraSource {
         }
         session.addOutput(videoOutput)
         videoOutput.setSampleBufferDelegate(shims.video, queue: self.videoQueue)
+        self.applyRecordingMirrorIfNeeded(to: videoOutput, in: session)
 
         if self.micDevice != nil {
             let audioOutput = AVCaptureAudioDataOutput()
@@ -325,6 +326,24 @@ extension CameraSource {
             session.addOutput(audioOutput)
             audioOutput.setSampleBufferDelegate(shims.audio, queue: self.audioQueue)
         }
+    }
+
+    /// Horizontally mirrors the recording VDO connection when `config.cameraMirror` is set.
+    ///
+    /// Applied ONCE at setup, before the first frame — never on a running session (one-shot
+    /// lifecycle; the value is read fresh at record start). `attachOutputs` runs OUTSIDE
+    /// `configureSession`'s `begin`/`commitConfiguration` pair, so the change gets its own.
+    /// Guarded by `isVideoMirroringSupported`; when `cameraMirror` is false the output stays
+    /// unmirrored (the VDO default), so nothing is done.
+    private func applyRecordingMirrorIfNeeded(to videoOutput: AVCaptureVideoDataOutput, in session: AVCaptureSession) {
+        guard self.config.cameraMirror else { return }
+        guard let connection = videoOutput.connection(with: .video), connection.isVideoMirroringSupported else {
+            return
+        }
+        session.beginConfiguration()
+        connection.automaticallyAdjustsVideoMirroring = false
+        connection.isVideoMirrored = true
+        session.commitConfiguration()
     }
 
     func registerDisconnectObserver(shims: CameraCaptureShims, session: AVCaptureSession) {
