@@ -90,7 +90,8 @@ extension MainViewModel {
         do {
             return try CameraFormatSelector.pickBestFormat(
                 from: camera.formats,
-                minFps: Double(RecordingConfiguration.mvpDefault.minCameraFps)
+                minFps: Double(RecordingConfiguration.mvpDefault.minCameraFps),
+                allowAboveFullHD: true
             )
         } catch {
             self.recordError = "Не удалось выбрать формат камеры"
@@ -115,7 +116,7 @@ extension MainViewModel {
         if let preview = self.previewSource {
             await preview.stop()
             self.previewSource = nil
-            self.previewHandle = nil
+            self.setPreviewState(.idle)
         }
 
         let request = RecordingRequest(

@@ -71,7 +71,9 @@ struct MainViewModelRecordTests {
         let defaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: perms,
-            coordinator: RecordingCoordinator(),
+            coordinator: RecordingCoordinator(
+                makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: defaults) }
+            ),
             discoverDisplays: { _ in displays },
             discoverCameras: { _ in cameras },
             discoverMicrophones: { _ in microphones },

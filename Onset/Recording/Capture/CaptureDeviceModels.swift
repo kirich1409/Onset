@@ -121,6 +121,23 @@ nonisolated struct MicrophoneDevice {
     ///
     /// **Never log this field.** Device uniqueIDs are PII-adjacent; log counts only.
     let uniqueID: String
+
+    /// `true` when this is the notebook's built-in microphone.
+    ///
+    /// Built-in mics deliver digital silence while the lid is closed (clamshell mode with an
+    /// external display), but no AVFoundation or CoreAudio property signals this — the device
+    /// stays connected and non-suspended. `isBuiltIn` is the flag that lets the picker hide
+    /// it while the lid is closed (see `DeviceDiscovery.microphonesAvailable(_:lidClosed:)`).
+    let isBuiltIn: Bool
+
+    /// Creates a microphone snapshot.
+    ///
+    /// `isBuiltIn` defaults to `false` so existing call sites that pass only `uniqueID`
+    /// keep compiling.
+    init(uniqueID: String, isBuiltIn: Bool = false) {
+        self.uniqueID = uniqueID
+        self.isBuiltIn = isBuiltIn
+    }
 }
 
 extension MicrophoneDevice: Equatable {}

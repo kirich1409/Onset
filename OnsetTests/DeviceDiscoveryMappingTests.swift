@@ -261,4 +261,81 @@ struct MicrophoneDeviceTests {
 
         #expect(first.uniqueID != second.uniqueID)
     }
+
+    @Test("isBuiltIn defaults to false")
+    func microphoneDevice_isBuiltIn_defaultsFalse() {
+        let device = MicrophoneDevice(uniqueID: "mic-001")
+
+        #expect(device.isBuiltIn == false)
+    }
+
+    @Test("isBuiltIn can be set to true")
+    func microphoneDevice_isBuiltIn_canBeTrue() {
+        let device = MicrophoneDevice(uniqueID: "mic-builtin", isBuiltIn: true)
+
+        #expect(device.isBuiltIn == true)
+    }
+}
+
+// MARK: - microphonesAvailable lid-filter tests
+
+@Suite("DeviceDiscovery.microphonesAvailable — lid filter")
+struct MicrophonesAvailableTests {
+    private func makeBuiltIn(id: String = "builtin") -> MicrophoneDevice {
+        MicrophoneDevice(uniqueID: id, isBuiltIn: true)
+    }
+
+    private func makeExternal(id: String = "external") -> MicrophoneDevice {
+        MicrophoneDevice(uniqueID: id, isBuiltIn: false)
+    }
+
+    @Test("lid open — all devices returned including built-in")
+    func lidOpen_allDevicesReturned() {
+        let devices = [makeBuiltIn(), makeExternal()]
+
+        let result = DeviceDiscovery.microphonesAvailable(devices, lidClosed: false)
+
+        #expect(result.count == 2)
+    }
+
+    @Test("lid closed — built-in mic removed, external kept")
+    func lidClosed_builtInRemoved_externalKept() {
+        let builtIn = self.makeBuiltIn(id: "builtin")
+        let external = self.makeExternal(id: "usb-mic")
+        let devices = [builtIn, external]
+
+        let result = DeviceDiscovery.microphonesAvailable(devices, lidClosed: true)
+
+        #expect(result.count == 1)
+        #expect(result[0].uniqueID == "usb-mic")
+    }
+
+    @Test("lid closed — list with only external mics unchanged")
+    func lidClosed_onlyExternals_unchanged() {
+        let devices = [makeExternal(id: "usb-1"), makeExternal(id: "usb-2")]
+
+        let result = DeviceDiscovery.microphonesAvailable(devices, lidClosed: true)
+
+        #expect(result.count == 2)
+    }
+
+    @Test("empty list — returns empty regardless of lid state")
+    func emptyList_alwaysEmpty() {
+        let resultOpen = DeviceDiscovery.microphonesAvailable([], lidClosed: false)
+        let resultClosed = DeviceDiscovery.microphonesAvailable([], lidClosed: true)
+
+        #expect(resultOpen.isEmpty)
+        #expect(resultClosed.isEmpty)
+    }
+
+    @Test("lid open — built-in mic present in result")
+    func lidOpen_builtInPresent() {
+        let builtIn = self.makeBuiltIn(id: "builtin")
+        let devices = [builtIn]
+
+        let result = DeviceDiscovery.microphonesAvailable(devices, lidClosed: false)
+
+        #expect(result.count == 1)
+        #expect(result[0].uniqueID == "builtin")
+    }
 }

@@ -54,6 +54,11 @@ actor RecordingSession {
     /// second consumer would starve the first. Menu bar and recording window read live state from
     /// the coordinator's `@Observable` properties — they do NOT subscribe here. Emits only on a
     /// `.normal ↔ .degraded` transition (no initial `.normal`), matching `DropMonitor.state`.
+    ///
+    /// The single-consumer contract is enforced only by convention for the MVP (#154). If a second
+    /// consumer is ever needed, harden it then — a one-shot accessor that `precondition`s on a
+    /// repeat read, or a broadcast wrapper that fans out to N iterators — rather than relying on
+    /// this doc comment. The same applies to `captureActiveStream` and `sourceRevocationStream`.
     nonisolated let recordingStateStream: AsyncStream<RecordingState>
     private let stateContinuation: AsyncStream<RecordingState>.Continuation
 
@@ -183,6 +188,11 @@ actor RecordingSession {
     ///   - config: Recording policy.
     ///   - probe: Capability pre-flight (AC-6). Defaults to the live `CapabilityProbe`.
     ///   - encoderFactory / writerFactory / sourceFactory: DI seams (live by default).
+    ///   - writerFactoryBuilder: Optional factory builder receiving the session-scoped URL
+    ///     provider and returning a `WriterFactory`. Takes priority after `writerFactory`; the
+    ///     live `LiveWriterFactory` is the final fallback. Used by the composition root to wire
+    ///     the resolved backend selection without exposing `RecordingBackendResolver` internals
+    ///     to `RecordingSession` directly.
     init(
         plan: ResolvedRecordingPlan,
         display: Display,
@@ -193,6 +203,8 @@ actor RecordingSession {
         probe: (@Sendable () -> ProbeResult)? = nil,
         encoderFactory: any EncoderFactory = LiveEncoderFactory(),
         writerFactory: (any WriterFactory)? = nil,
+        writerFactoryBuilder: (@Sendable (@escaping @Sendable (RecordingPipelineKind) -> URL) -> any WriterFactory)? =
+            nil,
         sourceFactory: any SourceFactory = LiveSourceFactory()
     ) {
         self.plan = plan
@@ -247,13 +259,17 @@ actor RecordingSession {
         // Default live writer factory: place both files in the session subdirectory (#225).
         // Both kinds close over `startDate` and `sessionDir` — not a fresh Date() / new URL per
         // call — so the pair of files for one session shares the same timestamp and parent folder.
-        self.writerFactory = writerFactory ?? LiveWriterFactory(configuration: config) { kind in
+        let urlProvider: @Sendable (RecordingPipelineKind) -> URL = { kind in
             let fileKind: RecordingFileKind = switch kind {
             case .screen: .screen
             case .camera: .camera
             }
             return RecordingOutput.uniqueOutputURL(in: sessionDir, timestamp: startDate, kind: fileKind)
         }
+        self.writerFactory = writerFactory ?? writerFactoryBuilder?(urlProvider) ?? LiveWriterFactory(
+            configuration: config,
+            urlProvider: urlProvider
+        )
     }
 
     // MARK: - Start

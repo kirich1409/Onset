@@ -207,7 +207,16 @@ final class RecordingCoordinator {
 
     /// Builds a `RecordingControlling` for a request. Live = `RecordingSession`; tests inject a fake.
     @ObservationIgnored
-    private let sessionFactory: @Sendable (RecordingRequest) -> any RecordingControlling
+    let sessionFactory: @Sendable (RecordingRequest, ResolvedBackendSelection) -> any RecordingControlling
+
+    /// Factory that vends the persisted recording-backend selection store on demand.
+    ///
+    /// Evaluated on every `start()` call (not at `init` time) so the default
+    /// `UserDefaultsBackendSelectionStore()` is never constructed while the test host is
+    /// initialising `OnsetApp` — matching the `makeStore:` / `makeOutputFolderStore:` convention
+    /// used by `MainViewModel`.
+    @ObservationIgnored
+    private let makeBackendStore: () -> any BackendSelectionPersisting
 
     /// Fires a transient confirmation (local notification) when recording starts (#242).
     /// Tests inject `FakeRecordingStartNotifier` to assert the call without posting a real notification.
@@ -304,6 +313,8 @@ final class RecordingCoordinator {
     // MARK: - Init
 
     /// - Parameters:
+    ///   - makeBackendStore: Factory that vends the persisted backend-selection store on demand
+    ///     (default: `UserDefaults.standard`).
     ///   - sessionFactory: Builds the session for a request (live = `RecordingSession`).
     ///   - notifier: Posts a transient start confirmation (#242). Tests inject a fake.
     ///   - activationTimeoutSeconds: Seconds to bound the first-frame wait (default: 30 s).
@@ -313,16 +324,33 @@ final class RecordingCoordinator {
     /// Window actions default to no-ops and are installed later via `bindWindowActions(...)` from
     /// the SwiftUI scene, where the `openWindow` / `dismissWindow` env actions exist.
     init(
-        sessionFactory: @escaping @Sendable (RecordingRequest) -> any RecordingControlling = { request in
-            RecordingSession(
-                plan: request.plan,
-                display: request.display,
-                cameraDevice: request.cameraDevice,
-                cameraFormat: request.cameraFormat,
-                micDevice: request.micDevice,
-                config: request.config
-            )
-        },
+        makeBackendStore: @escaping () -> any BackendSelectionPersisting = { UserDefaultsBackendSelectionStore() },
+        sessionFactory: @escaping @Sendable (RecordingRequest, ResolvedBackendSelection)
+            -> any RecordingControlling = { request, resolved in
+                let encoderFactory: any EncoderFactory = switch resolved.encoder {
+                case .live: LiveEncoderFactory()
+                }
+                let sourceFactory: any SourceFactory = switch resolved.source {
+                case .live: LiveSourceFactory()
+                }
+                let writerFactoryBuilder: @Sendable (@escaping @Sendable (RecordingPipelineKind) -> URL)
+                    -> any WriterFactory = { urlProvider in
+                        switch resolved.writer {
+                        case .live: LiveWriterFactory(configuration: request.config, urlProvider: urlProvider)
+                        }
+                    }
+                return RecordingSession(
+                    plan: request.plan,
+                    display: request.display,
+                    cameraDevice: request.cameraDevice,
+                    cameraFormat: request.cameraFormat,
+                    micDevice: request.micDevice,
+                    config: request.config,
+                    encoderFactory: encoderFactory,
+                    writerFactoryBuilder: writerFactoryBuilder,
+                    sourceFactory: sourceFactory
+                )
+            },
         notifier: any RecordingStartNotifying = LiveRecordingStartNotifier(),
         activationTimeoutSeconds: Double = 30,
         revealInFinder: @escaping ([URL]) -> Void = { urls in
@@ -337,6 +365,7 @@ final class RecordingCoordinator {
             }
         }
     ) {
+        self.makeBackendStore = makeBackendStore
         self.sessionFactory = sessionFactory
         self.notifier = notifier
         self.activationTimeoutSeconds = activationTimeoutSeconds
@@ -419,7 +448,11 @@ final class RecordingCoordinator {
         self.activationCancelledByUser = false
         defer { self.isStarting = false }
 
-        let session = self.sessionFactory(request)
+        let resolved = RecordingBackendResolver.resolve(
+            persisted: self.makeBackendStore().load(),
+            supported: .allSupported
+        )
+        let session = self.sessionFactory(request, resolved)
         do {
             try await session.start(permissions: request.permissions)
         } catch {

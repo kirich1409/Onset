@@ -17,7 +17,8 @@
 | `ScreenSource` | `ScreenSource.swift` | Актор: захват дисплея через ScreenCaptureKit, обрабатывает hot-plug отключение |
 | `CameraDevice` | `CaptureDeviceModels.swift` | Иммутабельный снапшот камеры (uniqueID + форматы), без живых ссылок на `AVCaptureDevice` |
 | `Display` | `CaptureDeviceModels.swift` | Иммутабельный снапшот дисплея: `CGDirectDisplayID`, размеры, частота |
-| `DeviceDiscovery` | `DeviceDiscovery+Displays.swift`, `DeviceDiscovery+CaptureDevices.swift` | Nonisolated-перечисление устройств с чистыми мапперами для тестов; suspended-устройства (`isSuspended`, например FaceTime-камера при закрытой крышке) исключаются из результатов |
+| `DeviceDiscovery` | `DeviceDiscovery+Displays.swift`, `DeviceDiscovery+CaptureDevices.swift` | Nonisolated-перечисление устройств с чистыми мапперами для тестов; suspended-устройства (`isSuspended`, например FaceTime-камера при закрытой крышке) исключаются из результатов. Встроенный микрофон не флипает `isSuspended` при закрытой крышке (отдаёт цифровую тишину), поэтому скрывается отдельно — чистым фильтром `microphonesAvailable(_:lidClosed:)` по состоянию крышки из `LidState` |
+| `LidState` | `LidState.swift` | Nonisolated-обёртка над IOKit: `isClosed` читает `AppleClamshellState` из `IOPMrootDomain` (clamshell). Дискриминатор для скрытия встроенного микрофона — у него нет AVFoundation/CoreAudio-сигнала недоступности |
 | `DeviceAvailabilityObserver` | `DeviceAvailabilityObserver.swift` | Поток событий топологии устройств (`DeviceChangeEvent`): NotificationCenter connect/disconnect + KVO `isSuspended`; время жизни привязано к стриму (teardown через `onTermination`) |
 | `ScreenStreamConfigurationBuilder` | `ScreenStreamConfigurationBuilder.swift` | Чистый билдер `ResolvedRecordingPlan` → `SCStreamConfiguration` |
 
@@ -153,6 +154,35 @@ TCC-разрешения, политика записи, запись MP4.
   `AppRouter`) не импортируют AVFoundation; маппинг во framework-константы — на
   уровне кодера/writer'а/обёрток.
 
+### Выбор бэкенда записи (backend-selection seam)
+
+Per-stage шов для выбора реализации каждого звена пайплайна (захват / кодирование /
+запись в файл). Позволяет подменять реализацию через конфигурацию без изменений в
+остальном коде.
+
+| Тип | Файл | Роль |
+|---|---|---|
+| `SourceBackend` / `EncoderBackend` / `WriterBackend` | `Configuration/BackendSelectionTypes.swift` | Single-case enum'ы (`.live`) с каноническим `rawString` и `init?(rawString:)` для round-trip-персистирования. Ручной `nonisolated static func ==` обходит MainActor-инференс синтезированных conformances на enum'ах |
+| `ResolvedBackendSelection` | `Configuration/BackendSelectionTypes.swift` | Nonisolated struct: результат резолва (три поля — по одному enum'у на стадию); производится резолвером, потребляется composition root для построения конкретных фабрик |
+| `PersistedBackendSelection` | `Configuration/BackendSelectionTypes.swift` | Codable struct: сырая форма для UserDefaults; поля опциональные строки (`rawString`); `nil` = не задано → резолвер выбирает `.live` |
+| `BackendSelectionKeys` | `Configuration/BackendSelectionKeys.swift` | UserDefaults-ключ `onset.backend.selection` (единый JSON-блоб, по аналогии с `DeviceSelectionKeys`) |
+| `RecordingBackendResolver` | `Storage/RecordingBackendResolver.swift` | `nonisolated enum`, pure-функция `resolve(persisted:supported:) -> ResolvedBackendSelection`. Три ветки на стадию: `nil` → `.live`; неизвестная строка → `.live` + `warning`-лог; known-but-unsupported → `.live` + `warning`-лог. Никогда не бросает; всегда возвращает корректный результат |
+| `SupportedBackends` | `Storage/RecordingBackendResolver.swift` | Nonisolated struct: снапшот доступных бэкендов (Bool-поле на стадию); `allSupported` — продакшн-дефолт; тесты передают `false` для проверки fallback-ветки |
+| `BackendSelectionPersisting` | `Storage/BackendSelectionStore.swift` | DI-протокол: `load() -> PersistedBackendSelection?`, `save(_:)`, `clear()` |
+| `UserDefaultsBackendSelectionStore` | `Storage/BackendSelectionStore.swift` | Живая реализация: один JSON-блоб в `UserDefaults` по ключу из `BackendSelectionKeys`. Та же fail-fast XCTest-guard против засорения `UserDefaults.standard`, что и в `UserDefaultsDeviceSelectionStore` |
+
+Точка проводки — `RecordingCoordinator`:
+
+- Хранит `backendStore: any BackendSelectionPersisting` (инжектируется, дефолт —
+  `UserDefaultsBackendSelectionStore()`).
+- В `start()` вызывает `RecordingBackendResolver.resolve(persisted: backendStore.load(), supported: .allSupported)` → `ResolvedBackendSelection`.
+- Дефолтная `sessionFactory` принимает `(RecordingRequest, ResolvedBackendSelection)` и строит конкретные `Live*`-фабрики switch-ами per-stage.
+- `RecordingSession` остаётся DI-синком: принимает готовые фабрики через параметры, сам не знает о `ResolvedBackendSelection`. Writer передаётся через `writerFactoryBuilder: ((URL) -> any WriterFactory)? = nil` — builder получает session-owned `urlProvider`, что позволяет writer-фабрике знать путь файла.
+
+Что вне этой модели: fused-бэкенд, заменяющий всю топологию source→encoder→writer
+единым объектом (например, `SCRecordingOutput`), — это иная архитектурная задача,
+не покрываемая per-stage enum'ами (см. #177 / #178).
+
 ## Диагностика — `Onset/Diagnostics/`
 
 Экспорт журнала событий приложения для поддержки (#164).
@@ -187,7 +217,7 @@ TCC-разрешения, политика записи, запись MP4.
 | Тип | Файл | Роль |
 |---|---|---|
 | `RecordingCoordinator` | `UI/RecordingCoordinator.swift` | Единственный владелец состояния записи (phase, recordingState, drops, elapsed) и единственный подписчик стримов сессии |
-| `MainViewModel` | `UI/Main/MainViewModel.swift` | Выбор устройств и enable-логика кнопки Record (AC-2: экран обязателен, камера опциональна, guard невыбранного микрофона); список камер/микрофонов обновляется вживую через `observeDeviceChanges()` (`MainViewModel+Devices.swift`); выбор и персистирование базовой папки вывода (#225) |
+| `MainViewModel` | `UI/Main/MainViewModel.swift` | Выбор устройств и enable-логика кнопки Record (AC-2: экран обязателен, камера опциональна, guard невыбранного микрофона); список камер/микрофонов обновляется вживую через `observeDeviceChanges()` и при смене конфигурации экранов через `subscribeToDisplayChanges()` (закрытие крышки гасит внутренний дисплей → ре-энумерация устройств, скрывающая встроенный микрофон) (`MainViewModel+Devices.swift`); выбор и персистирование базовой папки вывода (#225) |
 | `outputSection` / `OutputFolderRow` | `UI/Main/MainView+Sections.swift` | Секция «ВЫВОД» главного окна: строка с текущей базовой папкой (путь сокращён через `~`) и кнопка выбора через `NSOpenPanel` (#225) |
 | `OnboardingViewModel` | `UI/Onboarding/OnboardingViewModel.swift` | Статусы карточек разрешений из `PermissionsProviding`; поллинг TCC экрана |
 | `RecordingControlling` | `UI/RecordingControlling.swift` | Nonisolated-протокол над `RecordingSession` для координатора — юнит-тесты без железа |
@@ -206,10 +236,17 @@ TCC-разрешения, политика записи, запись MP4.
 - Stop из меню-бара (AC-9) → `MenuBarMenu.recordingMenu` → `coordinator.stop()`; hotkey ⌘⌥⌃R виден в меню через `.keyboardShortcut` (#242).
 - Старт без окна (#242) → `activateRecording()` вызывает `notifier.notifyRecordingStarted()`; окно открывается вручную через «Открыть окно записи».
 - Lifecycle превью камеры → `MainViewModel+Preview.swift`
-  (`previewGeneration` + `.task(id:)`). Пока кадров нет — плейсхолдер в
-  `cameraConnectingOverlay` (`MainView+Sections.swift`): спиннер «Подключение
-  iPhone…/камеры…» (`isCameraConnecting`) или, при сбое старта, статичная
-  ошибка (`previewFailed`); `cameraPlaceholderPending` — общий гейт показа.
+  (`previewGeneration` + `.task(id:)`). Прогресс подключения — единый
+  `previewState: CameraPreviewState` (`CameraPreviewState.swift`):
+  `.idle`/`.connecting`/`.connectingSlow`/`.live(SessionHandle)`/`.failed`
+  (enum БЕЗ `Equatable`, ветвление через `if case`). Вью читает три get-only
+  computed-моста над `previewState`: `previewHandle` (→ `.live`), `previewFailed`
+  (→ `.failed`), `previewIsConnectingSlow` (→ `.connectingSlow`). `isCameraActive`
+  (`cameraEnabled && selectedCamera`) — независимая ось, в enum не сворачивается.
+  Пока кадров нет — плейсхолдер в `cameraConnectingOverlay`
+  (`MainView+Sections.swift`): спиннер «Подключение iPhone…/камеры…»
+  (`isCameraConnecting`) или, при сбое старта, статичная ошибка (`previewFailed`);
+  `cameraPlaceholderPending` — общий гейт показа.
 - Форматирование таймера (mm:ss / h:mm:ss) → `ElapsedFormatter.string(from:)` —
   без `String(format:)` из-за `SWIFT_STRICT_MEMORY_SAFETY`.
 

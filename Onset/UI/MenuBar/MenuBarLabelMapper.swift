@@ -1,11 +1,15 @@
-import SwiftUI
-
 // MARK: - MenuBarLabelDescriptor
 
 /// Value type describing what the menu-bar label should display in a given moment.
 ///
 /// Produced by `MenuBarLabelMapper` and consumed by `MenuBarLabel`.
 /// Separating the mapping from the view makes the mapping independently testable.
+///
+/// Layer purity (#154): this descriptor is a semantic token — it carries NO UI-framework type.
+/// `DotStyle` encodes the dot's meaning (`hollow`/`red`/`yellow`); the view (`MenuBarLabel`) maps
+/// that token to a concrete `SwiftUI.Color`. Keeping this file free of `import SwiftUI` lets the
+/// mapper depend only on the standard library, matching the other pure types (`AppRouter`,
+/// `EffectivePermissions`).
 struct MenuBarLabelDescriptor: Equatable {
     enum DotStyle: Equatable {
         /// Hollow circle — idle / finished (transient).
@@ -21,17 +25,6 @@ struct MenuBarLabelDescriptor: Equatable {
             case .hollow: "circle"
             case .red: "record.circle.fill"
             case .yellow: "circle.fill"
-            }
-        }
-
-        /// The foreground color for this dot state.
-        /// Matches the original `MenuBarLabel.dotColor(for:)` logic exactly:
-        /// hollow → .primary (no recording), red → .red, yellow → .yellow.
-        var color: Color {
-            switch self {
-            case .hollow: .primary
-            case .red: .red
-            case .yellow: .yellow
             }
         }
 

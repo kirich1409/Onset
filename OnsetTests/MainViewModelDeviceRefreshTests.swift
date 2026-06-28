@@ -5,9 +5,13 @@ import Testing
 
 // MARK: - MainViewModelDeviceRefreshTests
 
-// swiftlint:disable no_magic_numbers
+// swiftlint:disable no_magic_numbers opening_brace
 // Rationale: polling timeouts and synthetic camera-format fixtures — same exemption
-// as RecordingCoordinatorTests; file-scoped per OnsetTests conventions.
+// as RecordingCoordinatorTests; file-scoped per OnsetTests conventions. `opening_brace`:
+// `makeSUT`'s closure-default param makes SwiftFormat (`wrapMultilineStatementBraces`) wrap the
+// function's `-> MainViewModel {` brace onto its own line — SwiftFormat is the formatting source
+// of truth, so the SwiftLint rule is suppressed rather than fighting the formatter (mirrors
+// MainViewModelPreviewTimeoutTests).
 
 /// Mutable camera-list box shared between the test body (`@MainActor`) and the injected
 /// discovery closure. Lock-based per OnsetTests conventions (`FlagBox`) — never raw vars
@@ -55,9 +59,11 @@ struct MainViewModelDeviceRefreshTests {
     private func makeSUT(
         defaults: InMemoryUserDefaults,
         box: DeviceListBox,
-        deviceChanges: AsyncStream<DeviceChangeEvent>
+        deviceChanges: AsyncStream<DeviceChangeEvent>,
+        postAnnouncementSeam: @escaping @Sendable @MainActor (PreviewAnnouncement) -> Void = { _ in }
     )
-    -> MainViewModel {
+        -> MainViewModel
+    {
         let perms = FakePermissionsService(
             screen: .authorized,
             camera: .authorized,
@@ -65,14 +71,28 @@ struct MainViewModelDeviceRefreshTests {
         )
         return MainViewModel(
             permissions: perms,
-            coordinator: RecordingCoordinator(),
+            coordinator: RecordingCoordinator {
+                UserDefaultsBackendSelectionStore(defaults: defaults)
+            },
             discoverDisplays: { _ in [] },
             discoverCameras: { _ in box.value },
             discoverMicrophones: { _ in [] },
             makeDeviceChangeStream: { deviceChanges },
             makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) },
-            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: defaults) }
+            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: defaults) },
+            postAnnouncementSeam: postAnnouncementSeam
         )
+    }
+
+    /// MainActor recorder for posted announcements. A `@MainActor` class is implicitly `Sendable`,
+    /// so the injected `@Sendable @MainActor` seam can capture it and append synchronously.
+    @MainActor
+    private final class AnnouncementRecorder {
+        private(set) var posted: [(text: String, isHighPriority: Bool)] = []
+
+        func record(_ announcement: PreviewAnnouncement) {
+            self.posted.append((announcement.text, announcement.isHighPriority))
+        }
     }
 
     // MARK: - Test 1: event reloads the device list
@@ -199,6 +219,81 @@ struct MainViewModelDeviceRefreshTests {
         }
     }
 
+    // MARK: - Announcement posting integration (#256)
+
+    /// Session-live disconnect: a saved camera present on load 1 (`.restore` arms
+    /// `hasObservedPresentCamera`), then gone on the next reload, posts the high-priority
+    /// disconnect announcement EXACTLY once. A further reload while still absent must NOT
+    /// re-announce (edge-trigger anti-spam).
+    ///
+    /// Drives `loadCamerasAndMicrophones()` directly (not through the stream + 300ms debounce):
+    /// the debounced path makes reload-count assertions flaky (file header), and the direct call
+    /// is what `observeDeviceChanges` runs per event. Seeding the store gives a distinctive known
+    /// name so the asserted `.disconnected(savedName:)` text is `record.localizedName`, not the ID.
+    @Test("Session-live camera disconnect → one high-priority disconnect announcement, no re-spam")
+    func sessionLiveDisconnect_postsHighPriorityAnnouncementOnce() async {
+        let cam = Self.makeCamera(id: "cam-facetime")
+        let box = DeviceListBox([cam])
+        let recorder = AnnouncementRecorder()
+        let record: @Sendable @MainActor (PreviewAnnouncement) -> Void = { recorder.record($0) }
+        let (stream, _) = AsyncStream.makeStream(of: DeviceChangeEvent.self)
+
+        await withScopedDefaults { defaults in
+            // Seed a saved, present selection → load resolves `.restore` → flag armed and the saved
+            // localizedName ("FaceTime HD") is what the later `.disconnected` branch carries.
+            UserDefaultsDeviceSelectionStore(defaults: defaults).saveCamera(
+                .enabled(DeviceSelectionRecord(uniqueID: cam.uniqueID, localizedName: "FaceTime HD"))
+            )
+            let sut = self.makeSUT(
+                defaults: defaults,
+                box: box,
+                deviceChanges: stream,
+                postAnnouncementSeam: record
+            )
+            // Load 1: camera present → `.restore` → hasObservedPresentCamera armed.
+            await sut.loadDevices()
+
+            // Unplug: camera filtered from discovery → `.disconnected` edge → announce once.
+            box.set([])
+            sut.loadCamerasAndMicrophones()
+            #expect(recorder.posted.count == 1)
+            #expect(recorder.posted.first?.text == "Камера «FaceTime HD» отключена")
+            #expect(recorder.posted.first?.isHighPriority == true)
+
+            // A second reload while STILL absent must not re-announce (edge-trigger anti-spam).
+            sut.loadCamerasAndMicrophones()
+            #expect(recorder.posted.count == 1)
+        }
+    }
+
+    /// Cold launch with a saved-but-absent camera: `hasObservedPresentCamera` is never armed
+    /// (the device is gone from load 1), so the `.disconnected` branch must stay silent — no
+    /// spurious startup announcement.
+    @Test("Initial load with saved-but-absent camera → posts NOTHING")
+    func initialLoadAbsentCamera_postsNothing() async {
+        let box = DeviceListBox([]) // saved camera is NOT present in discovery
+        let recorder = AnnouncementRecorder()
+        let record: @Sendable @MainActor (PreviewAnnouncement) -> Void = { recorder.record($0) }
+        let (stream, _) = AsyncStream.makeStream(of: DeviceChangeEvent.self)
+
+        await withScopedDefaults { defaults in
+            // Seed a saved enabled selection whose device is absent → resolves to .disconnected.
+            UserDefaultsDeviceSelectionStore(defaults: defaults).saveCamera(
+                .enabled(DeviceSelectionRecord(uniqueID: "cam-gone", localizedName: "Saved Camera"))
+            )
+            let sut = self.makeSUT(
+                defaults: defaults,
+                box: box,
+                deviceChanges: stream,
+                postAnnouncementSeam: record
+            )
+            await sut.loadDevices()
+
+            #expect(sut.disconnectedCameraName != nil) // notice is shown…
+            #expect(recorder.posted.isEmpty) // …but no announcement (flag never armed).
+        }
+    }
+
     // MARK: - Test 5: finished stream exits the loop
 
     /// When the stream finishes, `observeDeviceChanges()` returns — no parked task leaks.
@@ -234,4 +329,4 @@ private func eventuallyMainActor(timeoutMs: Int = 8000, _ condition: () -> Bool)
     return condition()
 }
 
-// swiftlint:enable no_magic_numbers
+// swiftlint:enable no_magic_numbers opening_brace
