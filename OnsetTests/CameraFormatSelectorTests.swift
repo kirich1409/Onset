@@ -203,4 +203,32 @@ struct CameraFormatSelectorTests {
         #expect(best.pixelHeight == 1080)
         #expect(best.maxFps == 30)
     }
+
+    // MARK: - allowAboveFullHD: record path opts in to 4K
+
+    @Test("allowAboveFullHD true with 4K and 1080p available — picks 4K over 1080p")
+    func allowAboveFullHD_4KAvailable_picks4KOver1080p() throws {
+        // Proves the cap is lifted: 4K must win over the ≤1080p option that would
+        // have been chosen under the default (false) behaviour.
+        let formats = [
+            format(width: 3840, height: 2160, maxFps: 30), // 4K 16:9 — wins when cap lifted
+            format(width: 1920, height: 1080, maxFps: 30), // 1080p 16:9 — would win with default cap
+        ]
+        let best = try CameraFormatSelector.pickBestFormat(from: formats, minFps: 30, allowAboveFullHD: true)
+        #expect(best.pixelWidth == 3840)
+        #expect(best.pixelHeight == 2160)
+    }
+
+    @Test("allowAboveFullHD true with no 4K available — picks largest available (1080p)")
+    func allowAboveFullHD_no4K_picksLargestAvailable() throws {
+        // When the camera has no 4K format the lifted cap still returns the best
+        // available resolution — not an error.
+        let formats = [
+            format(width: 1280, height: 720, maxFps: 30), // 720p 16:9
+            format(width: 1920, height: 1080, maxFps: 30), // 1080p 16:9 — wins (largest)
+        ]
+        let best = try CameraFormatSelector.pickBestFormat(from: formats, minFps: 30, allowAboveFullHD: true)
+        #expect(best.pixelWidth == 1920)
+        #expect(best.pixelHeight == 1080)
+    }
 }

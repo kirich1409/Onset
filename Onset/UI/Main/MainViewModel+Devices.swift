@@ -256,6 +256,11 @@ extension MainViewModel {
         var cameraDesc: String?
         if let camera = self.activeCamera {
             let name = self.cameraLabel(for: camera)
+            // Intentionally uses the baseline tier (≤1080p): pickBestFormat is called WITHOUT
+            // allowAboveFullHD, which defaults to false. Actual recording uses the record tier
+            // (4K, allowAboveFullHD: true) via resolveCameraFormat in MainViewModel+Record.swift.
+            // The checklist label is an availability hint, not the exact record format — this is
+            // accepted behavior, not a bug.
             if let fmt = try? CameraFormatSelector.pickBestFormat(
                 from: camera.formats,
                 minFps: Double(RecordingConfiguration.mvpDefault.minCameraFps)

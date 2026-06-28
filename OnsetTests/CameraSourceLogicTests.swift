@@ -350,7 +350,10 @@ struct TelemetryStartGatingTests {
             audioSamplesContinuation: audioCont,
             dropsContinuation: dropsCont
         )
-        let state = CameraCaptureState.running(session: session, shims: CameraCaptureShims(video: video, audio: audio))
+        let state = CameraCaptureState.running(
+            session: session,
+            shims: CameraCaptureShims(video: video, audio: audio, lockedDevice: nil)
+        )
         // Finish all three continuations immediately — only the case match matters, not the
         // associated values. The streams have no consumers; finishing avoids live-but-unread continuations.
         framesCont.finish()
