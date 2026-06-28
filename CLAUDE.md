@@ -188,8 +188,8 @@ Full type-level map (Russian): `docs/architecture.md`.
 - After completing a task, fold non-obvious learnings into CLAUDE.md
   (`/claude-md-management:revise-claude-md`). Maintenance = add AND delete: a rule
   Claude already follows without being told gets removed; keep this file ≤200 lines.
-- UI design is not done by agents: write a brief for the Claude Design service and
-  hand it to the user.
+- UI design is not done by agents: write a brief for the Claude Design service
+  (<https://claude.ai/design/p/975364e4-479d-49bb-87a1-202a02c7b5c0>) and hand it to the user.
 
 ## Gotchas
 
