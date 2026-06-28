@@ -54,6 +54,11 @@ actor RecordingSession {
     /// second consumer would starve the first. Menu bar and recording window read live state from
     /// the coordinator's `@Observable` properties — they do NOT subscribe here. Emits only on a
     /// `.normal ↔ .degraded` transition (no initial `.normal`), matching `DropMonitor.state`.
+    ///
+    /// The single-consumer contract is enforced only by convention for the MVP (#154). If a second
+    /// consumer is ever needed, harden it then — a one-shot accessor that `precondition`s on a
+    /// repeat read, or a broadcast wrapper that fans out to N iterators — rather than relying on
+    /// this doc comment. The same applies to `captureActiveStream` and `sourceRevocationStream`.
     nonisolated let recordingStateStream: AsyncStream<RecordingState>
     private let stateContinuation: AsyncStream<RecordingState>.Continuation
 
