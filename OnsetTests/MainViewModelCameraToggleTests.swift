@@ -662,7 +662,7 @@ struct MainViewModelCameraConnectingTests {
         let sut = self.makeSUT(cameras: [camera])
         sut.cameraEnabled = true
         sut.selectedCameraID = camera.uniqueID
-        sut.previewHandle = SessionHandle(session: AVCaptureSession())
+        sut.previewState = .live(SessionHandle(session: AVCaptureSession()))
         #expect(!sut.isCameraConnecting)
     }
 
@@ -672,7 +672,7 @@ struct MainViewModelCameraConnectingTests {
         let sut = self.makeSUT(cameras: [camera])
         sut.cameraEnabled = true
         sut.selectedCameraID = camera.uniqueID
-        sut.previewFailed = true
+        sut.previewState = .failed
         #expect(!sut.isCameraConnecting)
     }
 }
