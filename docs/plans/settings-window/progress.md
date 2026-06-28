@@ -17,6 +17,9 @@
 
 > Quality profile DROPPED from v1 (owner) — deferred to a later task with hardware calibration.
 
+**Status:** all tasks implemented; build + 907 unit tests green; `/finalize` PASS; draft PR #274.
+**Remaining (reference hardware):** L5 on MX Brio (mirror flip + zero-copy/energy, gating, VoiceOver) + UI walkthrough. PR not auto-mergeable (CLAUDE.md + UI) → owner review.
+
 ## Learnings
 - Wave 1 (T-1,T-2,T-4,T-8) implemented by swift-engineer; lint green; build+L2 verifying. Boxes checked once green.
 - T-8: `isRecordingActive` also reset to false on start() failure paths (throw/cancel/denial-timeout), not just stop — else the gate sticks `true` when nothing records. Sites: decl 146, true@462, false@478(catch)/498(!activated cleanup)/778(stop). isStarting defer untouched.
