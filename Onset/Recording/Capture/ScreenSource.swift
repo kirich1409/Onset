@@ -156,21 +156,26 @@ actor ScreenSource: VideoFrameSource {
     init(plan: ResolvedRecordingPlan, config: RecordingConfiguration) {
         self.plan = plan
         self.config = config
-        var capturedFrames: AsyncStream<VideoFrame>.Continuation!
-        var capturedEvents: AsyncStream<SourceEvent>.Continuation!
-        var capturedDrops: AsyncStream<DropEvent>.Continuation!
-        self.frames = AsyncStream(VideoFrame.self, bufferingPolicy: .bufferingNewest(Self.framesBufferDepth)) {
-            capturedFrames = $0
-        }
-        self.events = AsyncStream(SourceEvent.self, bufferingPolicy: .bufferingNewest(Self.eventsBufferDepth)) {
-            capturedEvents = $0
-        }
-        self.drops = AsyncStream(DropEvent.self, bufferingPolicy: .bufferingNewest(Self.dropsBufferDepth)) {
-            capturedDrops = $0
-        }
-        self.framesContinuation = capturedFrames
-        self.eventsContinuation = capturedEvents
-        self.dropsContinuation = capturedDrops
+        let (frames, framesContinuation) = AsyncStream.makeStream(
+            of: VideoFrame.self,
+            bufferingPolicy: .bufferingNewest(Self.framesBufferDepth)
+        )
+        self.frames = frames
+        self.framesContinuation = framesContinuation
+
+        let (events, eventsContinuation) = AsyncStream.makeStream(
+            of: SourceEvent.self,
+            bufferingPolicy: .bufferingNewest(Self.eventsBufferDepth)
+        )
+        self.events = events
+        self.eventsContinuation = eventsContinuation
+
+        let (drops, dropsContinuation) = AsyncStream.makeStream(
+            of: DropEvent.self,
+            bufferingPolicy: .bufferingNewest(Self.dropsBufferDepth)
+        )
+        self.drops = drops
+        self.dropsContinuation = dropsContinuation
 
         self.captureRateLock = OSAllocatedUnfairLock(
             initialState: StageRateAggregator(lane: "screen", stage: .capture, nominalFps: plan.screenFps)

@@ -125,35 +125,33 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
         self.config = config
         self.role = role
 
-        var capturedFrames: AsyncStream<VideoFrame>.Continuation!
-        var capturedAudio: AsyncStream<AudioSample>.Continuation!
-        var capturedEvents: AsyncStream<SourceEvent>.Continuation!
-        var capturedDrops: AsyncStream<DropEvent>.Continuation!
-
-        self.frames = AsyncStream(
-            VideoFrame.self,
+        let (frames, framesContinuation) = AsyncStream.makeStream(
+            of: VideoFrame.self,
             bufferingPolicy: .bufferingNewest(Self.framesBufferDepth)
-        ) { capturedFrames = $0 }
+        )
+        self.frames = frames
+        self.framesContinuation = framesContinuation
 
-        self.audioSamples = AsyncStream(
-            AudioSample.self,
+        let (audioSamples, audioSamplesContinuation) = AsyncStream.makeStream(
+            of: AudioSample.self,
             bufferingPolicy: .bufferingNewest(Self.audioBufferDepth)
-        ) { capturedAudio = $0 }
+        )
+        self.audioSamples = audioSamples
+        self.audioSamplesContinuation = audioSamplesContinuation
 
-        self.events = AsyncStream(
-            SourceEvent.self,
+        let (events, eventsContinuation) = AsyncStream.makeStream(
+            of: SourceEvent.self,
             bufferingPolicy: .bufferingNewest(Self.eventsBufferDepth)
-        ) { capturedEvents = $0 }
+        )
+        self.events = events
+        self.eventsContinuation = eventsContinuation
 
-        self.drops = AsyncStream(
-            DropEvent.self,
+        let (drops, dropsContinuation) = AsyncStream.makeStream(
+            of: DropEvent.self,
             bufferingPolicy: .bufferingNewest(Self.dropsBufferDepth)
-        ) { capturedDrops = $0 }
-
-        self.framesContinuation = capturedFrames
-        self.audioSamplesContinuation = capturedAudio
-        self.eventsContinuation = capturedEvents
-        self.dropsContinuation = capturedDrops
+        )
+        self.drops = drops
+        self.dropsContinuation = dropsContinuation
 
         self.captureRateLock = OSAllocatedUnfairLock(
             initialState: StageRateAggregator(

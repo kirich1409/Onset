@@ -454,11 +454,10 @@ actor DropMonitor {
     /// epoch as `DropEvent.detectedAt`), evaluates the window, and recomputes state. Driving
     /// recovery from a real clock — not `Date()` on main — satisfies the spec timing constraint.
     private func startTick() {
-        let nanosPerSecond = 1_000_000_000.0
-        let nanosPerTick = UInt64(self.tickIntervalSeconds * nanosPerSecond)
+        let tickInterval = Duration.seconds(self.tickIntervalSeconds)
         self.tickTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: nanosPerTick)
+                try? await Task.sleep(for: tickInterval)
                 if Task.isCancelled { return }
                 guard let self else { return }
                 await self.tick()
