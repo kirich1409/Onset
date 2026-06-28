@@ -131,6 +131,17 @@ struct OnsetApp: App {
         } label: {
             MenuBarLabel(coordinator: self.coordinator, appSettings: self.appSettings)
         }
+
+        // Settings (⌘,) window. The scene is lazy and not auto-presented; it is reached via ⌘,
+        // (with a focused window) or the `SettingsLink` in `MenuBarMenu`. Suppressed under XCTest
+        // for the same reason as the sibling scenes — a test host must not open settings windows.
+        Settings {
+            if isRunningUnderXCTest {
+                EmptyView()
+            } else {
+                SettingsView(appSettings: self.appSettings, coordinator: self.coordinator)
+            }
+        }
     }
 }
 

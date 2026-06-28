@@ -66,6 +66,12 @@ struct MenuBarMenu: View {
 
         Divider()
 
+        // ⌘, only fires with a focused window, so a menu-bar-centric app needs an explicit entry
+        // to reach the Settings scene when no other window is open. `SettingsLink` opens it.
+        SettingsLink {
+            Text("Настройки…")
+        }
+
         Button("Экспортировать диагностику") {
             self.diagnosticsCoordinator.export()
         }

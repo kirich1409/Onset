@@ -11,8 +11,8 @@
 - [x] T-6 — Menu-bar timer toggle (consumer) ✅ build+L2 green (timer-toggle suite)
 - [~] T-7 — Camera mirror (recording path + live preview) ✅ impl+build green; ⚠ L5 (flip + zero-copy on MX Brio) pending → T-10
 - [~] T-8 — Observable recording-active + availability classifier ✅ impl+classifier L2 green; ⚠ coordinator regression test still pending (follow-up)
-- [ ] T-9a — Settings scene, tabs, discoverability, real controls
-- [ ] T-9b — Read-only stub panes + during-recording gating
+- [x] T-9a — Settings scene, tabs, discoverability, real controls ✅ build green (L3/L5 window-open in T-10)
+- [~] T-9b — Read-only stub panes + during-recording gating ✅ build green; ⚠ Dock-icon stub omitted (in plan §Categories, not in T-9b list — add in T-10 polish or accept); L3/L5 a11y+gating pending → T-10
 - [ ] T-10 — Docs + L5 verification + CLAUDE.md
 
 > Quality profile DROPPED from v1 (owner) — deferred to a later task with hardware calibration.
