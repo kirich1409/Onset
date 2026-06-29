@@ -31,7 +31,8 @@ nonisolated private let menuBarMenuLogger = Logger(
 /// - «Показывать таймер записи» — checkmark toggle mirroring the Индикация settings tab (same
 ///   `showMenuBarTimer`).
 ///
-/// Pure reader of `coordinator` and `diagnosticsCoordinator` — no own state.
+/// Reads `coordinator`/`diagnosticsCoordinator` for menu state; binds `appSettings.showMenuBarTimer`
+/// (read-write via the timer toggle). Holds no own `@State`.
 @MainActor
 struct MenuBarMenu: View {
     let coordinator: RecordingCoordinator
