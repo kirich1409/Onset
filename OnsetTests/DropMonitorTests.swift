@@ -294,6 +294,7 @@ struct DropBreakdownSummaryLineTests {
         )
         #expect(
             breakdown.summaryLine ==
+                // swiftlint:disable:next line_length
                 "drop breakdown: capture-screen=0 capture-camera-video=0 capture-camera-audio=0 encode-screen=0 encode-camera=0 writer=0"
         )
     }
@@ -472,10 +473,20 @@ struct DropMonitorBreakdownTests {
 
         let pts = CMTime(value: 1000, timescale: 1000)
         // Screen encoder: 10 backpressure + 3 CFR-normalization.
-        continuation.yield(DropEvent(reason: .encoderBackpressureDrops, source: .encodeScreen, count: 10, detectedAt: pts))
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops,
+            source: .encodeScreen,
+            count: 10,
+            detectedAt: pts
+        ))
         continuation.yield(DropEvent(reason: .cfrNormalizationDrops, source: .encodeScreen, count: 3, detectedAt: pts))
         // Camera encoder: 20 backpressure only.
-        continuation.yield(DropEvent(reason: .encoderBackpressureDrops, source: .encodeCamera, count: 20, detectedAt: pts))
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops,
+            source: .encodeCamera,
+            count: 20,
+            detectedAt: pts
+        ))
         continuation.finish()
         await monitor.stop()
 

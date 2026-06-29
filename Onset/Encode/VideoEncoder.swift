@@ -129,12 +129,14 @@ actor VideoEncoder {
     private var encodeDropSource: DropSource {
         switch self.label {
         case "screen":
-            return .encodeScreen
+            .encodeScreen
+
         case "camera":
-            return .encodeCamera
+            .encodeCamera
+
         default:
             // "video" is the test default and maps to screen; any unexpected label is safe here.
-            return .encodeScreen
+            .encodeScreen
         }
     }
 
@@ -687,14 +689,10 @@ actor VideoEncoder {
                 // DropMonitor routes this reason as never-degrading, so no false "Degraded" on
                 // Continuity. `recordDropDup` below stays (drop_dup telemetry, a separate sink — no
                 // double count).
-                self.dropsContinuation.yield(
-                    DropEvent(
-                        reason: .cfrNormalizationDrops,
-                        source: self.encodeDropSource,
-                        count: 1,
-                        detectedAt: frame.ptsHostTime
-                    )
-                )
+                let dropSource = self.encodeDropSource
+                self.dropsContinuation.yield(DropEvent(
+                    reason: .cfrNormalizationDrops, source: dropSource, count: 1, detectedAt: frame.ptsHostTime
+                ))
             }
             let decision = self.normalizer.processFrame(
                 ptsSeconds: ptsSeconds, anchorSeconds: self.anchorSeconds, fps: self.fps
