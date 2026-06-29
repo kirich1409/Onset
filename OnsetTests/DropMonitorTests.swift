@@ -154,7 +154,7 @@ struct DropMonitorCounterSeparationTests {
 
         let pts = CMTime(value: 1000, timescale: 1000)
         continuation.yield(DropEvent(reason: .captureDrop, source: .captureCameraVideo, count: 4, detectedAt: pts))
-        continuation.yield(DropEvent(reason: .cfrNormalizationDrops, source: .encode, count: 7, detectedAt: pts))
+        continuation.yield(DropEvent(reason: .cfrNormalizationDrops, source: .encodeScreen, count: 7, detectedAt: pts))
         continuation.finish()
 
         // Stop finishes the state stream so the collector terminates.
@@ -204,7 +204,7 @@ struct DropMonitorTransitionTests {
         for idx in 0..<(threshold + 1) {
             let detectedAt = CMTime(value: baseMillis + Int64(idx) * 10, timescale: 1000)
             continuation.yield(DropEvent(
-                reason: .encoderBackpressureDrops, source: .encode, count: 1, detectedAt: detectedAt
+                reason: .encoderBackpressureDrops, source: .encodeScreen, count: 1, detectedAt: detectedAt
             ))
         }
         continuation.finish()
@@ -262,7 +262,7 @@ struct DropMonitorTransitionTests {
         // One event carrying count = threshold + 1 — the actor must forward `count` to the window.
         let detectedAt = CMTime(value: 100_000, timescale: 1000)
         continuation.yield(DropEvent(
-            reason: .encoderBackpressureDrops, source: .encode, count: threshold + 1, detectedAt: detectedAt
+            reason: .encoderBackpressureDrops, source: .encodeScreen, count: threshold + 1, detectedAt: detectedAt
         ))
         continuation.finish()
 
@@ -280,18 +280,22 @@ struct DropMonitorTransitionTests {
 
 @Suite("DropBreakdown — summaryLine")
 struct DropBreakdownSummaryLineTests {
-    @Test("zero breakdown formats all five fields as zero")
+    @Test("zero breakdown formats all fields as zero")
     func allZero_formatsCorrectly() {
         let breakdown = DropBreakdown(
             captureScreen: 0,
             captureCameraVideo: 0,
             captureCameraAudio: 0,
-            encode: 0,
+            encodeScreen: 0,
+            encodeCamera: 0,
+            bpEncodeScreen: 0,
+            bpEncodeCamera: 0,
             writer: 0
         )
         #expect(
             breakdown.summaryLine ==
-                "drop breakdown: capture-screen=0 capture-camera-video=0 capture-camera-audio=0 encode=0 writer=0"
+                // swiftlint:disable:next line_length
+                "drop breakdown: capture-screen=0 capture-camera-video=0 capture-camera-audio=0 encode-screen=0 encode-camera=0 writer=0"
         )
     }
 
@@ -301,14 +305,18 @@ struct DropBreakdownSummaryLineTests {
             captureScreen: 1,
             captureCameraVideo: 240,
             captureCameraAudio: 3,
-            encode: 0,
+            encodeScreen: 0,
+            encodeCamera: 8,
+            bpEncodeScreen: 0,
+            bpEncodeCamera: 8,
             writer: 5
         )
         let line = breakdown.summaryLine
         #expect(line.contains("capture-screen=1"))
         #expect(line.contains("capture-camera-video=240"))
         #expect(line.contains("capture-camera-audio=3"))
-        #expect(line.contains("encode=0"))
+        #expect(line.contains("encode-screen=0"))
+        #expect(line.contains("encode-camera=8"))
         #expect(line.contains("writer=5"))
     }
 }
@@ -337,7 +345,7 @@ struct DropMonitorBreakdownTests {
             reason: .encoderBackpressureDrops, source: .captureCameraAudio, count: 3, detectedAt: pts
         ))
         continuation.yield(DropEvent(
-            reason: .encoderBackpressureDrops, source: .encode, count: 4, detectedAt: pts
+            reason: .encoderBackpressureDrops, source: .encodeScreen, count: 4, detectedAt: pts
         ))
         continuation.yield(DropEvent(
             reason: .encoderBackpressureDrops, source: .writer, count: 5, detectedAt: pts
@@ -350,12 +358,12 @@ struct DropMonitorBreakdownTests {
         #expect(bkd.captureScreen == 1)
         #expect(bkd.captureCameraVideo == 2)
         #expect(bkd.captureCameraAudio == 3)
-        #expect(bkd.encode == 4)
+        #expect(bkd.encodeScreen == 4)
         #expect(bkd.writer == 5)
     }
 
-    /// Asserts that `writer` and `encode` drops land in their own buckets, not each other's.
-    @Test("writer drop lands in writer bucket, encode drop lands in encode bucket")
+    /// Asserts that `writer` and `encodeScreen` drops land in their own buckets, not each other's.
+    @Test("writer drop lands in writer bucket, encodeScreen drop lands in encodeScreen bucket")
     func writerVsEncode_separateBuckets() async {
         let monitor = DropMonitor(windowSeconds: 100.0, threshold: 100)
 
@@ -367,7 +375,7 @@ struct DropMonitorBreakdownTests {
             reason: .encoderBackpressureDrops, source: .writer, count: 10, detectedAt: pts
         ))
         continuation.yield(DropEvent(
-            reason: .encoderBackpressureDrops, source: .encode, count: 7, detectedAt: pts
+            reason: .encoderBackpressureDrops, source: .encodeScreen, count: 7, detectedAt: pts
         ))
         continuation.finish()
 
@@ -375,7 +383,7 @@ struct DropMonitorBreakdownTests {
 
         let bkd = await monitor.breakdownSnapshot()
         #expect(bkd.writer == 10)
-        #expect(bkd.encode == 7)
+        #expect(bkd.encodeScreen == 7)
         // Other buckets untouched.
         #expect(bkd.captureScreen == 0)
         #expect(bkd.captureCameraVideo == 0)
@@ -393,7 +401,7 @@ struct DropMonitorBreakdownTests {
         await monitor.observe(drops)
 
         let pts = CMTime(value: 3000, timescale: 1000)
-        // Distribute drops across all five sources with distinct counts.
+        // Distribute drops across all six sources with distinct counts.
         continuation.yield(DropEvent(
             reason: .encoderBackpressureDrops, source: .captureScreen, count: 1, detectedAt: pts
         ))
@@ -404,10 +412,13 @@ struct DropMonitorBreakdownTests {
             reason: .encoderBackpressureDrops, source: .captureCameraAudio, count: 3, detectedAt: pts
         ))
         continuation.yield(DropEvent(
-            reason: .encoderBackpressureDrops, source: .encode, count: 4, detectedAt: pts
+            reason: .encoderBackpressureDrops, source: .encodeScreen, count: 4, detectedAt: pts
         ))
         continuation.yield(DropEvent(
-            reason: .encoderBackpressureDrops, source: .writer, count: 5, detectedAt: pts
+            reason: .encoderBackpressureDrops, source: .encodeCamera, count: 5, detectedAt: pts
+        ))
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops, source: .writer, count: 6, detectedAt: pts
         ))
         continuation.finish()
 
@@ -415,7 +426,9 @@ struct DropMonitorBreakdownTests {
 
         let health = await monitor.snapshot()
         let bkd = await monitor.breakdownSnapshot()
-        let sourceSum = bkd.captureScreen + bkd.captureCameraVideo + bkd.captureCameraAudio + bkd.encode + bkd.writer
+        let sourceSum =
+            bkd.captureScreen + bkd.captureCameraVideo + bkd.captureCameraAudio +
+            bkd.encodeScreen + bkd.encodeCamera + bkd.writer
         #expect(
             health.counters.encoderBackpressureDrops == sourceSum,
             "UI reason counter must equal sum of source buckets — source dimension must not alter UI total"
@@ -446,6 +459,49 @@ struct DropMonitorBreakdownTests {
         #expect(health.counters.encoderBackpressureDrops == 0)
         // Source bucket is incremented independently.
         #expect(bkd.captureCameraVideo == 6)
+    }
+
+    /// Guard: screen and camera encoder backpressure drops land in separate `bpEncodeScreen` /
+    /// `bpEncodeCamera` breakdown fields, and the totals match what the formatter uses for
+    /// per-lane real-loss attribution.
+    @Test("encodeScreen and encodeCamera backpressure drops land in separate bpEncode* fields")
+    func encodeScreenVsCamera_bpFieldsSplit() async {
+        let monitor = DropMonitor(windowSeconds: 100.0, threshold: 100)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        let pts = CMTime(value: 1000, timescale: 1000)
+        // Screen encoder: 10 backpressure + 3 CFR-normalization.
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops,
+            source: .encodeScreen,
+            count: 10,
+            detectedAt: pts
+        ))
+        continuation.yield(DropEvent(reason: .cfrNormalizationDrops, source: .encodeScreen, count: 3, detectedAt: pts))
+        // Camera encoder: 20 backpressure only.
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops,
+            source: .encodeCamera,
+            count: 20,
+            detectedAt: pts
+        ))
+        continuation.finish()
+        await monitor.stop()
+
+        let bkd = await monitor.breakdownSnapshot()
+        // All-reason totals.
+        #expect(bkd.encodeScreen == 13) // 10 bp + 3 cfr
+        #expect(bkd.encodeCamera == 20) // 20 bp
+        // Backpressure-only subsets — used by the formatter for real-loss attribution.
+        #expect(bkd.bpEncodeScreen == 10)
+        #expect(bkd.bpEncodeCamera == 20)
+
+        // UI counter reflects both lanes combined (source dimension is additive).
+        let health = await monitor.snapshot()
+        #expect(health.counters.encoderBackpressureDrops == 30)
+        #expect(health.counters.cfrNormalizationDrops == 3)
     }
 }
 
@@ -599,7 +655,7 @@ struct DropMonitorHealthTests {
         ))
         continuation.yield(DropEvent(
             reason: .encoderBackpressureDrops,
-            source: .encode,
+            source: .encodeScreen,
             count: self.threshold + 1,
             detectedAt: pts
         ))
@@ -629,7 +685,7 @@ struct DropMonitorHealthTests {
             reason: .captureDrop, source: .captureScreen, count: 100, detectedAt: pts
         ))
         continuation.yield(DropEvent(
-            reason: .cfrNormalizationDrops, source: .encode, count: 100, detectedAt: pts
+            reason: .cfrNormalizationDrops, source: .encodeScreen, count: 100, detectedAt: pts
         ))
         continuation.finish()
         await monitor.stop()
@@ -655,7 +711,7 @@ struct DropMonitorHealthTests {
         let pts = CMTime(value: 1000, timescale: 1000)
         continuation.yield(DropEvent(
             reason: .encoderBackpressureDrops,
-            source: .encode,
+            source: .encodeScreen,
             count: self.threshold,
             detectedAt: pts
         ))
@@ -831,7 +887,7 @@ struct DropMonitorCaptureBackpressureTests {
         // threshold+1 in one batch — must cross the window and set the latch.
         continuation.yield(DropEvent(
             reason: .encoderBackpressureDrops,
-            source: .encode,
+            source: .encodeScreen,
             count: self.threshold + 1,
             detectedAt: pts
         ))
@@ -872,7 +928,7 @@ struct DropMonitorCaptureBackpressureTests {
         // Encoder drop: exactly threshold+1 → crosses the window.
         continuation.yield(DropEvent(
             reason: .encoderBackpressureDrops,
-            source: .encode,
+            source: .encodeScreen,
             count: self.threshold + 1,
             detectedAt: pts
         ))
@@ -900,7 +956,7 @@ struct DropMonitorCaptureBackpressureTests {
 /// - hold drops NEVER set `sessionEverDegraded`, even far above the degraded threshold;
 /// - hold drops NEVER leak into the user-facing `DropCounters` (`encoderBackpressureDrops`,
 ///   `captureDrops`, `cfrNormalizationDrops`);
-/// - hold drops STILL appear in the per-source diagnostic breakdown (`encode` bucket);
+/// - hold drops STILL appear in the per-source diagnostic breakdown (`encodeScreen` bucket);
 /// - genuine `.encoderBackpressureDrops` still drives the alert (no over-suppression).
 @Suite("DropMonitor — encoderHoldDrops never degrades (#200)")
 struct DropMonitorHoldDropsTests {
@@ -911,7 +967,7 @@ struct DropMonitorHoldDropsTests {
 
     /// A burst of `.encoderHoldDrops` far exceeding the degraded threshold within the window must
     /// NOT set `sessionEverDegraded` and must NOT increment any `DropCounters` field — while still
-    /// landing in the `encode` diagnostic bucket. Under the OLD code these holds carried
+    /// landing in the `encodeScreen` diagnostic bucket. Under the OLD code these holds carried
     /// `.encoderBackpressureDrops` and would have latched degraded and inflated the user count.
     @Test("encoderHoldDrops above threshold — no latch, user counters zero, visible in breakdown")
     func holdDrops_aboveThreshold_neverDegradesNorInflates() async {
@@ -925,7 +981,7 @@ struct DropMonitorHoldDropsTests {
         // would degrade; if any landed on encoderBackpressureDrops, the user count would inflate.
         continuation.yield(DropEvent(
             reason: .encoderHoldDrops,
-            source: .encode,
+            source: .encodeScreen,
             count: self.threshold + 50,
             detectedAt: pts
         ))
@@ -944,9 +1000,9 @@ struct DropMonitorHoldDropsTests {
         let result = RecordingResult.empty(health)
         #expect(result.degradedWarning(threshold: self.threshold) == false)
 
-        // But the holds REMAIN observable in the per-source diagnostic breakdown (encode bucket).
+        // But the holds REMAIN observable in the per-source diagnostic breakdown (encodeScreen bucket).
         let breakdown = await monitor.breakdownSnapshot()
-        #expect(breakdown.encode == self.threshold + 50)
+        #expect(breakdown.encodeScreen == self.threshold + 50)
     }
 
     // MARK: Test 2 — real backpressure still degrades alongside hold drops (no over-suppression)
@@ -964,11 +1020,11 @@ struct DropMonitorHoldDropsTests {
         let pts = CMTime(value: 1000, timescale: 1000)
         // Many synthetic holds — must NOT touch the window.
         continuation.yield(DropEvent(
-            reason: .encoderHoldDrops, source: .encode, count: 50, detectedAt: pts
+            reason: .encoderHoldDrops, source: .encodeScreen, count: 50, detectedAt: pts
         ))
         // Genuine real-content backpressure: threshold+1 → crosses the window, sets the latch.
         continuation.yield(DropEvent(
-            reason: .encoderBackpressureDrops, source: .encode, count: self.threshold + 1, detectedAt: pts
+            reason: .encoderBackpressureDrops, source: .encodeScreen, count: self.threshold + 1, detectedAt: pts
         ))
         continuation.finish()
 
@@ -1107,7 +1163,7 @@ nonisolated private func compareOffMainActor() -> Bool {
     // Each `!=` below would fail to compile from this nonisolated context before #187.
     let snapshotsDiffer = snapshotA != snapshotB
     let causesDiffer = DropCause.writer != DropCause.encode
-    let sourcesDiffer = DropSource.captureScreen != DropSource.encode
+    let sourcesDiffer = DropSource.captureScreen != DropSource.encodeScreen
     return snapshotsDiffer && causesDiffer && sourcesDiffer
 }
 

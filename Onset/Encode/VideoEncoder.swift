@@ -124,6 +124,22 @@ actor VideoEncoder {
     /// Additive — callers that do not care pass the default "video".
     private let label: String
 
+    /// Maps the lane label to the appropriate `DropSource` case for `DropEvent` emission.
+    /// "video" (test default) is treated as the screen lane — `DropSource.encodeScreen`.
+    private var encodeDropSource: DropSource {
+        switch self.label {
+        case "screen":
+            .encodeScreen
+
+        case "camera":
+            .encodeCamera
+
+        default:
+            // "video" is the test default and maps to screen; any unexpected label is safe here.
+            .encodeScreen
+        }
+    }
+
     /// `internal` (not `private`): the VideoEncoder+Configuration.swift extension uses it.
     nonisolated let logger = Logger(
         subsystem: "dev.androidbroadcast.Onset",
@@ -673,11 +689,10 @@ actor VideoEncoder {
                 // DropMonitor routes this reason as never-degrading, so no false "Degraded" on
                 // Continuity. `recordDropDup` below stays (drop_dup telemetry, a separate sink — no
                 // double count).
-                self.dropsContinuation.yield(
-                    DropEvent(
-                        reason: .cfrNormalizationDrops, source: .encode, count: 1, detectedAt: frame.ptsHostTime
-                    )
-                )
+                let dropSource = self.encodeDropSource
+                self.dropsContinuation.yield(DropEvent(
+                    reason: .cfrNormalizationDrops, source: dropSource, count: 1, detectedAt: frame.ptsHostTime
+                ))
             }
             let decision = self.normalizer.processFrame(
                 ptsSeconds: ptsSeconds, anchorSeconds: self.anchorSeconds, fps: self.fps
@@ -807,7 +822,7 @@ actor VideoEncoder {
                 reason = .encoderBackpressureDrops
             }
             self.dropsContinuation.yield(
-                DropEvent(reason: reason, source: .encode, count: 1, detectedAt: detectedAt)
+                DropEvent(reason: reason, source: self.encodeDropSource, count: 1, detectedAt: detectedAt)
             )
             return
         }
