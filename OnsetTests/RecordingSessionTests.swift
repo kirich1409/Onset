@@ -696,7 +696,7 @@ struct RecordingSessionStopTests {
         let threshold = RecordingConfiguration.mvpDefault.postStopDropWarningThreshold
         let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
         encoders.screenEncoder.emitDrop(DropEvent(
-            reason: .encoderBackpressureDrops, source: .encode, count: threshold, detectedAt: dropPts
+            reason: .encoderBackpressureDrops, source: .encodeScreen, count: threshold, detectedAt: dropPts
         ))
         // Poll until the drop is ingested so the test doesn't stop before the monitor sees it.
         _ = await eventually { await session.currentDrops().counters.encoderBackpressureDrops >= 1 }
@@ -726,7 +726,7 @@ struct RecordingSessionStopTests {
         // counters would pass vacuously even without the idempotency fix.
         let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
         encoders.screenEncoder.emitDrop(DropEvent(
-            reason: .encoderBackpressureDrops, source: .encode, count: 1, detectedAt: dropPts
+            reason: .encoderBackpressureDrops, source: .encodeScreen, count: 1, detectedAt: dropPts
         ))
 
         let first = await session.stop()
@@ -768,7 +768,7 @@ struct RecordingSessionStopTests {
         // the memoized-task fix (both returns of zeroed counters look "equal").
         let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
         encoders.screenEncoder.emitDrop(DropEvent(
-            reason: .encoderBackpressureDrops, source: .encode, count: 1, detectedAt: dropPts
+            reason: .encoderBackpressureDrops, source: .encodeScreen, count: 1, detectedAt: dropPts
         ))
 
         // Fire two concurrent stop() calls. Actor serialization guarantees the first to arrive
@@ -1155,7 +1155,7 @@ struct RecordingSessionStateSurfaceTests {
         let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
         let burst = RecordingConfiguration.mvpDefault.degradedBackpressureThreshold + 1
         encoders.screenEncoder.emitDrop(
-            DropEvent(reason: .encoderBackpressureDrops, source: .encode, count: burst, detectedAt: dropPts)
+            DropEvent(reason: .encoderBackpressureDrops, source: .encodeScreen, count: burst, detectedAt: dropPts)
         )
 
         let first = await received.value
@@ -1182,7 +1182,7 @@ struct RecordingSessionStateSurfaceTests {
 
         let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
         encoders.screenEncoder.emitDrop(DropEvent(
-            reason: .encoderBackpressureDrops, source: .encode, count: 3, detectedAt: dropPts
+            reason: .encoderBackpressureDrops, source: .encodeScreen, count: 3, detectedAt: dropPts
         ))
 
         // Poll currentDrops() until the asynchronously-ingested drop is reflected.

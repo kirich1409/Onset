@@ -848,7 +848,10 @@ actor RecordingSession {
                 captureScreen: 0,
                 captureCameraVideo: 0,
                 captureCameraAudio: 0,
-                encode: 0,
+                encodeScreen: 0,
+                encodeCamera: 0,
+                bpEncodeScreen: 0,
+                bpEncodeCamera: 0,
                 writer: 0
             )
         self.dropMonitor = nil

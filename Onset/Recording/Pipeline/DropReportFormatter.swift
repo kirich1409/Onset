@@ -54,23 +54,37 @@ nonisolated enum DropReportFormatter {
         let formattedTimestamp = RecordingOutput.makeDateFormatter().string(from: timestamp)
         let degradedLine = sessionEverDegraded ? "да" : "нет"
 
+        // Hold repeats: all encoder events minus backpressure minus CFR normalization.
+        // Safe because encoder sources only emit encoderBackpressureDrops, encoderHoldDrops, and
+        // cfrNormalizationDrops — capture sources never emit CFR or hold events.
+        let encoderTotal = breakdown.encodeScreen + breakdown.encodeCamera
+        let encoderBpTotal = breakdown.bpEncodeScreen + breakdown.bpEncodeCamera
+        let holdDrops = encoderTotal - encoderBpTotal - counters.cfrNormalizationDrops
+
         return """
         Onset — техническая информация о записи
         Сессия: \(formattedTimestamp)
 
-        Пропущенные кадры
-          Перегрузка кодировщика: \(counters.encoderBackpressureDrops)
-          Захват: \(counters.captureDrops)
-          Нормализация CFR: \(counters.cfrNormalizationDrops)
+        Реальные потери кадров (необратимо)
+          Кодировщик backpressure — экран: \(breakdown.bpEncodeScreen)
+          Кодировщик backpressure — камера: \(breakdown.bpEncodeCamera)
+          Захват — экран: \(breakdown.captureScreen)
+          Захват — камера (видео): \(breakdown.captureCameraVideo)
+          Захват — камера (аудио): \(breakdown.captureCameraAudio)
 
-        Разбивка по источникам
+        Коалесция без потери содержимого (кадры воспроизведены, файл непрерывен)
+          Нормализация CFR: \(counters.cfrNormalizationDrops)
+          Hold-повторы кодировщика: \(holdDrops)
+
+        Разбивка по источникам (все события, включая повторы без потери содержимого)
           Экран (захват): \(breakdown.captureScreen)
           Камера, видео (захват): \(breakdown.captureCameraVideo)
           Камера, аудио (захват): \(breakdown.captureCameraAudio)
-          Кодировщик: \(breakdown.encode)
+          Кодировщик (экран): \(breakdown.encodeScreen)
+          Кодировщик (камера): \(breakdown.encodeCamera)
           Запись в файл: \(breakdown.writer)
 
-        Деградация в течение сессии: \(degradedLine)
+        Острая деградация (всплеск backpressure): \(degradedLine)
         Основная причина: \(self.causeDescription(dominantCause))
 
         """
