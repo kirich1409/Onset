@@ -1,69 +1,69 @@
-# Tasks: Settings (⌘,) window — v1
+# Tasks: окно «Настройки» (⌘,) — v1
 
-> Plan: ./plan.md · No spec — acceptance below is the implementation-level contract.
+> Plan: ./plan.md · Спецификации нет — acceptance ниже является контрактом уровня реализации.
 
-## T-1 — Domain types in Configuration/
+## T-1 — Доменные типы в Configuration/
 - after: none
 - files: `Onset/Configuration/SettingApplyPolicy.swift`, `Onset/Configuration/SettingsKeys.swift`
-- acceptance: GIVEN `SettingApplyPolicy` WHEN inspected THEN it has cases `.immediate/.nextRecordingStart/.requiresRelaunch`; `SettingsKeys` defines per-setting UserDefaults keys; types are `nonisolated` with explicit `==` for enums per project rule.
-- check: `swift build` clean (no isolation/Equatable warnings); a small `SettingApplyPolicyTests` confirms equality witnesses usable off-main.
+- acceptance: GIVEN `SettingApplyPolicy` WHEN inspected THEN у него есть кейсы `.immediate/.nextRecordingStart/.requiresRelaunch`; `SettingsKeys` определяет UserDefaults-ключи на каждую настройку; типы `nonisolated` с явным `==` для enum по правилу проекта.
+- check: `swift build` чисто (без warnings по isolation/Equatable); небольшой `SettingApplyPolicyTests` подтверждает, что witness'ы равенства используемы off-main.
 
-## T-2 — Per-key settings store
+## T-2 — Хранилище настроек по-ключно
 - after: T-1
 - files: `Onset/Storage/SettingsStore.swift`, `OnsetTests/SettingsStoreTests.swift`
-- acceptance: GIVEN a `UserDefaults`-backed `SettingsStore` storing `showMenuBarTimer` and `cameraMirror` as direct `Bool`s under their OWN keys (`set(_:forKey:)`; `object(forKey:)` presence-check → unset returns the per-setting default, `OutputFolderStore`-style, NOT JSON) WHEN one key is saved/absent THEN reload returns the saved value, and an absent/invalid key resolves to ITS default WITHOUT affecting the other; constructing with `.standard` under test traps (matches `BackendSelectionStore`).
-- check: `SettingsStoreTests` — save→load per key, isolated corrupt-heal (corrupt one key, assert other intact) — green via `withScopedDefaults { InMemoryUserDefaults }`.
+- acceptance: GIVEN `SettingsStore` на базе `UserDefaults`, хранящий `showMenuBarTimer` и `cameraMirror` как прямые `Bool` под СВОИМИ ключами (`set(_:forKey:)`; presence-check через `object(forKey:)` → unset возвращает default конкретной настройки, в стиле `OutputFolderStore`, НЕ JSON) WHEN один ключ сохранён/отсутствует THEN reload возвращает сохранённое значение, а отсутствующий/невалидный ключ резолвится в СВОЙ default БЕЗ влияния на другой; конструирование с `.standard` под тестом trap'ает (как `BackendSelectionStore`).
+- check: `SettingsStoreTests` — save→load по ключу, изолированное corrupt-heal (повредить один ключ, ассертить целостность другого) — зелёные через `withScopedDefaults { InMemoryUserDefaults }`.
 
-## T-3 — Shared @Observable AppSettings (in-memory source of truth)
+## T-3 — Общая @Observable AppSettings (in-memory источник истины)
 - after: T-2
 - files: `Onset/UI/AppSettings.swift`, `Onset/OnsetApp.swift`, `Onset/UI/Main/MainViewModel.swift`, `Onset/UI/MenuBar/MenuBarLabel*.swift`
-- acceptance: GIVEN `AppSettings` owned as `@State` in `OnsetApp` (beside `coordinator`) WHEN a stored property is mutated THEN its `didSet` persists synchronously via `SettingsStore` AND triggers `@Observable` invalidation; values load from store at launch. THE SYSTEM SHALL be the single in-memory read source. THE SYSTEM SHALL inject it explicitly (not `@Environment`): add `let appSettings: AppSettings` to `MainViewModel.init` (update every VM creation site), and pass it as an `init` param to `MenuBarLabel` and `SettingsView` from `OnsetApp`.
-- check: `swift build` clean (all `MainViewModel(...)` / `MenuBarLabel(...)` call sites updated); `AppSettingsTests` verifies load-at-init + synchronous `didSet` write-through to a fake store.
+- acceptance: GIVEN `AppSettings`, владеемая как `@State` в `OnsetApp` (рядом с `coordinator`) WHEN мутируется stored-свойство THEN его `didSet` персистит синхронно через `SettingsStore` И триггерит инвалидацию `@Observable`; значения загружаются из хранилища на старте. THE SYSTEM SHALL быть единственным in-memory источником чтения. THE SYSTEM SHALL инъектировать её явно (не `@Environment`): добавить `let appSettings: AppSettings` в `MainViewModel.init` (обновить все места создания VM) и передавать её параметром `init` в `MenuBarLabel` и `SettingsView` из `OnsetApp`.
+- check: `swift build` чисто (все call-site'ы `MainViewModel(...)` / `MenuBarLabel(...)` обновлены); `AppSettingsTests` проверяет load-at-init + синхронный write-through через `didSet` в fake-хранилище.
 
-## T-4 — Add cameraMirror to RecordingConfiguration
+## T-4 — Добавить cameraMirror в RecordingConfiguration
 - after: none
 - files: `Onset/Configuration/RecordingConfiguration.swift`, `OnsetTests/RecordingConfigurationTests.swift`
-- acceptance: GIVEN `makeMVPDefault(baseDirectory:cameraMirror: Bool = false)` (default `false` so `static let mvpDefault` :244 and other callers — `CameraFormatSelector`, `RecordingCoordinator.stop` — compile unchanged) WHEN built THEN `cameraMirror` is stored on config; the hand-rolled `==` (:308-341) treats two configs differing only in `cameraMirror` as non-equal.
-- check: `RecordingConfigurationTests`: `==` inequality for `cameraMirror`; build clean incl. existing `mvpDefault` callers. (No bitrate/quality changes — quality profile is out of v1 scope.)
+- acceptance: GIVEN `makeMVPDefault(baseDirectory:cameraMirror: Bool = false)` (default `false`, чтобы `static let mvpDefault` :244 и остальные вызыватели — `CameraFormatSelector`, `RecordingCoordinator.stop` — компилировались без изменений) WHEN построено THEN `cameraMirror` хранится на config; рукописный `==` (:308-341) считает два config'а, различающиеся только `cameraMirror`, неравными.
+- check: `RecordingConfigurationTests`: неравенство `==` для `cameraMirror`; build чисто, включая существующих вызывателей `mvpDefault`. (Без изменений bitrate/quality — профиль качества вне scope v1.)
 
-## T-5 — Read mirror at record seam + provide AppSettings to preview
+## T-5 — Читать зеркало на seam записи + дать AppSettings превью
 - after: T-3, T-4
 - files: `Onset/UI/Main/MainViewModel+Record.swift`, `Onset/UI/Main/MainView.swift`
-- acceptance: GIVEN a recording starts WHEN `MainViewModel` builds config (+Record.swift:108) THEN it reads `cameraMirror` from `self.appSettings` and passes it to `makeMVPDefault`. THE SYSTEM SHALL pass `appSettings.cameraMirror` into `CameraPreviewRepresentable` (`MainView.swift` :334–348) so its `updateNSView` (T-7) reacts to toggles.
-- check: build clean; `grep` confirms `CameraPreviewRepresentable` receives the mirror value (not a hardcoded constant).
+- acceptance: GIVEN запись стартует WHEN `MainViewModel` строит config (+Record.swift:108) THEN он читает `cameraMirror` из `self.appSettings` и передаёт его в `makeMVPDefault`. THE SYSTEM SHALL передавать `appSettings.cameraMirror` в `CameraPreviewRepresentable` (`MainView.swift` :334–348), чтобы его `updateNSView` (T-7) реагировал на тогглы.
+- check: build чисто; `grep` подтверждает, что `CameraPreviewRepresentable` получает значение зеркала (а не хардкод-константу).
 
-## T-6 — Menu-bar timer toggle (consumer)
+## T-6 — Тоггл таймера в menu bar (потребитель)
 - after: T-3
 - files: `Onset/UI/MenuBar/MenuBarLabelMapper.swift`, `Onset/UI/MenuBar/MenuBarLabel*.swift`, `OnsetTests/MenuBarLabelMapperTests.swift`
-- acceptance: GIVEN `descriptor(phase:recordingState:elapsed:showTimer:)` WHEN `showTimer == false` THEN the descriptor's `elapsed` is `nil` (no time string) while the status dot is unchanged; `MenuBarLabel` passes `AppSettings.showMenuBarTimer`. THE SYSTEM SHALL update ALL existing `descriptor(...)` call sites (the ~9 in `MenuBarLabelMapperTests.swift` + production callers) to pass `showTimer:` — adding the param breaks them otherwise.
-- check: `MenuBarLabelMapperTests` asserts `elapsed == nil` when `showTimer == false` during `.recording` (dot unchanged) AND all pre-existing cases pass `showTimer: true`; build clean (no unresolved call sites).
+- acceptance: GIVEN `descriptor(phase:recordingState:elapsed:showTimer:)` WHEN `showTimer == false` THEN `elapsed` дескриптора равен `nil` (нет строки времени), а точка статуса неизменна; `MenuBarLabel` передаёт `AppSettings.showMenuBarTimer`. THE SYSTEM SHALL обновить ВСЕ существующие call-site'ы `descriptor(...)` (~9 в `MenuBarLabelMapperTests.swift` + прод-вызыватели), чтобы передавали `showTimer:` — иначе добавление параметра их ломает.
+- check: `MenuBarLabelMapperTests` ассертит `elapsed == nil` при `showTimer == false` во время `.recording` (точка неизменна) И все прежние кейсы передают `showTimer: true`; build чисто (нет нерезолвленных call-site'ов).
 
-## T-7 — Camera mirror (recording path + live preview)
+## T-7 — Зеркалирование камеры (путь записи + живое превью)
 - after: T-4, T-5
 - files: `Onset/Recording/Capture/CameraSource+SessionSetup.swift`, `Onset/UI/Main/CameraPreviewView.swift`, `Onset/UI/Main/MainView.swift`
-- acceptance: GIVEN `config.cameraMirror == true` WHEN the recording VDO connection is configured AT SETUP in `attachOutputs` (after `addOutput` :300, before the first frame) THEN `isVideoMirrored` is set true — guarded by `isVideoMirroringSupported`, after `automaticallyAdjustsVideoMirroring = false`, wrapped in its OWN `session.beginConfiguration()/commitConfiguration()` (attachOutputs is NOT inside the existing one at :164/169); set ONLY at setup, never on a running session. THE SYSTEM SHALL make `CameraPreviewRepresentable.updateNSView` (`MainView.swift`) the SOLE writer of the preview-layer connection's `isVideoMirrored` (`CameraPreviewView` sets `automaticallyAdjustsVideoMirroring = false` when wiring the layer), reacting to `appSettings.cameraMirror` with no session reconfig; output unmirrored when `cameraMirror == false`.
-- check: build clean; L5 (T-10): recorded `camera.mp4` horizontally flipped vs baseline; live preview flips on toggle with no flicker; mirror-ON vs OFF at default preserves zero-copy (IOSurface-backed / no per-frame CPU-energy regression), drops secondary.
+- acceptance: GIVEN `config.cameraMirror == true` WHEN VDO-connection записи конфигурируется ПРИ SETUP в `attachOutputs` (после `addOutput` :300, до первого кадра) THEN `isVideoMirrored` ставится в true — под guard `isVideoMirroringSupported`, после `automaticallyAdjustsVideoMirroring = false`, обёрнуто в СОБСТВЕННЫЙ `session.beginConfiguration()/commitConfiguration()` (attachOutputs НЕ внутри существующего на :164/169); ставится ТОЛЬКО при setup, никогда на работающей сессии. THE SYSTEM SHALL сделать `CameraPreviewRepresentable.updateNSView` (`MainView.swift`) ЕДИНСТВЕННЫМ писателем `isVideoMirrored` connection'а preview-слоя (`CameraPreviewView` ставит `automaticallyAdjustsVideoMirroring = false` при подключении слоя), реагируя на `appSettings.cameraMirror` без переконфига сессии; выход не зеркалируется при `cameraMirror == false`.
+- check: build чисто; L5 (T-10): записанный `camera.mp4` горизонтально перевёрнут vs baseline; живое превью переворачивается по тогглу без мерцания; зеркало-ON vs OFF на default сохраняет zero-copy (IOSurface-backed / нет регрессии CPU-энергии на кадр), дропы вторичны.
 
-## T-8 — Observable recording-active + availability classifier
+## T-8 — Observable recording-active + классификатор доступности
 - after: none
 - files: `Onset/UI/RecordingCoordinator.swift`, `Onset/UI/Settings/ControlAvailability.swift`, `OnsetTests/ControlAvailabilityTests.swift`
-- acceptance: GIVEN `RecordingCoordinator.isRecordingActive` is an OBSERVABLE STORED property set `true` at the ENTRY of `start()` (~:445, covering the startup window) and `false` at the COMPLETION of `stop()` (after terminal phase) — and the `isStarting` `defer` at :449 must NOT touch it (different variable) — WHEN the pure classifier maps `(.nextRecordingStart, active=true)` THEN it returns `.disabled`; `(.immediate, …)` returns `.enabled` always.
-- check: `ControlAvailabilityTests` covers the policy × active matrix; build clean; mutating `isRecordingActive` triggers SwiftUI invalidation (stored, not computed over `@ObservationIgnored`); a coordinator test confirms it stays true across the start window (not reset by the :449 defer).
+- acceptance: GIVEN `RecordingCoordinator.isRecordingActive` — это OBSERVABLE STORED свойство, ставящееся в `true` на ВХОДЕ `start()` (~:445, покрывая окно запуска) и в `false` по ЗАВЕРШЕНИИ `stop()` (после терминальной фазы) — и `defer` для `isStarting` на :449 НЕ должен его трогать (другая переменная) — WHEN чистый классификатор маппит `(.nextRecordingStart, active=true)` THEN он возвращает `.disabled`; `(.immediate, …)` возвращает `.enabled` всегда.
+- check: `ControlAvailabilityTests` покрывает матрицу policy × active; build чисто; мутация `isRecordingActive` триггерит инвалидацию SwiftUI (stored, не computed поверх `@ObservationIgnored`); тест координатора подтверждает, что он остаётся true на протяжении окна старта (не сбрасывается defer'ом :449).
 
-## T-9a — Settings scene, tabs, discoverability, real controls
+## T-9a — Сцена Settings, вкладки, обнаружимость, реальные контролы
 - after: T-3, T-6, T-8
 - files: `Onset/UI/Settings/SettingsView.swift`, `Onset/OnsetApp.swift`, `Onset/UI/MenuBar/MenuBarMenu.swift`
-- acceptance: GIVEN `SettingsView(appSettings:coordinator:)` (explicit init — `appSettings` for toggle bindings, `coordinator` for `isRecordingActive` gating) hosted in the `Settings` scene WHEN opened via ⌘, OR the `SettingsLink` («Настройки…») in `MenuBarExtra` THEN a `TabView` shows tabs Общие/Индикация/Видео/Камера/Аудио (each an SF Symbol), opens on Индикация and remembers the last tab via `@AppStorage` keyed on a `SettingsTab` enum `rawValue: String` (default `.indication`); real controls — timer `Toggle` (Индикация), mirror `Toggle` (Камера) — bind to `appSettings`.
-- check: build clean; L5: ⌘, AND SettingsLink both open the window (window-less too); toggles mutate persisted state; reopening restores last tab, first-ever open is Индикация; only standard SwiftUI controls used (review).
+- acceptance: GIVEN `SettingsView(appSettings:coordinator:)` (явный init — `appSettings` для биндингов тогглов, `coordinator` для гейтинга по `isRecordingActive`), размещённый в сцене `Settings` WHEN открыто через ⌘, ИЛИ `SettingsLink` («Настройки…») в `MenuBarExtra` THEN `TabView` показывает вкладки Общие/Индикация/Видео/Камера/Аудио (каждая — SF Symbol), открывается на Индикации и помнит последнюю вкладку через `@AppStorage`, ключ — `rawValue: String` enum `SettingsTab` (default `.indication`); реальные контролы — `Toggle` таймера (Индикация), `Toggle` зеркала (Камера) — биндятся к `appSettings`.
+- check: build чисто; L5: и ⌘,, и SettingsLink открывают окно (в т.ч. без окон); тогглы мутируют persisted-состояние; повторное открытие восстанавливает последнюю вкладку, самое первое открытие — Индикация; используются только стандартные контролы SwiftUI (ревью).
 
-## T-9b — Read-only stub panes + during-recording gating
+## T-9b — Панели read-only-заглушек + гейтинг во время записи
 - after: T-9a
 - files: `Onset/UI/Settings/*Pane.swift`
-- acceptance: GIVEN the stub rows WHEN rendered THEN they are read-only `LabeledContent` (label + static value, no chevron, NOT a Picker): codec HEVC, container MP4, resolution «Исходное», fps «авто/исходный», camera 1080p, audio off/off, language «Русский». THE SYSTEM SHALL render the mirror control `.disabled` via `ControlAvailability` during recording WITH a visible «Недоступно во время записи» caption + `accessibilityHint`, and carry the «Превью обновляется сразу, в запись — со следующего старта» caption otherwise.
-- check: L3/L5 manual: stubs are non-interactive rows (not greyed pickers); stub-only tabs (Общие/Видео/Аудио) read as informational, not broken; mirror greyed + explained during an active recording; VoiceOver announces read-only rows as static text (not button) with correct focus order; no custom control types (review).
+- acceptance: GIVEN строки-заглушки WHEN отрисованы THEN они read-only `LabeledContent` (лейбл + статичное значение, без шеврона, НЕ Picker): кодек HEVC, контейнер MP4, разрешение «Исходное», fps «авто/исходный», камера 1080p, аудио off/off, язык «Русский». THE SYSTEM SHALL рендерить контрол зеркала `.disabled` через `ControlAvailability` во время записи С видимой подписью «Недоступно во время записи» + `accessibilityHint`, и нести подпись «Превью обновляется сразу, в запись — со следующего старта» в остальных случаях.
+- check: L3/L5 вручную: заглушки — неинтерактивные строки (не серые picker'ы); вкладки-только-заглушки (Общие/Видео/Аудио) читаются как информационные, не сломанные; зеркало серое + пояснено во время активной записи; VoiceOver озвучивает read-only строки как статичный текст (не кнопку) с корректным порядком фокуса; нет кастомных типов контролов (ревью).
 
-## T-10 — Docs + L5 verification + CLAUDE.md
+## T-10 — Docs + L5-верификация + CLAUDE.md
 - after: T-9b
 - files: `docs/architecture.md`, `CLAUDE.md`
-- acceptance: THE SYSTEM SHALL document the Settings scene + new types in architecture.md; add to CLAUDE.md (via revise-claude-md, ≤200 lines) BOTH the "UI from standard SwiftUI/AppKit components" rule AND a reword of "sole @Observable owner" → "sole session-lifecycle owner". L5 on MX Brio (quiet machine, signed build): mirror flips `camera.mp4` + live preview; mirror-ON vs OFF at default preserves zero-copy (IOSurface / no CPU-energy regression) with no new drops (`verify-cfr`); menu-bar timer hides/shows live; ⌘, and SettingsLink both open the window.
-- check: docs updated in this PR; L5 evidence (flip screenshot + mirror-ON/OFF zero-copy/energy comparison + verify-cfr result) recorded in PR body. NOTE: PR also touches CLAUDE.md + is a UI change → not auto-mergeable, owner review required.
+- acceptance: THE SYSTEM SHALL задокументировать сцену Settings + новые типы в architecture.md; добавить в CLAUDE.md (через revise-claude-md, ≤200 строк) КАК правило «UI из стандартных компонентов SwiftUI/AppKit», ТАК И переформулировку «sole @Observable owner» → «sole session-lifecycle owner». L5 на MX Brio (тихая машина, signed-build): зеркало переворачивает `camera.mp4` + живое превью; зеркало-ON vs OFF на default сохраняет zero-copy (IOSurface / нет регрессии CPU-энергии) без новых дропов (`verify-cfr`); таймер в menu bar скрывается/показывается вживую; и ⌘,, и SettingsLink открывают окно.
+- check: docs обновлены в этом PR; L5-свидетельства (скриншот переворота + сравнение zero-copy/энергии зеркало-ON/OFF + результат verify-cfr) записаны в теле PR. NOTE: PR также трогает CLAUDE.md + это UI-изменение → не авто-мержабелен, нужно ревью владельца.

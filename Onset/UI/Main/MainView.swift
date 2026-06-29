@@ -369,6 +369,15 @@ struct CameraPreviewRepresentable: NSViewRepresentable {
         // Sole writer of the preview connection's mirror state. The layer itself is wired in
         // CameraPreviewView.init (which also disables automatic mirroring); device changes are
         // handled by .id()-driven recreation at the call site.
-        nsView.previewLayer?.connection?.isVideoMirrored = self.cameraMirror
+        // isVideoMirroringSupported guard mirrors the recording path (applyRecordingMirror).
+        guard let connection = nsView.previewLayer?.connection, connection.isVideoMirroringSupported else {
+            return
+        }
+        // updateNSView runs on every SwiftUI pass (device discovery, permission/hover/state churn);
+        // only touch the connection when the value actually differs to avoid redundant writes.
+        guard connection.isVideoMirrored != self.cameraMirror else {
+            return
+        }
+        connection.isVideoMirrored = self.cameraMirror
     }
 }

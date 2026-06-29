@@ -27,11 +27,4 @@ struct ControlAvailabilityTests {
             ControlAvailability.classify(policy: .nextRecordingStart, isRecordingActive: false) == .enabled
         )
     }
-
-    @Test("requiresRelaunch is enabled regardless of recording state", arguments: [false, true])
-    func requiresRelaunch_alwaysEnabled(isRecordingActive: Bool) {
-        #expect(
-            ControlAvailability.classify(policy: .requiresRelaunch, isRecordingActive: isRecordingActive) == .enabled
-        )
-    }
 }

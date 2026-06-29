@@ -187,10 +187,8 @@ Full type-level map (Russian): `docs/architecture.md`.
   or developer.apple.com; trust the doc/MCP platform line over a hand-read header.
 - Fold non-obvious learnings into CLAUDE.md via `/claude-md-management:revise-claude-md`; add AND delete, keep ≤200 lines.
 - **UI: standard components, no agent visual design.** Build from stock SwiftUI/AppKit
-  (`Settings`, `Form`, `TabView`, `Toggle`, `LabeledContent`…), never hand-rolled controls to
-  match a mockup pixel-for-pixel — mockups are reference, not spec. Visual *design* is not agent
-  work: brief the Claude Design service
-  (<https://claude.ai/design/p/975364e4-479d-49bb-87a1-202a02c7b5c0>) and hand it to the user.
+  (`Settings`, `Form`, `TabView`, `Toggle`, `LabeledContent`…), no hand-rolled controls to match a mockup;
+  brief visual *design* to the Claude Design service (<https://claude.ai/design/p/975364e4-479d-49bb-87a1-202a02c7b5c0>), hand to user.
 
 ## Gotchas
 

@@ -8,7 +8,7 @@ import SwiftUI
 /// restored across launches. The enum is UI-only and therefore stays `@MainActor`-isolated (the
 /// default under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`): its `RawRepresentable`/`Hashable`
 /// conformances are used solely from main-actor view code (tab tags and the `@AppStorage` binding),
-/// so — unlike `SettingApplyPolicy`/`ControlAvailability` — it needs no `nonisolated` witnesses.
+/// so — unlike `ControlAvailability` — it needs no `nonisolated` witnesses.
 enum SettingsTab: String {
     /// App-wide preferences (language, future general options).
     case general
