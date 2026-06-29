@@ -71,6 +71,9 @@ struct MenuBarMenu: View {
         SettingsLink {
             Text("Настройки…")
         }
+        // Render «⌘,» next to the item and make the shortcut work while the menu is open —
+        // the standard app-menu ⌘, only fires when Onset is frontmost (menu-bar-first usage).
+        .keyboardShortcut(",", modifiers: .command)
 
         Button("Экспортировать диагностику") {
             self.diagnosticsCoordinator.export()

@@ -194,6 +194,19 @@ struct MainView: View {
             }
             self.stickyFooter
         }
+        // Menu-bar-first app: ⌘, only fires when Onset is frontmost, so the config screen
+        // needs a visible way into Settings. `SettingsLink` opens the Settings scene without
+        // an @Environment(\.openSettings) seam. The toolbar lives in the window title bar
+        // (chrome), so it does not consume the fixed `.contentSize` content frame.
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                SettingsLink {
+                    Image(systemName: "gearshape")
+                }
+                .accessibilityLabel("Настройки")
+                .help("Настройки")
+            }
+        }
     }
 
     /// The sticky footer: record button + optional reason/error text.
