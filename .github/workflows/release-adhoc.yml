@@ -1,0 +1,225 @@
+name: Release (ad-hoc)
+
+# Ad-hoc release pipeline — builds an UNNOTARIZED, ad-hoc-signed Onset.app and
+# publishes a draft GitHub Release. Use this for tester distribution before a
+# paid Apple Developer Program account exists.
+#
+# This workflow is ALWAYS ad-hoc. The notarized Developer ID path lives in the
+# separate release.yml (triggered by `push: tags: v*`, gated on 6 Apple secrets,
+# dormant until those secrets are set). The two never overlap:
+#   - release.yml      → notarized, tag-push triggered, Developer ID.
+#   - release-adhoc.yml → ad-hoc, workflow_dispatch triggered, no Apple account.
+#
+# Tag creation: `gh release create "v$VERSION"` with the default GITHUB_TOKEN
+# creates the tag as a side effect. Events produced by GITHUB_TOKEN do NOT start
+# other workflow runs, so creating `v<version>` here does NOT re-fire release.yml.
+# This is the design — never swap github.token for a PAT here, or the dormant
+# notarization workflow would wake up on the tag push.
+#
+# Secrets: none beyond the automatic ${{ github.token }}. Release notes are
+# GitHub auto-generated (no AI, no API key). No Apple secrets are needed here.
+#
+# See: docs/devops/release-runbook.md
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (semver X.Y.Z, e.g. 0.1.0)'
+        type: string
+        required: true
+
+# Least-privilege default. contents: write is scoped to the create-release job only.
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.5.app
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # build
+  # Release build → ad-hoc codesign → DMG + ZIP. No archive/exportArchive: that
+  # is the Developer ID path (release.yml) and is unavailable without a paid
+  # account. Runs on macOS because hdiutil/ditto/codesign are macOS-only.
+  # ─────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build & Package (ad-hoc)
+    runs-on: macos-26
+    timeout-minutes: 30
+    permissions:
+      contents: read  # Only reads source; the GitHub Release is created downstream.
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      # Validate input before the expensive build so bad input fails in seconds.
+      - name: Validate version input
+        id: version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Invalid version '$VERSION' — expected semver X.Y.Z (e.g. 0.1.0)"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Validated version: $VERSION"
+
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Fail-fast: GitHub rotates Xcode versions on macos-* images. A missing
+      # directory produces cryptic errors later; fail immediately with clear feedback.
+      - name: Verify Xcode 26.5
+        run: |
+          if [ ! -d "/Applications/Xcode_26.5.app" ]; then
+            echo "::error::Xcode 26.5 not found on runner (image rotated versions). Update DEVELOPER_DIR and target SDK."
+            exit 1
+          fi
+          xcodebuild -version
+
+      # Release configuration, unsigned (no paid cert available). ONLY_ACTIVE_ARCH=YES
+      # is correct: the project is Apple-Silicon-only and the runner is arm64.
+      # -derivedDataPath makes the output path deterministic for the steps below.
+      - name: Build (Release, unsigned)
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -o pipefail
+          run_build() {
+            xcodebuild build \
+              -scheme Onset \
+              -destination 'platform=macOS' \
+              -configuration Release \
+              -derivedDataPath "$RUNNER_TEMP/dd" \
+              ONLY_ACTIVE_ARCH=YES \
+              CURRENT_PROJECT_VERSION="$VERSION" \
+              MARKETING_VERSION="$VERSION" \
+              CODE_SIGN_IDENTITY="" \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGNING_ALLOWED=NO
+          }
+          # xcbeautify gives token-cheap GitHub-annotated output when present;
+          # plain xcodebuild output otherwise.
+          if command -v xcbeautify >/dev/null 2>&1; then
+            run_build | xcbeautify --renderer github-actions
+          else
+            run_build
+          fi
+
+      # Ad-hoc signature (identity "-"): satisfies macOS load requirements without
+      # a certificate. NOT notarized — testers must Gatekeeper-bypass once (see the
+      # install block appended to the release body). codesign --verify gates the
+      # result; codesign -dvv only prints and cannot fail the step on its own.
+      - name: Ad-hoc codesign
+        run: |
+          APP="$RUNNER_TEMP/dd/Build/Products/Release/Onset.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::Onset.app not found at $APP"
+            exit 1
+          fi
+          codesign --force --deep --sign - "$APP"
+          codesign -dvv "$APP"
+          codesign --verify --strict --verbose=2 "$APP"
+
+      - name: Package DMG and ZIP
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          APP="$RUNNER_TEMP/dd/Build/Products/Release/Onset.app"
+          hdiutil create \
+            -volname "Onset $VERSION" \
+            -srcfolder "$APP" \
+            -ov \
+            -format UDZO \
+            "$RUNNER_TEMP/Onset-$VERSION.dmg"
+          ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/Onset-$VERSION.zip"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: onset-adhoc-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/Onset-${{ steps.version.outputs.version }}.dmg
+            ${{ runner.temp }}/Onset-${{ steps.version.outputs.version }}.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # create-release
+  # Generates GitHub auto-notes and creates the draft GitHub Release with the
+  # .dmg and .zip attached. Only job that needs contents: write. Runs on ubuntu —
+  # needs only gh + jq, no macOS toolchain.
+  # ─────────────────────────────────────────────────────────────────────────
+  create-release:
+    name: Create Draft Release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write  # Required to create a GitHub Release and upload artifacts.
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: onset-adhoc-${{ github.run_id }}
+          path: ./artifacts
+
+      # Release notes are GitHub auto-generated — no AI, no API key. The
+      # releases/generate-notes REST endpoint returns the notes as text WITHOUT
+      # creating a release, so we append the install block and create the release
+      # in a single --notes-file call. Notes are cosmetic: if generate-notes fails,
+      # warn and ship a body with just the install block — never fail the whole
+      # release over notes text.
+      - name: Generate release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          # macOS 26-correct install instructions for an ad-hoc (unnotarized) build.
+          # Quoted heredoc — no interpolation.
+          cat > install-block.md <<'EOF'
+          ## Установка (ad-hoc сборка)
+          Это ad-hoc-подписанная сборка без нотаризации. При первом запуске macOS заблокирует приложение. Чтобы открыть:
+          System Settings → Privacy & Security → найдите сообщение про «Onset» → нажмите «Open Anyway».
+          (ПКМ→Открыть на macOS 26 больше не обходит Gatekeeper.)
+          Примечание: при ad-hoc-подписи разрешение на запись экрана (Screen Recording) нужно выдавать заново после каждой новой сборки.
+          EOF
+
+          # target_commitish is required because the tag does not exist yet.
+          # The `if` condition is exempt from set -e, so a failure routes to the
+          # warning branch instead of aborting the job.
+          if NOTES=$(gh api --method POST \
+              "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+              -f tag_name="v$VERSION" \
+              -f target_commitish="$GITHUB_SHA" \
+              --jq '.body'); then
+            echo "Release notes source: GitHub auto-generated notes"
+          else
+            echo "::warning::generate-notes failed; shipping release body with install block only"
+            NOTES=""
+          fi
+
+          {
+            [ -n "$NOTES" ] && printf '%s\n\n' "$NOTES"
+            cat install-block.md
+          } > notes.md
+
+          echo "----- notes.md preview -----"
+          cat notes.md
+
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          gh release create "v$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Onset $VERSION" \
+            --draft \
+            --notes-file notes.md \
+            "./artifacts/Onset-$VERSION.dmg" \
+            "./artifacts/Onset-$VERSION.zip"
