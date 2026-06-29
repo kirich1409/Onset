@@ -16,13 +16,13 @@ enum SettingsTab: String {
     /// Menu-bar indication preferences (the elapsed-time timer). The default-open tab.
     case indication
 
-    /// Recorded-video format display (codec/container/resolution/frame rate — read-only in v1).
-    case video
+    /// Screen-recording format display (codec/container/resolution/frame rate — read-only in v1).
+    case screen
 
     /// Camera preferences (mirror toggle + resolution display).
     case camera
 
-    /// Audio preferences (noise suppression / system audio — read-only in v1).
+    /// Audio preferences (system audio — read-only in v1).
     case audio
 
     /// The localized tab title shown in the toolbar tab item.
@@ -30,7 +30,7 @@ enum SettingsTab: String {
         switch self {
         case .general: "Общие"
         case .indication: "Индикация"
-        case .video: "Видео"
+        case .screen: "Экран"
         case .camera: "Камера"
         case .audio: "Аудио"
         }
@@ -41,7 +41,7 @@ enum SettingsTab: String {
         switch self {
         case .general: "gearshape"
         case .indication: "menubar.rectangle"
-        case .video: "video"
+        case .screen: "display"
         case .camera: "camera"
         case .audio: "waveform"
         }
@@ -110,9 +110,9 @@ struct SettingsView: View {
                 .tabItem { Label(SettingsTab.indication.title, systemImage: SettingsTab.indication.symbol) }
                 .tag(SettingsTab.indication)
 
-            VideoPane()
-                .tabItem { Label(SettingsTab.video.title, systemImage: SettingsTab.video.symbol) }
-                .tag(SettingsTab.video)
+            ScreenPane()
+                .tabItem { Label(SettingsTab.screen.title, systemImage: SettingsTab.screen.symbol) }
+                .tag(SettingsTab.screen)
 
             CameraPane(appSettings: self.appSettings, coordinator: self.coordinator)
                 .tabItem { Label(SettingsTab.camera.title, systemImage: SettingsTab.camera.symbol) }

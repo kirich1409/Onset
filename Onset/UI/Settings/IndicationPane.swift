@@ -21,10 +21,12 @@ struct IndicationPane: View {
             }
 
             Section("Dock") {
-                // Read-only stub in v1: the Dock-icon indicator is not yet implemented, shown as a
-                // static `LabeledContent` row (no chevron, non-interactive) like the other panes'
-                // read-only rows.
-                LabeledContent("Значок в Dock во время записи", value: "Выкл")
+                // Read-only stub in v1, shown as a static `LabeledContent` row (no chevron,
+                // non-interactive) like the other panes' read-only rows. «Вкл» reflects the current
+                // reality: Onset is a regular (non-LSUIElement) app, so its Dock icon is ALWAYS
+                // shown, including during recording. A future toggle to HIDE it during recording is
+                // not yet implemented.
+                LabeledContent("Значок в Dock во время записи", value: "Вкл")
             }
         }
     }

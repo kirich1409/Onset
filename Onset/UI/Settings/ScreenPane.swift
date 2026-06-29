@@ -1,16 +1,16 @@
 import SwiftUI
 
-// MARK: - VideoPane
+// MARK: - ScreenPane
 
-/// The «Видео» settings pane.
+/// The «Экран» settings pane.
 ///
-/// Read-only in v1: the recorded-video format is currently fixed, so each parameter is shown as a
+/// Read-only in v1: the recorded-screen format is currently fixed, so each parameter is shown as a
 /// static `LabeledContent` row (label + value, no chevron, non-interactive) rather than a
 /// one-option `Picker`. Frame rate reads «авто/исходный» — the camera delivers a variable/lower
 /// rate, so a single number would imply a false guarantee. Rows announce to VoiceOver as static
 /// text, not buttons; the tab reads as informational, not broken.
 @MainActor
-struct VideoPane: View {
+struct ScreenPane: View {
     var body: some View {
         Form {
             Section("Формат записи экрана") {
@@ -26,8 +26,8 @@ struct VideoPane: View {
 // MARK: - Preview
 
 #if DEBUG
-    #Preview("Видео") {
-        VideoPane()
+    #Preview("Экран") {
+        ScreenPane()
             .formStyle(.grouped)
             .frame(width: SettingsLayout.width)
     }

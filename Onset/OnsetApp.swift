@@ -127,7 +127,11 @@ struct OnsetApp: App {
         // Menu bar item (#38). Full 3-state label and context menu.
         // Suppressed under XCTest so test hosts do not accumulate competing status items.
         MenuBarExtra(isInserted: .constant(!isRunningUnderXCTest)) {
-            MenuBarMenu(coordinator: self.coordinator, diagnosticsCoordinator: self.diagnosticsCoordinator)
+            MenuBarMenu(
+                coordinator: self.coordinator,
+                diagnosticsCoordinator: self.diagnosticsCoordinator,
+                appSettings: self.appSettings
+            )
         } label: {
             MenuBarLabel(coordinator: self.coordinator, appSettings: self.appSettings)
         }

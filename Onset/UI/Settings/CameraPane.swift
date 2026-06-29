@@ -10,7 +10,9 @@ import SwiftUI
 /// carrier, is dismissed at recording start, so no live preview is on screen), but because the
 /// one-shot pipeline cannot reconfigure mid-record: an editable toggle would silently have NO
 /// effect on the in-progress file, which is worse than a clearly-disabled control. Camera
-/// resolution is a read-only `LabeledContent` row in v1.
+/// resolution is a read-only `LabeledContent` row in v1: the value reads «Максимальное» because the
+/// camera auto-selects the maximum 16:9 format (up to 1080p) — explicit resolution/fps selection is
+/// future work (#276).
 @MainActor
 struct CameraPane: View {
     /// The shared settings model. `@Bindable` so `$appSettings.cameraMirror` writes through to the
@@ -52,7 +54,7 @@ struct CameraPane: View {
             }
 
             Section("Камера") {
-                LabeledContent("Разрешение", value: "1080p")
+                LabeledContent("Разрешение", value: "Максимальное")
             }
         }
     }
