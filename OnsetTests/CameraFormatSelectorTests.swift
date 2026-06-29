@@ -204,7 +204,11 @@ struct CameraFormatSelectorTests {
         #expect(best.maxFps == 30)
     }
 
-    // MARK: - allowAboveFullHD: record path opts in to 4K
+    // MARK: - allowAboveFullHD: selector behaviour when caller explicitly opts in to >1080p
+
+    // NOTE: The record path no longer passes allowAboveFullHD: true (fix for camera stutter
+    // caused by 4K upscaling — see swarm-report/camera-fps-drop-debug.md). These two tests
+    // document the selector's lifted-cap behaviour independently of the record path.
 
     @Test("allowAboveFullHD true with 4K and 1080p available — picks 4K over 1080p")
     func allowAboveFullHD_4KAvailable_picks4KOver1080p() throws {
@@ -230,5 +234,36 @@ struct CameraFormatSelectorTests {
         let best = try CameraFormatSelector.pickBestFormat(from: formats, minFps: 30, allowAboveFullHD: true)
         #expect(best.pixelWidth == 1920)
         #expect(best.pixelHeight == 1080)
+    }
+
+    // MARK: - Record-path 1080p cap regression (fix: camera stutter from 4K upscaling)
+
+    @Test("Record path (allowAboveFullHD: false) with 4K 16:9 advertised — caps at 1080p")
+    func recordPath_4KAdvertised_capsAt1080p() throws {
+        // Regression for the bug where resolveCameraFormat passed allowAboveFullHD: true,
+        // causing CameraFormatSelector to pick the Brio's 4K format even though AVFoundation
+        // only delivers 1080p buffers. The VTCompressionSession was built at 4K dims and
+        // upscaled every 1080p frame → ~4× encoder load → backpressure drops → camera stutter.
+        //
+        // After the fix, resolveCameraFormat uses the default allowAboveFullHD: false.
+        // This test pins the selector level: even with a 4K 16:9 format in the list,
+        // the record-path flag value (false) must yield ≤ 1920×1080.
+        //
+        // Seam note: CameraFormatSelector is a pure value-level function (no AVCaptureDevice),
+        // so this is a direct unit test of the exact logic the record path exercises.
+        // MainViewModel.resolveCameraFormat() is not directly unit-testable without a real
+        // AVCaptureDevice (camera.formats is [CameraFormat] derived from AVCaptureDevice formats),
+        // but the selector is the sole decision point — this test covers the critical path.
+        let formats = [
+            format(width: 1280, height: 720, maxFps: 30), // 720p  16:9
+            format(width: 1920, height: 1080, maxFps: 30), // 1080p 16:9 — must win
+            format(width: 3840, height: 2160, maxFps: 30), // 4K    16:9 — must be excluded
+        ]
+        // allowAboveFullHD defaults to false — the same as the fixed resolveCameraFormat call.
+        let best = try CameraFormatSelector.pickBestFormat(from: formats, minFps: 30)
+        #expect(best.pixelWidth <= 1920, "record path must not select above 1920px wide")
+        #expect(best.pixelHeight <= 1080, "record path must not select above 1080px tall")
+        #expect(best.pixelWidth == 1920, "1080p must be the selected width (largest within cap)")
+        #expect(best.pixelHeight == 1080, "1080p must be the selected height (largest within cap)")
     }
 }
