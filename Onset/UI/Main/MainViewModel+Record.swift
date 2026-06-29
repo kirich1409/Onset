@@ -104,8 +104,13 @@ extension MainViewModel {
 
     /// Stops preview, builds the request, and calls `coordinator.start`.
     func startRecording(display: Display, cameraFormat: CameraFormat?) async {
-        // Build config with the user-selected (or default) base output directory (#225).
-        let config = RecordingConfiguration.makeMVPDefault(baseDirectory: self.outputDirectoryURL)
+        // Build config with the user-selected (or default) base output directory (#225) and the
+        // current camera-mirror setting. The mirror is read fresh here (record start), never on a
+        // running session — the one-shot pipeline honors the value captured at this point.
+        let config = RecordingConfiguration.makeMVPDefault(
+            baseDirectory: self.outputDirectoryURL,
+            cameraMirror: self.appSettings.cameraMirror
+        )
         let plan = CapabilityResolver.resolveStartProfile(
             display: display,
             cameraFormat: cameraFormat,

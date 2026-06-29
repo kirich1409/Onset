@@ -9,8 +9,9 @@ import SwiftUI
 /// - **Recording / normal** — red filled circle `●` + elapsed timer (e.g. `04:17`).
 /// - **Recording / degraded** — yellow filled circle `●` + warning triangle `⚠` + elapsed timer.
 ///
-/// Reads only `coordinator.phase`, `coordinator.recordingState`, and `coordinator.elapsed`
-/// so the per-property `@Observable` tracking fires only on those changes.
+/// Reads `coordinator.phase`, `coordinator.recordingState`, `coordinator.elapsed`, and
+/// `appSettings.showMenuBarTimer` so the per-property `@Observable` tracking fires only on those
+/// changes — toggling «Показывать таймер» re-renders the label live.
 @MainActor
 struct MenuBarLabel: View {
     // MARK: - Metrics
@@ -21,6 +22,9 @@ struct MenuBarLabel: View {
     }
 
     let coordinator: RecordingCoordinator
+
+    /// Shared settings model — read for `showMenuBarTimer` so the timer hides/shows live.
+    let appSettings: AppSettings
 
     /// Maps the semantic dot token to a concrete `Color` (#154 — keeps the color decision in the
     /// view layer so `MenuBarLabelMapper` stays free of SwiftUI). Mirrors the original logic exactly:
@@ -34,11 +38,12 @@ struct MenuBarLabel: View {
     }
 
     var body: some View {
-        // Resolve once per render so body reads exactly three coordinator properties.
+        // Resolve once per render so body reads exactly the tracked coordinator + settings props.
         let desc = MenuBarLabelMapper.descriptor(
             phase: self.coordinator.phase,
             recordingState: self.coordinator.recordingState,
-            elapsed: self.coordinator.elapsed
+            elapsed: self.coordinator.elapsed,
+            showTimer: self.appSettings.showMenuBarTimer
         )
 
         HStack(spacing: Metrics.elementSpacing) {
