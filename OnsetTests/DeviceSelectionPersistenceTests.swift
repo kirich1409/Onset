@@ -51,6 +51,7 @@ struct DeviceSelectionPersistenceTests {
         }
         return MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: coordinator,
             discoverDisplays: { _ in [] },
             discoverCameras: { _ in cameras },
@@ -159,6 +160,7 @@ struct DeviceSelectionPersistenceTests {
             }
             let sut = MainViewModel(
                 permissions: perms,
+                appSettings: AppSettings(store: InMemorySettingsStore()),
                 coordinator: coordinator,
                 discoverDisplays: { _ in [display] },
                 discoverCameras: { _ in [cam] },

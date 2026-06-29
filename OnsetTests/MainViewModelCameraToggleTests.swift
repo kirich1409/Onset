@@ -42,6 +42,7 @@ struct MainViewModelCameraToggleTests {
         }
         return MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: coordinator,
             discoverDisplays: { _ in displays },
             discoverCameras: { _ in cameras },
@@ -442,6 +443,7 @@ struct MainViewModelCameraToggleTests {
         let outputDefaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: RecordingCoordinator {
                 UserDefaultsBackendSelectionStore(defaults: outputDefaults)
             },
@@ -476,6 +478,7 @@ struct MainViewModelCameraToggleTests {
         let outputDefaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: RecordingCoordinator {
                 UserDefaultsBackendSelectionStore(defaults: outputDefaults)
             },
@@ -511,6 +514,7 @@ struct MainViewModelCameraToggleTests {
             let perms = FakePermissionsService(screen: .authorized, camera: .authorized, microphone: .notDetermined)
             let sut = MainViewModel(
                 permissions: perms,
+                appSettings: AppSettings(store: InMemorySettingsStore()),
                 coordinator: RecordingCoordinator {
                     UserDefaultsBackendSelectionStore(defaults: defaults)
                 },
@@ -541,6 +545,7 @@ struct MainViewModelCameraToggleTests {
         let outputDefaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: RecordingCoordinator {
                 UserDefaultsBackendSelectionStore(defaults: outputDefaults)
             },
@@ -621,6 +626,7 @@ struct MainViewModelCameraConnectingTests {
         }
         return MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: coordinator,
             discoverDisplays: { _ in [] },
             discoverCameras: { _ in cameras },

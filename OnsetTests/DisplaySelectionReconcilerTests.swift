@@ -112,6 +112,7 @@ struct MainViewModelApplyDisplaysTests {
         let defaults = InMemoryUserDefaults()
         return MainViewModel(
             permissions: FakePermissionsService(),
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: RecordingCoordinator {
                 UserDefaultsBackendSelectionStore(defaults: defaults)
             },
@@ -201,6 +202,7 @@ struct MainViewModelSubscribeTests {
         let defaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: FakePermissionsService(),
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: RecordingCoordinator {
                 UserDefaultsBackendSelectionStore(defaults: defaults)
             },

@@ -143,7 +143,7 @@ Full type-level map (Russian): `docs/architecture.md`.
 - **One-shot lifecycle**: `start()` succeeds once, a throwing `start()` is terminal,
   `stop()` is idempotent — no restarts.
 - **Single AsyncStream subscriber**: `RecordingCoordinator` is the only subscriber of
-  session streams and the only `@Observable` state owner; views are readers.
+  session streams and the sole *session-lifecycle* state owner; `AppSettings` owns settings.
 - **DI seams**: factory protocols (`EncoderFactory`, `WriterFactory`, `SourceFactory`)
   plus closure seams on view models; tests use `Fake*` types with
   `AsyncStream.makeStream`.
@@ -185,11 +185,10 @@ Full type-level map (Russian): `docs/architecture.md`.
   may surface an identically-named symbol that behaves differently on macOS. Check the
   symbol's actual macOS semantics via the `apple-docs` MCP (primary), macOS SDK headers,
   or developer.apple.com; trust the doc/MCP platform line over a hand-read header.
-- After completing a task, fold non-obvious learnings into CLAUDE.md
-  (`/claude-md-management:revise-claude-md`). Maintenance = add AND delete: a rule
-  Claude already follows without being told gets removed; keep this file ≤200 lines.
-- UI design is not done by agents: write a brief for the Claude Design service
-  (<https://claude.ai/design/p/975364e4-479d-49bb-87a1-202a02c7b5c0>) and hand it to the user.
+- Fold non-obvious learnings into CLAUDE.md via `/claude-md-management:revise-claude-md`; add AND delete, keep ≤200 lines.
+- **UI: standard components, no agent visual design.** Build from stock SwiftUI/AppKit
+  (`Settings`, `Form`, `TabView`, `Toggle`, `LabeledContent`…), no hand-rolled controls to match a mockup;
+  brief visual *design* to the Claude Design service (<https://claude.ai/design/p/975364e4-479d-49bb-87a1-202a02c7b5c0>), hand to user.
 
 ## Gotchas
 

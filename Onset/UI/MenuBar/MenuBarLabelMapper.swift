@@ -54,34 +54,42 @@ nonisolated enum MenuBarLabelMapper {
 
     /// Maps the current coordinator state to a label descriptor.
     ///
-    /// - Phase `.recording` + state `.normal`   → red dot + timer.
-    /// - Phase `.recording` + state `.degraded` → yellow dot + warning + timer.
+    /// - Phase `.recording` + state `.normal`   → red dot + timer (when `showTimer`).
+    /// - Phase `.recording` + state `.degraded` → yellow dot + warning + timer (when `showTimer`).
     /// - Any other phase (`.idle`, `.main`, `.finished`) → hollow circle, no timer.
     ///
     /// `.finished` is transient (coordinator moves to `.idle` or `.main` immediately after
     /// reveal). Treating it as idle here is intentional — the hollow circle is shown for one
     /// tick at most, which is acceptable and avoids a stale-timer artifact.
+    ///
+    /// - Parameter showTimer: When `false`, the descriptor's `elapsed` is `nil` so the visible
+    ///   time string is suppressed (the «Показывать таймер» setting). The status dot is
+    ///   independent of this flag — recording is still signalled, only the time is hidden. The
+    ///   `accessibilityLabel` keeps the spoken elapsed time so VoiceOver users still hear the
+    ///   recording duration regardless of the visible-timer preference.
     static func descriptor(
         phase: AppPhase,
         recordingState: RecordingState,
-        elapsed: Int
+        elapsed: Int,
+        showTimer: Bool
     )
     -> MenuBarLabelDescriptor {
         switch phase {
         case .recording:
             let elapsedString = ElapsedFormatter.string(from: elapsed)
+            let elapsedField = showTimer ? elapsed : nil
             switch recordingState {
             case .normal:
                 return MenuBarLabelDescriptor(
                     dot: .red,
-                    elapsed: elapsed,
+                    elapsed: elapsedField,
                     accessibilityLabel: "Onset, идёт запись, \(elapsedString)"
                 )
 
             case .degraded:
                 return MenuBarLabelDescriptor(
                     dot: .yellow,
-                    elapsed: elapsed,
+                    elapsed: elapsedField,
                     accessibilityLabel: "Onset, запись деградирована, \(elapsedString)"
                 )
             }
