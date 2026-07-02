@@ -378,11 +378,18 @@ actor StabilizingVideoSource: VideoFrameSource, AudioSampleSource {
         let ptsSeconds = CMTimeGetSeconds(frame.ptsHostTime)
 
         if case .warmUp = self.phase {
-            // Cadence is measured on ARRIVAL pts deltas (drain side), never processing time.
-            if let scale = self.warmUp.record(ptsSeconds: ptsSeconds) {
+            if let scale = self.chosenEstScale {
+                // Warm-up completed on a PREVIOUS arrival: this frame is the first stabilized
+                // one. The flip is deferred to the arrival AFTER the completing frame so the
+                // spec boundary stays exact — all `warmUpFrameCount` frames render with zero
+                // correction and no Vision; estimation starts with the NEXT frame ("с кадра 61").
+                // Flipping on the completing frame itself would let that very frame be processed
+                // under `.stabilizing` (the work task reads the phase at processing time).
+                self.phase = .stabilizing(estScale: scale)
+            } else if let scale = self.warmUp.record(ptsSeconds: ptsSeconds) {
+                // Cadence is measured on ARRIVAL pts deltas (drain side), never processing time.
                 self.warmUpMedianIntervalMs = self.warmUp.medianIntervalMs
                 self.chosenEstScale = scale
-                self.phase = .stabilizing(estScale: scale)
                 let median = self.warmUpMedianIntervalMs.map { StabilizationFormat.oneDecimal($0) } ?? "n/a"
                 // Mandatory AC-8 measurement artifact: the estScale choice log.
                 let choiceLine = "stabilization warm-up complete: medianIntervalMs=\(median) estScale=\(scale)"

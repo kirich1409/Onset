@@ -304,6 +304,24 @@ private func consumeDrops(_ sut: StabilizingVideoSource, into log: DropLog) -> T
     }
 }
 
+/// Emits `frame` and waits until the stage has fully processed it (its render call landed).
+///
+/// The eager-drain slot is depth-1 newest-wins BY DESIGN: emitting faster than the work task
+/// processes legitimately DISPLACES intermediate frames (exactly the behavior the AC-4
+/// attribution tests exercise). Tests that assert per-frame outcomes must therefore serialize
+/// delivery against the stage — the real camera's 40–50 ms cadence gives the stage that
+/// headroom for free; back-to-back yields do not.
+private func emitAndAwaitRender(
+    _ frame: VideoFrame,
+    camera: FakeWrappedCamera,
+    stage: FakeStage,
+    expectedRenderCalls: Int
+) async
+-> Bool {
+    camera.emitFrame(frame)
+    return await eventually { stage.state.withLock { $0.renderCalls } == expectedRenderCalls }
+}
+
 // MARK: - Lifecycle & teardown
 
 @Suite("StabilizingVideoSource — lifecycle & failed-start teardown")
@@ -365,8 +383,10 @@ struct StabilizingVideoSourceLifecycleTests {
         let dropsTask = consumeDrops(sut, into: dropLog)
 
         try await sut.start(anchoredTo: HostTimeAnchor.now())
-        camera.emitFrame(makeFrame(atSeconds: 100.00))
-        camera.emitFrame(makeFrame(atSeconds: 100.05))
+        for index in 0..<2 {
+            let frame = makeFrame(atSeconds: 100.0 + Double(index) * 0.05)
+            #expect(await emitAndAwaitRender(frame, camera: camera, stage: stage, expectedRenderCalls: index + 1))
+        }
         #expect(await eventually { frameLog.count == 2 })
 
         await sut.stop()
@@ -412,7 +432,8 @@ struct StabilizingVideoSourceProcessingTests {
 
         try await sut.start(anchoredTo: HostTimeAnchor.now())
         for index in 0..<3 {
-            camera.emitFrame(makeFrame(atSeconds: 10.0 + Double(index) * 0.05))
+            let frame = makeFrame(atSeconds: 10.0 + Double(index) * 0.05)
+            #expect(await emitAndAwaitRender(frame, camera: camera, stage: stage, expectedRenderCalls: index + 1))
         }
         #expect(await eventually { frameLog.count == 3 })
         #expect(stage.state.withLock { $0.estimateCalls } == 0)
@@ -432,7 +453,10 @@ struct StabilizingVideoSourceProcessingTests {
             try await sut.start(anchoredTo: HostTimeAnchor.now())
             // 4 warm-up frames + 1 stabilized frame (activation happens on the latter).
             for index in 0..<5 {
-                camera.emitFrame(makeFrame(atSeconds: 10.0 + Double(index) * intervalSeconds))
+                let frame = makeFrame(atSeconds: 10.0 + Double(index) * intervalSeconds)
+                #expect(
+                    await emitAndAwaitRender(frame, camera: camera, stage: stage, expectedRenderCalls: index + 1)
+                )
             }
             #expect(await eventually { frameLog.count == 5 })
             #expect(stage.state.withLock { $0.activatedScales } == [expectedScale])
@@ -458,7 +482,8 @@ struct StabilizingVideoSourceProcessingTests {
 
         try await sut.start(anchoredTo: HostTimeAnchor.now())
         for index in 0..<4 {
-            camera.emitFrame(makeFrame(atSeconds: 10.0 + Double(index) * 0.020))
+            let frame = makeFrame(atSeconds: 10.0 + Double(index) * 0.020)
+            #expect(await emitAndAwaitRender(frame, camera: camera, stage: stage, expectedRenderCalls: index + 1))
         }
         #expect(await eventually { frameLog.count == 4 })
         #expect(stage.state.withLock { $0.activatedScales } == [2])
@@ -492,16 +517,18 @@ struct StabilizingVideoSourceProcessingTests {
 
         try await sut.start(anchoredTo: HostTimeAnchor.now())
         for index in 0..<4 {
-            camera.emitFrame(makeFrame(atSeconds: 10.0 + Double(index) * 0.05))
+            let frame = makeFrame(atSeconds: 10.0 + Double(index) * 0.05)
+            #expect(await emitAndAwaitRender(frame, camera: camera, stage: stage, expectedRenderCalls: index + 1))
         }
         #expect(await eventually { frameLog.count == 4 })
 
+        // Frame 1 is warm-up; frame 2 is the first estimated one (script: nil — no pair yet);
+        // frame 3 applies the scripted shift; frame 4's estimation fails.
         let corrections = stage.state.withLock { $0.renderCorrections }
         try #require(corrections.count == 4)
-        // Frame 3 failed estimation: it re-applies frame 2's correction exactly (freeze).
-        #expect(corrections[2] == corrections[1])
-        #expect(corrections[1] != .zero)
-        // Frame 4 (script exhausted → nil shift) also keeps the same correction.
+        #expect(corrections[1] == .zero)
+        #expect(corrections[2] != .zero)
+        // Frame 4 failed estimation: it re-applies frame 3's correction exactly (freeze).
         #expect(corrections[3] == corrections[2])
 
         await sut.stop()
@@ -647,8 +674,12 @@ struct StabilizingVideoSourceBypassTests {
         let dropsTask = consumeDrops(sut, into: dropLog)
 
         try await sut.start(anchoredTo: HostTimeAnchor.now())
-        camera.emitFrame(makeFrame(atSeconds: 10.00))
-        camera.emitFrame(makeFrame(atSeconds: 10.05))
+        for index in 0..<2 {
+            // Serialized delivery: an eviction drop would be observably identical to a
+            // pool-exhaustion drop, so the slot must never evict in this test.
+            let frame = makeFrame(atSeconds: 10.0 + Double(index) * 0.05)
+            #expect(await emitAndAwaitRender(frame, camera: camera, stage: stage, expectedRenderCalls: index + 1))
+        }
         #expect(await eventually { dropLog.count == 2 })
         for event in dropLog.events {
             #expect(event.reason == .stabilizationDrops)
@@ -670,10 +701,16 @@ struct StabilizingVideoSourceBypassTests {
         let dropsTask = consumeDrops(sut, into: dropLog)
 
         try await sut.start(anchoredTo: HostTimeAnchor.now())
-        camera.emitFrame(makeFrame(atSeconds: 10.00))
-        camera.emitFrame(makeFrame(atSeconds: 10.05))
-        // Both frames dropped with the stage attribution; the second engages bypass.
-        #expect(await eventually { dropLog.count == 2 })
+        for index in 0..<3 {
+            // Serialized delivery: an evicted frame would not be render-counted and the limit-2
+            // bypass would never engage — every frame must be processed. Frame 1 is warm-up
+            // (its render failure is NOT counted — triggers arm after warm-up); frames 2 and 3
+            // fail under `.stabilizing` and reach the limit.
+            let frame = makeFrame(atSeconds: 10.0 + Double(index) * 0.05)
+            #expect(await emitAndAwaitRender(frame, camera: camera, stage: stage, expectedRenderCalls: index + 1))
+        }
+        // All three frames dropped with the stage attribution; the third engages bypass.
+        #expect(await eventually { dropLog.count == 3 })
 
         await sut.stop()
         await dropsTask.value
