@@ -255,11 +255,17 @@ nonisolated protocol SourceFactory: Sendable {
         -> any VideoFrameSource
 
     /// Builds the camera source (video + mic, one object). `micDevice == nil` → no audio samples.
+    ///
+    /// `cameraPlan` carries the resolved stabilization geometry (#297): the live factory wraps
+    /// the camera in `StabilizingVideoSource` when `cameraPlan.stabilization` is present. This
+    /// factory is the SINGLE decorator insertion point — `RecordingSession` wiring is identical
+    /// with the toggle OFF (AC-3).
     func makeCameraSource(
         cameraDevice: CameraDevice,
         format: CameraFormat,
         micDevice: MicrophoneDevice?,
-        config: RecordingConfiguration
+        config: RecordingConfiguration,
+        cameraPlan: ResolvedCameraPlan
     )
         -> any VideoFrameSource & AudioSampleSource
 }
@@ -278,15 +284,28 @@ nonisolated struct LiveSourceFactory: SourceFactory {
         cameraDevice: CameraDevice,
         format: CameraFormat,
         micDevice: MicrophoneDevice?,
-        config: RecordingConfiguration
+        config: RecordingConfiguration,
+        cameraPlan: ResolvedCameraPlan
     )
     -> any VideoFrameSource & AudioSampleSource {
-        CameraSource(
+        let camera = CameraSource(
             cameraDevice: cameraDevice,
             format: format,
             micDevice: micDevice,
             config: config,
             role: .record
+        )
+        // Stabilization OFF → the bare camera, byte-identical wiring to pre-#297 (AC-3).
+        guard let stabilization = cameraPlan.stabilization else { return camera }
+        return StabilizingVideoSource(
+            wrapping: camera,
+            stabilization: stabilization,
+            planWidth: cameraPlan.width,
+            stage: StabilizationRenderer(
+                stabilization: stabilization,
+                outputWidth: cameraPlan.width,
+                outputHeight: cameraPlan.height
+            )
         )
     }
 }

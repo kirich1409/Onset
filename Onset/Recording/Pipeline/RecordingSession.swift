@@ -160,6 +160,12 @@ actor RecordingSession {
     private var stage: DualFileOutputStage?
     private var dropMonitor: DropMonitor?
 
+    /// End-of-session diagnostics of the stabilization stage (#297), captured when the camera
+    /// pipeline stops (graceful stop OR mid-session finalize — whichever comes first). `nil`
+    /// when stabilization was OFF (the camera source is then a bare `CameraSource` that does
+    /// not conform to `StabilizationDiagnosticsProviding` — the AC-3 wiring guarantee).
+    private var stabilizationDiagnostics: StabilizationDiagnostics?
+
     /// Lifecycle of the session.
     ///
     /// Replaces the `hasStarted: Bool` flag with an exhaustive enum so the compiler enforces
@@ -551,16 +557,21 @@ actor RecordingSession {
         monitor: DropMonitor,
         includeAudio: Bool
     ) async throws {
-        guard let cameraDevice = self.cameraDevice, let cameraFormat = self.cameraFormat else {
-            // Should not happen: includeCamera implies the device was present.
+        guard let cameraDevice = self.cameraDevice, let cameraFormat = self.cameraFormat,
+              let cameraPlan = self.plan.cameraPlan
+        else {
+            // Should not happen: includeCamera implies the device (and its resolved plan) exist.
             throw RecordingError.noVideoSource
         }
         // The mic rides the camera AVCaptureSession; pass it only when audio is included.
+        // The resolved camera plan carries the stabilization geometry (#297) — the factory is
+        // the single point that wraps the camera in StabilizingVideoSource when it is present.
         let source = self.sourceFactory.makeCameraSource(
             cameraDevice: cameraDevice,
             format: cameraFormat,
             micDevice: includeAudio ? self.micDevice : nil,
-            config: self.config
+            config: self.config,
+            cameraPlan: cameraPlan
         )
         let encoder = self.encoderFactory.makeEncoder(
             kind: .camera,
@@ -744,9 +755,20 @@ actor RecordingSession {
             // audio is sealed before we report.
             await self.audioTask?.value
             self.audioTask = nil
+            // The camera pipeline is finalised mid-session (AC-12 revoke / writer fault): the
+            // source object is released with this holder, so capture the stage diagnostics NOW —
+            // performStop will not see this pipeline anymore (#297).
+            await self.captureStabilizationDiagnostics(from: pipeline.source)
         }
 
         await self.stage?.finalizePipeline(kind)
+    }
+
+    /// Captures the stabilization stage's diagnostics from a stopped camera source (#297).
+    /// A bare `CameraSource` (stabilization OFF) does not conform — the cast is the AC-3 gate.
+    private func captureStabilizationDiagnostics(from source: any VideoFrameSource) async {
+        guard let provider = source as? any StabilizationDiagnosticsProviding else { return }
+        self.stabilizationDiagnostics = await provider.stabilizationDiagnostics()
     }
 
     /// Removes and returns a pipeline holder, clearing the stored slot.
@@ -808,6 +830,10 @@ actor RecordingSession {
             await pipeline.framesTask.value
             await pipeline.encoder.stop()
             await pipeline.routeVideoTask.value
+            if kind == .camera {
+                // Stabilization diagnostics are final once the source stopped (#297).
+                await self.captureStabilizationDiagnostics(from: pipeline.source)
+            }
         }
 
         // The mic stream finished when the camera source stopped; drain the audio task tail.
@@ -830,6 +856,12 @@ actor RecordingSession {
                 )
             }
         }
+
+        // Forward the stage's bypass transition (if any) BEFORE the breakdown snapshot is read,
+        // so the technical report carries the transition time (#297 AC-4). No-op for nil.
+        await self.dropMonitor?.noteStabilizationBypass(
+            atSeconds: self.stabilizationDiagnostics?.bypassAtSeconds
+        )
 
         // Stop the monitor first so its observe tasks fully drain before snapshot().
         // encoder.stop() finished the drop streams; dropMonitor.stop() awaits those tasks, ensuring
@@ -917,9 +949,9 @@ actor RecordingSession {
             breakdown: breakdown,
             sessionEverDegraded: snapshot.sessionEverDegraded,
             dominantCause: snapshot.dominantCause,
-            // Wired to the stage's diagnostics when the stabilization decorator is integrated
-            // (see the camera-pipeline teardown in performStop / stopAndFinalizePipeline).
-            stabilizationLatencyLine: nil
+            // Present only when the stabilization stage ran this session (#297 AC-8) — captured
+            // from the decorator in performStop / stopAndFinalizePipeline.
+            stabilizationLatencyLine: self.stabilizationDiagnostics?.latencyLine
         )
         do {
             try RecordingOutput.writeReport(text, in: self.sessionDirectory, timestamp: self.sessionStartDate)
