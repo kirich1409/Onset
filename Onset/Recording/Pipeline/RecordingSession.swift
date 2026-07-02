@@ -766,6 +766,13 @@ actor RecordingSession {
 
     /// Captures the stabilization stage's diagnostics from a stopped camera source (#297).
     /// A bare `CameraSource` (stabilization OFF) does not conform — the cast is the AC-3 gate.
+    ///
+    /// Single-provider assumption: unlike `DropBreakdown`'s drop-merging, which composes across
+    /// nested decorators, this `as?` cast picks up exactly ONE provider. That is correct today —
+    /// `StabilizingVideoSource` is the only record-path video decorator — but if a second one is
+    /// ever added, an outer decorator would shadow this inner provider's diagnostics silently.
+    /// Should that happen, switch to forwarding diagnostics through the decorator chain (the
+    /// pattern drop-merging already uses) or collect a provider list instead of a single cast.
     private func captureStabilizationDiagnostics(from source: any VideoFrameSource) async {
         guard let provider = source as? any StabilizationDiagnosticsProviding else { return }
         self.stabilizationDiagnostics = await provider.stabilizationDiagnostics()
