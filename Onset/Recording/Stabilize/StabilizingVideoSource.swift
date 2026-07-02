@@ -385,6 +385,18 @@ actor StabilizingVideoSource: VideoFrameSource, AudioSampleSource {
                 // correction and no Vision; estimation starts with the NEXT frame ("с кадра 61").
                 // Flipping on the completing frame itself would let that very frame be processed
                 // under `.stabilizing` (the work task reads the phase at processing time).
+                //
+                // Residual race (benign, not eliminated by the deferral): the drain (this
+                // method) and the work loop are independent tasks with no ordering guarantee
+                // between "slot filled" and "slot drained" — if the work task already pulled the
+                // completing frame out of the depth-1 slot before this arrival runs, that frame
+                // still gets processed under `.stabilizing` despite the flip happening one
+                // arrival later. This does not break the spec boundary in practice: the first
+                // `estimateShift` call after `activateEstimation` always returns `nil` (no
+                // reference pair yet — see `StabilizationRenderer.estimateOnQueue`), so the
+                // completing frame still renders with correction = 0 either way; only the
+                // ESTIMATION reference frame ends up established one arrival earlier than the
+                // "с кадра 61" line implies.
                 self.phase = .stabilizing(estScale: scale)
             } else if let scale = self.warmUp.record(ptsSeconds: ptsSeconds) {
                 // Cadence is measured on ARRIVAL pts deltas (drain side), never processing time.
