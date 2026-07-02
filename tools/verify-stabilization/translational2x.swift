@@ -11,6 +11,11 @@ import CoreVideo
 import Foundation
 import Vision
 
+guard CommandLine.arguments.count >= 2 else {
+    print("usage: translational2x <video> [csvOut]")
+    exit(1)
+}
+
 let url = URL(fileURLWithPath: CommandLine.arguments[1])
 let csvPath = CommandLine.arguments.count >= 3 ? CommandLine.arguments[2] : "/tmp/t2x.csv"
 let cictx = CIContext(options: [.useSoftwareRenderer: false])
@@ -44,8 +49,24 @@ Task { trackR = try? await asset.loadTracks(withMediaType: .video).first
 }
 
 sem.wait()
-let reader = try! AVAssetReader(asset: asset)
-let rout = AVAssetReaderTrackOutput(track: trackR!, outputSettings: [
+guard let track = trackR else {
+    print("ERROR: no video track")
+    exit(1)
+}
+
+let reader: AVAssetReader
+do {
+    reader = try AVAssetReader(asset: asset)
+} catch {
+    print("ERROR: AVAssetReader init failed: \(error)")
+    print(
+        "hint: run unsandboxed — AVAssetReader fails with -11800/-17913 under App Sandbox " +
+            "(see README: plain terminal, not a sandbox wrapper or an Xcode scheme with App Sandbox on)"
+    )
+    exit(1)
+}
+
+let rout = AVAssetReaderTrackOutput(track: track, outputSettings: [
     kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
     kCVPixelBufferIOSurfacePropertiesKey as String: [:],
 ])

@@ -24,7 +24,18 @@ guard let track = trackResult else {
     exit(1)
 }
 
-let reader = try! AVAssetReader(asset: asset)
+let reader: AVAssetReader
+do {
+    reader = try AVAssetReader(asset: asset)
+} catch {
+    print("ERROR: AVAssetReader init failed: \(error)")
+    print(
+        "hint: run unsandboxed — AVAssetReader fails with -11800/-17913 under App Sandbox " +
+            "(see README: plain terminal, not a sandbox wrapper or an Xcode scheme with App Sandbox on)"
+    )
+    exit(1)
+}
+
 let settings: [String: Any] = [
     kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
 ]
