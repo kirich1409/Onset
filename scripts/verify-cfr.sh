@@ -47,7 +47,12 @@ MAX_GAP_SLOTS=2.0
 MAX_GAPS_PER_MIN=10
 
 # Camera fresh-content floor (keep fps from mpdecimate; requires motion in frame).
-MIN_FRESH_FPS=25
+# Overridable via env (#297 AC-2): stabilization acceptance compares ON/OFF pairs by the
+# RELATIVE fresh_fps delta, so the absolute gate is disabled for those runs:
+#   MIN_FRESH_FPS=0 scripts/verify-cfr.sh …
+# (the Brio's 20–25 fps passes the default 25 floor only by luck, and on 4K both halves of a
+# pair would fail it). The machine-extractable "FRESH_FPS=<value>" line below feeds the delta.
+MIN_FRESH_FPS="${MIN_FRESH_FPS:-25}"
 
 # Modal duplicate-run length must be ≤ this.
 MAX_RUN_MODE=2
@@ -294,6 +299,9 @@ VERDICT="${RESULT%% *}"
 FRESH=$(echo "$RESULT" | grep -oE 'fresh_fps=[^ ]+' | cut -d= -f2)
 MIN_F=$(echo "$RESULT" | grep -oE 'min_fps=[^ ]+' | cut -d= -f2)
 report "$VERDICT" "camera-fresh-content" "${FRESH} fps" "≥${MIN_F} fps"
+# Machine-extractable line for the #297 AC-2 ON/OFF freshness delta:
+#   grep '^FRESH_FPS=' | cut -d= -f2
+echo "FRESH_FPS=${FRESH}"
 
 # ── D. No duplicate-run clusters ─────────────────────────────────────────────
 # Build run-length histogram of consecutive drop sequences from mpdecimate.
