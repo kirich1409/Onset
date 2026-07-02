@@ -76,10 +76,15 @@ nonisolated struct StabilizationLatencyAggregator {
         let intervalPart = warmUpMedianIntervalMs
             .map { "медианный интервал warm-up=\(StabilizationFormat.oneDecimal($0)) мс" }
             ?? "медианный интервал warm-up=не измерен"
-        guard let p50 = self.percentileMs(p50Fraction), let p95 = self.percentileMs(p95Fraction) else {
+        guard !self.samplesMs.isEmpty else {
             return "Стабилизация камеры — латентность этапа (оценка+рендер): "
                 + "нет измеренных кадров (warm-up/bypass); \(scalePart); \(intervalPart)"
         }
+        // Sort once: percentileMs(_:) sorts independently per call, which would sort the
+        // session's ~45k-sample array twice back-to-back at session stop for no benefit.
+        let sorted = self.samplesMs.sorted()
+        let p50 = sorted[min(sorted.count - 1, Int(Double(sorted.count) * p50Fraction))]
+        let p95 = sorted[min(sorted.count - 1, Int(Double(sorted.count) * p95Fraction))]
         return "Стабилизация камеры — латентность этапа (оценка+рендер): "
             + "p50=\(StabilizationFormat.oneDecimal(p50)) мс, p95=\(StabilizationFormat.oneDecimal(p95)) мс "
             + "(кадров: \(self.count); \(scalePart); \(intervalPart))"
