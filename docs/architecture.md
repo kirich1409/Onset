@@ -81,7 +81,7 @@ drop'ов, резолв возможностей железа.
 | `CapabilityProbe` | `CapabilityProbe.swift` | Преflight (AC-6): проверка HW-кодера, финальный план через `CapabilityResolver` |
 | `DropMonitor` | `DropMonitor.swift` | Актор: учёт drop'ов и backpressure; эмитит `.normal` ↔ `.degraded` в UI; атрибутирует backpressure-потери по стадии и отдаёт `DropHealthSnapshot` (счётчики + доминирующая причина + latch `sessionEverDegraded`, на котором гейтится post-stop предупреждение) |
 | `PipelineTypes` | `PipelineTypes.swift` | Общие value-типы: `HostTimeAnchor` (T0), `VideoFrame`, `AudioSample`, `EncodedSample`, `DropEvent`, `DropCause`, `RecordingState`, `SourceEvent` |
-| `RecordingComponentFactories` | `RecordingComponentFactories.swift` | DI-протоколы: `EncoderControlling`, `WriterControlling`, `EncoderFactory`, `WriterFactory`, `SourceFactory` + live-реализации |
+| `RecordingComponentFactories` | `RecordingComponentFactories.swift` | DI-протоколы: `EncoderControlling`, `WriterControlling`, `EncoderFactory`, `WriterFactory`, `SourceFactory` + live-реализации; `makeCameraSource(… cameraPlan:)` — единственная точка включения `StabilizingVideoSource` (#297) |
 | `StageRateAggregator` | `StageRateAggregator.swift` | Телеметрия: per-stage частоты, причины drop'ов, лаги; flush в логи в конце сессии |
 
 Где искать:
@@ -101,6 +101,39 @@ drop'ов, резолв возможностей железа.
   (разный fps для экрана и камеры), без общего тика из `RecordingSession`.
 - Роутинг — хранимые `Task`-хэндлы (не inline `withTaskGroup`), чтобы stop мог
   погасить один пайплайн, пока второй работает.
+
+## Стабилизация — `Onset/Recording/Stabilize/` (#297)
+
+Опциональный этап стабилизации изображения камеры (тумблер, default OFF): подавление
+высокочастотной тряски 1–3 px (вибрация от набора текста) на record-пути камеры. Превью и
+screen-путь не затрагиваются. Основа: research `docs/research/camera-stabilization.md`,
+спека `docs/specs/2026-07-02-camera-stabilization.md`.
+
+| Тип | Файл | Роль |
+|---|---|---|
+| `StabilizingVideoSource` | `StabilizingVideoSource.swift` | Актор-декоратор `VideoFrameSource & AudioSampleSource` над record-`CameraSource`: eager-drain в слот глубины 1 (атрибуция потерь этапу, не capture), warm-up (60 кадров, медиана интервалов ≥40 мс → estScale 3×, иначе 2×), freeze при сбое оценки, one-way bypass при перегрузе (>5% вытеснений слота в 2 последовательных окнах 10 s ИЛИ 60 ошибок подряд; correction рампится ≤0.1 px/кадр), merged `drops`, диагностика через `StabilizationDiagnosticsProviding` |
+| `StabilizationSmoother` | `StabilizationSmoother.swift` | Чистый каузальный lock-with-slow-recenter: `cum += shift; ref += clamp(α·(cum−ref), ±maxRefStep); correction = ref − cum` (α=0.05, maxRefStep=0.01 px/кадр в 1080p-эквиваленте); знак `correction = −alignmentTransform` закреплён тестом (AC-6). Рядом: `StabilizationWarmUp`, `StabilizationOverloadDetector`, `StabilizationTuning`, `StabilizationVector` |
+| `StabilizationRenderer` | `StabilizationRenderer.swift` | Impure GPU-часть за швом `StabilizationStage`: Vision `VNTranslationalImageRegistrationRequest` на 1080p-эквивалентном апскейле (двойная буферизация) + CI-рендер translate → clampToExtent → session-fixed crop → изотропный scale-back в НОВЫЙ 420v-буфер из пула (threshold 12); всё на выделенной serial-очереди за checked-continuation-мостом; `os_signpost`-интервалы оценки/рендера |
+| `StabilizationTelemetry` | `StabilizationTelemetry.swift` | Чистая агрегация латентности p50/p95 (AC-8) + строка отчёта сессии; `StabilizationDiagnostics` — конечная диагностика этапа для `RecordingSession` |
+
+Где искать:
+
+- Включение этапа → `LiveSourceFactory.makeCameraSource` (обёртка при
+  `ResolvedCameraPlan.stabilization != nil`); геометрия кропа →
+  `CapabilityResolver.makeStabilizationPlan` (1080p: `(16, 9, 1888, 1062)`, ×1.016949).
+- Настройка → `AppSettings.cameraStabilization` → `RecordingConfiguration.cameraStabilization`
+  (цепочка `cameraMirror`-паттерна, `.nextRecordingStart`).
+- Телеметрия → `DropSource.stabilizeCamera` / `DropReason.stabilizationDrops`
+  (diagnostic-only) и bypass/латентность в техническом отчёте сессии.
+- Инструменты приёмки AC-1/AC-2 → `tools/verify-stabilization/` (unsandboxed-запуск).
+
+Конвенции:
+
+- Вход read-only, рендер каждого кадра без исключений (raw-passthrough запрещён —
+  zoom-flicker), PTS/isHoldRepeat переносятся как есть (инвариант единой T0).
+- Drain-цикл никогда не суспендится на работе этапа: выбросы Vision (85–250 мс) гасятся
+  вытеснением слота, а не утечкой в capture-счётчики обёрнутого источника.
+- Возврата из bypass и пере-выбора estScale внутри сессии нет.
 
 ## Кодирование — `Onset/Encode/`
 

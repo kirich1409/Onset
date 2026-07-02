@@ -215,6 +215,31 @@ test host получает sticky deny до `tccutil reset ScreenCapture` + по
 3. `PlistBuddy -c "Set :TestConfigurations:0:TestTargets:0:EnvironmentVariables:<VAR> <VALUE>" copy.xctestrun`.
 4. `xcodebuild test-without-building -xctestrun copy.xctestrun`.
 
+#### Стабилизация камеры — методика AC-1/AC-2 (#297, приёмка в #298)
+
+Верификация стабилизации (спека `docs/specs/2026-07-02-camera-stabilization.md`) — на
+референсном железе (MX Brio, M3 Max), инструменты `tools/verify-stabilization/`
+(сборка/unsandboxed-запуск — README каталога):
+
+- **AC-1 (подавление тряски, только @1080p).** Реальная typing-запись с включённой
+  стабилизацией, ≥60 s, первые ≥5 s без набора (warm-up вне стимула). Метрика считается
+  ПОСЛЕ завершения warm-up (с кадра 61; момент — из лога
+  `stabilization warm-up complete`): lock-to-ref (2 s rolling mean) **max ≤ 1 px** по
+  `translational2x`; целочисленный `measure-shake` — **0 движущихся пар** на размеченном
+  статичном сегменте той же записи (под активным набором). **Гейт валидности стимула:**
+  back-to-back OFF-запись той же сцены обязана показывать lock-to-ref max > 2 px, иначе
+  прогон невалиден и повторяется.
+- **AC-2 (свежесть кадров).** N ≥ 3 пар ON/OFF на КАЖДОЕ разрешение (1080p и 4K),
+  back-to-back, одна сцена с непрерывным движением, БЕЗ вибро-стимула:
+  `median(fresh_fps(ON)) ≥ median(fresh_fps(OFF)) × 0.95`, медианы раздельно по
+  разрешениям. Гейты A/B `verify-cfr.sh` — у всех записей; абсолютный гейт C для этих
+  прогонов отключается (`MIN_FRESH_FPS=0`), значение берётся из машинной строки
+  `FRESH_FPS=…`.
+- **AC-8 (латентность).** Тихая машина, camera+screen одновременно (screen — нативный
+  4K60): p50 (оценка+рендер) ≤ 0.8 × медианного межкадрового интервала warm-up той же
+  сессии (адаптивный порог); p50/p95 — строка «латентность этапа» в техническом отчёте
+  сессии; лог выбора estScale — обязательный артефакт замера.
+
 ### 4.4 Негативный контроль
 
 Baseline записи с багом (до #102): camera 2.88 fps fresh, screen 42.3/60 pkt/s. Файлы:

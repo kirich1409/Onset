@@ -2,7 +2,7 @@
 
 Детальное описание пути видеокадра с камеры от захвата до записи в файл:
 текущий дизайн, испробованные подходы и причины их отклонения, известные
-ограничения. Срез по состоянию `main` (2026-06-07).
+ограничения. Срез по состоянию `main` (2026-07-02).
 
 ---
 
@@ -20,6 +20,22 @@ videoQueue (.userInteractive)
 
 AsyncStream<VideoFrame>  .bufferingNewest(4)
   └─ overflow → evict oldest + DropEvent(.encoderBackpressureDrops)
+
+[опционально, #297: тумблер «Стабилизация камеры» ON → LiveSourceFactory
+ оборачивает CameraSource в StabilizingVideoSource; OFF → декоратора нет]
+StabilizingVideoSource  (actor-декоратор, только record-путь)
+  └─ eager-drain: вход → слот глубины 1 (newest wins)
+       └─ вытеснение → DropEvent(.stabilizeCamera, .stabilizationDrops)
+  └─ warm-up 60 кадров (медиана интервалов ≥40 мс → estScale 3×, иначе 2×)
+  └─ StabilizationRenderer (serial queue, continuation-мост):
+       Vision translational на 1080p-эквивалентном апскейле →
+       StabilizationSmoother (pure, correction = −alignmentTransform) →
+       CI translate → clampToExtent → session-fixed crop → scale-back →
+       НОВЫЙ CVPixelBuffer 420v из пула (threshold 12)
+  └─ выход AsyncStream<VideoFrame> .bufferingNewest(4)
+       └─ overflow → DropEvent(.stabilizeCamera, .encoderBackpressureDrops)
+  └─ bypass при перегрузе (>5% вытеснений 2×10 s ИЛИ 60 ошибок подряд):
+       оценка стоп, геометрия рендерится, correction рампится к нулю
 
 VideoEncoder.framesTask  (actor, for await …)
   └─ ingest(frame:)
