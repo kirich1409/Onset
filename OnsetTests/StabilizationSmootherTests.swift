@@ -267,4 +267,26 @@ struct StabilizationLatencyAggregatorTests {
         #expect(line.contains("estScale=не выбран"))
         #expect(!line.contains("p50="))
     }
+
+    @Test("Report line carries the cumulative error count and the zero-correction fraction")
+    func reportLine_containsErrorCountAndZeroCorrectionFraction() {
+        var aggregator = StabilizationLatencyAggregator()
+        aggregator.record(totalMs: 31.2)
+        let line = aggregator.reportLine(
+            estScale: 3,
+            warmUpMedianIntervalMs: 48.3,
+            errorCount: 7,
+            zeroCorrectionFraction: 0.25
+        )
+        #expect(line.contains("ошибок оценки/рендера: 7"))
+        #expect(line.contains("доля нулевой коррекции: 25.0%"))
+    }
+
+    @Test("Zero-correction fraction states 'not measured' when nil")
+    func reportLine_zeroCorrectionFraction_nilStatesNotMeasured() {
+        let aggregator = StabilizationLatencyAggregator()
+        let line = aggregator.reportLine(estScale: nil, warmUpMedianIntervalMs: nil)
+        #expect(line.contains("доля нулевой коррекции: не измерена"))
+        #expect(line.contains("ошибок оценки/рендера: 0"))
+    }
 }

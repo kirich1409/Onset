@@ -67,18 +67,36 @@ nonisolated struct StabilizationLatencyAggregator {
     ///     completed (short session / early bypass).
     ///   - warmUpMedianIntervalMs: The warm-up's median inter-frame interval, ms — the base of
     ///     the AC-8 adaptive threshold (`p50 ≤ 0.8 × median interval`).
+    ///   - errorCount: Cumulative estimation/render error count this session (never reset by a
+    ///     successful frame, unlike the bypass streak) — default `0` for callers that have no
+    ///     error tracking to report.
+    ///   - zeroCorrectionFraction: Fraction of stabilized frames delivered with an
+    ///     effectively-zero applied correction, or `nil` when no frames were stabilized.
     /// - Returns: A single report line; a stage that measured no stabilized frames states so
     ///   explicitly instead of fabricating percentiles.
-    nonisolated func reportLine(estScale: Int?, warmUpMedianIntervalMs: Double?) -> String {
+    nonisolated func reportLine(
+        estScale: Int?,
+        warmUpMedianIntervalMs: Double?,
+        errorCount: Int = 0,
+        zeroCorrectionFraction: Double? = nil
+    )
+    -> String {
         let p50Fraction = 0.5
         let p95Fraction = 0.95
+        let percentPerFraction = 100.0
         let scalePart = estScale.map { "estScale=\($0)×" } ?? "estScale=не выбран"
         let intervalPart = warmUpMedianIntervalMs
             .map { "медианный интервал warm-up=\(StabilizationFormat.oneDecimal($0)) мс" }
             ?? "медианный интервал warm-up=не измерен"
+        let errorPart = "ошибок оценки/рендера: \(errorCount)"
+        let zeroCorrectionPart = zeroCorrectionFraction
+            .map { "доля нулевой коррекции: \(StabilizationFormat.oneDecimal($0 * percentPerFraction))%" }
+            ?? "доля нулевой коррекции: не измерена"
+
         guard !self.samplesMs.isEmpty else {
             return "Стабилизация камеры — латентность этапа (оценка+рендер): "
-                + "нет измеренных кадров (warm-up/bypass); \(scalePart); \(intervalPart)"
+                + "нет измеренных кадров (warm-up/bypass); \(scalePart); \(intervalPart); "
+                + "\(errorPart); \(zeroCorrectionPart)"
         }
         // Sort once: percentileMs(_:) sorts independently per call, which would sort the
         // session's ~45k-sample array twice back-to-back at session stop for no benefit.
@@ -87,7 +105,7 @@ nonisolated struct StabilizationLatencyAggregator {
         let p95 = sorted[min(sorted.count - 1, Int(Double(sorted.count) * p95Fraction))]
         return "Стабилизация камеры — латентность этапа (оценка+рендер): "
             + "p50=\(StabilizationFormat.oneDecimal(p50)) мс, p95=\(StabilizationFormat.oneDecimal(p95)) мс "
-            + "(кадров: \(self.count); \(scalePart); \(intervalPart))"
+            + "(кадров: \(self.count); \(scalePart); \(intervalPart); \(errorPart); \(zeroCorrectionPart))"
     }
 }
 

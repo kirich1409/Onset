@@ -145,6 +145,23 @@ actor StabilizingVideoSource: VideoFrameSource, AudioSampleSource {
     /// Number of consecutive errors that engages bypass (injectable for tests).
     private let consecutiveErrorLimit: Int
 
+    /// Cumulative estimation/render error count this session (AC-8). Unlike `consecutiveErrors`
+    /// (a streak reset by success), this never resets — a session with hundreds of sub-limit
+    /// errors is visible in the report instead of looking perfectly clean.
+    private var stabilizationErrorCount = 0
+
+    /// Total stabilized frames delivered in the `.stabilizing` phase — the AC-8 zero-correction
+    /// fraction's denominator.
+    private var stabilizedFrameCount = 0
+
+    /// Stabilized frames delivered with an effectively-zero applied correction (both axes below
+    /// `Self.zeroCorrectionThresholdPx`) — the AC-8 zero-correction fraction's numerator.
+    private var zeroCorrectionFrameCount = 0
+
+    /// Threshold below which an applied correction counts as "no visible correction" for the
+    /// AC-8 zero-correction fraction.
+    private static let zeroCorrectionThresholdPx = 0.5
+
     /// AC-8 latency aggregation (estimation + render, per stabilized frame).
     private var latency = StabilizationLatencyAggregator()
 
@@ -486,6 +503,7 @@ actor StabilizingVideoSource: VideoFrameSource, AudioSampleSource {
 
         switch await self.renderAndDeliver(frame, correction: self.lastCorrectionPlan) {
         case .delivered:
+            self.recordDeliveredFrame()
             if frameHadError {
                 self.noteFrameError(detectedAt: frame.ptsHostTime)
             } else {
@@ -547,9 +565,32 @@ actor StabilizingVideoSource: VideoFrameSource, AudioSampleSource {
     /// Registers one estimation/render error; the shared streak engages bypass at the limit.
     private func noteFrameError(detectedAt: CMTime) {
         self.consecutiveErrors += 1
+        self.stabilizationErrorCount += 1
         if self.consecutiveErrors >= self.consecutiveErrorLimit {
             self.enterBypass(reason: "\(self.consecutiveErrors) consecutive stage errors", detectedAt: detectedAt)
         }
+    }
+
+    /// Whether `correction` counts as "no visible correction" for the AC-8 zero-correction
+    /// fraction — both axes within `Self.zeroCorrectionThresholdPx`.
+    private func isZeroCorrection(_ correction: StabilizationVector) -> Bool {
+        abs(correction.deltaX) < Self.zeroCorrectionThresholdPx
+            && abs(correction.deltaY) < Self.zeroCorrectionThresholdPx
+    }
+
+    /// Records AC-8 zero-correction bookkeeping for one delivered stabilized frame.
+    private func recordDeliveredFrame() {
+        self.stabilizedFrameCount += 1
+        if self.isZeroCorrection(self.lastCorrectionPlan) {
+            self.zeroCorrectionFrameCount += 1
+        }
+    }
+
+    /// Fraction of stabilized frames delivered with an effectively-zero applied correction, or
+    /// `nil` when no frames were stabilized this session (AC-8 report).
+    private var zeroCorrectionFraction: Double? {
+        guard self.stabilizedFrameCount > 0 else { return nil }
+        return Double(self.zeroCorrectionFrameCount) / Double(self.stabilizedFrameCount)
     }
 
     /// Engages bypass: estimation stops (released lazily by the work task), the session-fixed
@@ -611,7 +652,9 @@ extension StabilizingVideoSource: StabilizationDiagnosticsProviding {
         StabilizationDiagnostics(
             latencyLine: self.latency.reportLine(
                 estScale: self.chosenEstScale,
-                warmUpMedianIntervalMs: self.warmUpMedianIntervalMs
+                warmUpMedianIntervalMs: self.warmUpMedianIntervalMs,
+                errorCount: self.stabilizationErrorCount,
+                zeroCorrectionFraction: self.zeroCorrectionFraction
             ),
             bypassAtSeconds: self.bypassAtSeconds
         )
