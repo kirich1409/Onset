@@ -224,10 +224,15 @@ nonisolated enum CapabilityResolver {
     /// Margin formula (spec #297): `marginX = roundEven(16 × planWidth / 1920)`,
     /// `marginY = marginX × 9/16` — for the 16:9 planned frames the camera pipeline produces
     /// (`CameraFormatSelector` picks 16:9 formats only), the resulting rect is exactly 16:9 with
-    /// even dimensions: 1080p → `(16, 9, 1888, 1062)` (scale-back ×1.016949), 4K →
-    /// `(32, 18, 3776, 2124)`. Crop dimensions stay even for any even input because both margins
-    /// are subtracted twice; `marginX` is additionally floored at the even minimum so a
-    /// degenerate tiny plan can never produce an empty crop.
+    /// even dimensions ONLY at the canonical 1080p/4K plan widths (1920/3840) this pipeline
+    /// actually plans at: 1080p → `(16, 9, 1888, 1062)` (scale-back ×1.016949), 4K →
+    /// `(32, 18, 3776, 2124)`. Other even plan widths still get an even-dimensioned crop, but it
+    /// is only NEAR 16:9 (the even-rounding of `marginX`/`marginY` does not cancel exactly) —
+    /// the isotropic scale-back's resulting sub-pixel underfill is handled by the renderer's
+    /// clamp-to-output-extent guard (`StabilizationRenderer.renderOnQueue`). Crop dimensions
+    /// stay even for any even input because both margins are subtracted twice; `marginX` is
+    /// additionally floored at the even minimum so a degenerate tiny plan can never produce an
+    /// empty crop.
     ///
     /// - Parameters:
     ///   - planWidth: Planned (even) camera frame width in pixels.

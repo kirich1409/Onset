@@ -397,7 +397,14 @@ nonisolated final class StabilizationRenderer: StabilizationStage, @unchecked Se
         // isotropically to the planned dimensions (translate FIRST, then scale).
         let toOutput = CGAffineTransform(translationX: -self.cropRect.minX, y: -self.cropRect.minY)
             .concatenating(CGAffineTransform(scaleX: self.scaleBack, y: self.scaleBack))
-        context.render(translated.transformed(by: toOutput), to: output)
+        // clampedToExtent + crop-to-output: the isotropic scale-back only covers the output
+        // extent exactly for the canonical 1920/3840 plan widths; other even widths leave a
+        // sub-pixel gap on one axis (e.g. 1280×720 → crop 1260×708 → scaleBack 1280/1260 →
+        // scaled height 719.24 < 720) that CIContext.render never writes, exposing stale pooled
+        // buffer contents as a flickering edge line. This bounds the render to the full output
+        // rect (edge-clamped fill for the gap; a no-op for the canonical widths).
+        let outputRect = CGRect(x: 0, y: 0, width: self.outputWidth, height: self.outputHeight)
+        context.render(translated.transformed(by: toOutput).clampedToExtent().cropped(to: outputRect), to: output)
 
         // PTS and hold flag carry over verbatim — the single-T0 invariant (AC-7).
         return VideoFrame(pixelBuffer: output, ptsHostTime: frame.ptsHostTime, isHoldRepeat: frame.isHoldRepeat)
