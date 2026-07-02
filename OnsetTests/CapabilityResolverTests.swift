@@ -27,8 +27,11 @@ private func makeCamera(pixelWidth: Int32, pixelHeight: Int32, maxFps: Double) -
 // MARK: - CapabilityResolver tests
 
 // type_body_length: single-concern suite covering all CapabilityResolver pure-math paths;
-// kept in one struct so the shared `config` fixture is visible everywhere.
-// swiftlint:disable type_body_length
+// kept in one struct so the shared `config` fixture is visible everywhere. file_length: the
+// #297 stabilization-plan cases (AC-3 zero-regression gate) belong in this same suite for the
+// shared `makeDisplay`/`makeCamera` fixtures — file_length stays disabled through EOF (a
+// whole-file rule; re-enabling before the last line would re-trigger on the total count).
+// swiftlint:disable file_length type_body_length
 @Suite("CapabilityResolver.resolveStartProfile — pure budget math")
 struct CapabilityResolverTests {
     private let config = RecordingConfiguration.mvpDefault
@@ -351,6 +354,100 @@ struct CapabilityResolverTests {
         }
         #expect(cameraPlan.width == 3840)
         #expect(cameraPlan.height == 2160)
+    }
+
+    // MARK: - Stabilization plan (#297)
+
+    // Exact geometry per CapabilityResolver.makeStabilizationPlan: marginX = roundEven(16 ×
+    // planWidth / 1920), marginY = marginX × 9/16, crop = plan − 2×margin per axis,
+    // scaleBack = planWidth / cropWidth. Independently re-derived and cross-checked against the
+    // resolver's own arithmetic (not hand-guessed) before being pinned here.
+
+    @Test("Stabilization OFF — cameraPlan.stabilization stays nil (AC-3 zero-regression gate)")
+    func resolve_withStabilizationOff_leavesCameraPlanUnstabilized() {
+        let offConfig = RecordingConfiguration.makeMVPDefault(cameraStabilization: false)
+        let display = makeDisplay(pixelWidth: 1920, pixelHeight: 1080, refreshHz: 60.0)
+        let camera = makeCamera(pixelWidth: 1920, pixelHeight: 1080, maxFps: 30.0)
+
+        let plan = CapabilityResolver.resolveStartProfile(
+            display: display,
+            cameraFormat: camera,
+            config: offConfig
+        )
+
+        guard let cameraPlan = plan.cameraPlan else {
+            Issue.record("Expected a camera plan, but got nil")
+            return
+        }
+        #expect(cameraPlan.stabilization == nil)
+    }
+
+    @Test("Stabilization ON at 1080p — exact crop rect + scale-back")
+    func resolve_withStabilizationOn_1080pCamera_producesExactCropAndScaleBack() {
+        let onConfig = RecordingConfiguration.makeMVPDefault(cameraStabilization: true)
+        let display = makeDisplay(pixelWidth: 1920, pixelHeight: 1080, refreshHz: 60.0)
+        let camera = makeCamera(pixelWidth: 1920, pixelHeight: 1080, maxFps: 30.0)
+
+        let plan = CapabilityResolver.resolveStartProfile(
+            display: display,
+            cameraFormat: camera,
+            config: onConfig
+        )
+
+        guard let stabilization = plan.cameraPlan?.stabilization else {
+            Issue.record("Expected a stabilization plan, but got nil")
+            return
+        }
+        #expect(stabilization.cropRect == CGRect(x: 16, y: 9, width: 1888, height: 1062))
+        let tolerance = 1e-9
+        #expect(abs(stabilization.scaleBack - 1920.0 / 1888.0) < tolerance)
+    }
+
+    @Test("Stabilization ON at 4K — exact crop rect + scale-back")
+    func resolve_withStabilizationOn_4KCamera_producesExactCropAndScaleBack() {
+        let onConfig = RecordingConfiguration.makeMVPDefault(cameraStabilization: true)
+        let display = makeDisplay(pixelWidth: 3840, pixelHeight: 2160, refreshHz: 60.0)
+        let camera = makeCamera(pixelWidth: 3840, pixelHeight: 2160, maxFps: 30.0)
+
+        let plan = CapabilityResolver.resolveStartProfile(
+            display: display,
+            cameraFormat: camera,
+            config: onConfig
+        )
+
+        guard let stabilization = plan.cameraPlan?.stabilization else {
+            Issue.record("Expected a stabilization plan, but got nil")
+            return
+        }
+        #expect(stabilization.cropRect == CGRect(x: 32, y: 18, width: 3776, height: 2124))
+        let tolerance = 1e-9
+        #expect(abs(stabilization.scaleBack - 3840.0 / 3776.0) < tolerance)
+    }
+
+    @Test(
+        "Stabilization ON at a degenerate minimal 16:9 plan — crop stays valid (even-margin floor doesn't collapse it)"
+    )
+    func resolve_withStabilizationOn_minimalCamera_cropStaysValid() {
+        let onConfig = RecordingConfiguration.makeMVPDefault(cameraStabilization: true)
+        let display = makeDisplay(pixelWidth: 1920, pixelHeight: 1080, refreshHz: 60.0)
+        // 64×36 is well below the reference width (1920) — the raw margin formula rounds to
+        // 0 px; makeStabilizationPlan floors marginX at minEvenDimension (2 px) so the crop
+        // never collapses to zero or negative size.
+        let camera = makeCamera(pixelWidth: 64, pixelHeight: 36, maxFps: 30.0)
+
+        let plan = CapabilityResolver.resolveStartProfile(
+            display: display,
+            cameraFormat: camera,
+            config: onConfig
+        )
+
+        guard let stabilization = plan.cameraPlan?.stabilization else {
+            Issue.record("Expected a stabilization plan, but got nil")
+            return
+        }
+        #expect(stabilization.cropRect.width > 0)
+        #expect(stabilization.cropRect.height > 0)
+        #expect(stabilization.cropRect == CGRect(x: 2, y: 1, width: 60, height: 34))
     }
 }
 
