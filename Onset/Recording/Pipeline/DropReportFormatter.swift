@@ -56,13 +56,17 @@ nonisolated enum DropReportFormatter {
         let degradedLine = snapshot.sessionEverDegraded ? "да" : "нет"
         let holdDrops = self.holdDrops(breakdown: breakdown, counters: counters)
 
-        // Stage-internal drops (#297): slot eviction / pool exhaustion / render failure —
-        // the fresh frame is lost (the tick is refilled by a downstream hold-repeat).
-        let stageDrops = breakdown.stabilizeCamera - breakdown.bpStabilizeCamera
-
         let stabilizationBlock = self.stabilizationBlock(
             bypassAtSeconds: breakdown.stabilizationBypassAtSeconds,
             latencyLine: stabilizationLatencyLine
+        )
+
+        // AC-3: gated by the SAME signal as the trailing block — `stabilizationLatencyLine != nil`
+        // — so an OFF report carries no stabilization mention at all, byte-identical to the
+        // pre-#297 format.
+        let stabilizationFragments = self.stabilizationLossFragments(
+            isActive: stabilizationLatencyLine != nil,
+            breakdown: breakdown
         )
 
         return """
@@ -72,9 +76,7 @@ nonisolated enum DropReportFormatter {
         Реальные потери кадров (необратимо)
           Кодировщик backpressure — экран: \(breakdown.bpEncodeScreen)
           Кодировщик backpressure — камера: \(breakdown.bpEncodeCamera)
-          Стабилизация — этап (камера): \(stageDrops)
-          Стабилизация — backpressure на выходе (камера): \(breakdown.bpStabilizeCamera)
-          Захват — экран: \(breakdown.captureScreen)
+        \(stabilizationFragments.lossLines)  Захват — экран: \(breakdown.captureScreen)
           Захват — камера (видео): \(breakdown.captureCameraVideo)
           Захват — камера (аудио): \(breakdown.captureCameraAudio)
 
@@ -88,8 +90,7 @@ nonisolated enum DropReportFormatter {
           Камера, аудио (захват): \(breakdown.captureCameraAudio)
           Кодировщик (экран): \(breakdown.encodeScreen)
           Кодировщик (камера): \(breakdown.encodeCamera)
-          Стабилизация (камера): \(breakdown.stabilizeCamera)
-          Запись в файл: \(breakdown.writer)
+        \(stabilizationFragments.breakdownLine)  Запись в файл: \(breakdown.writer)
 
         Острая деградация (всплеск backpressure): \(degradedLine)
         Основная причина: \(self.causeDescription(snapshot.dominantCause))
@@ -107,6 +108,27 @@ nonisolated enum DropReportFormatter {
         let encoderTotal = breakdown.encodeScreen + breakdown.encodeCamera
         let encoderBpTotal = breakdown.bpEncodeScreen + breakdown.bpEncodeCamera
         return encoderTotal - encoderBpTotal - counters.cfrNormalizationDrops
+    }
+
+    // MARK: - Stabilization loss fragments (#297 AC-3/AC-4)
+
+    /// Two per-lane stabilization lines: `lossLines` (real-loss section, AC-4) and
+    /// `breakdownLine` (per-source breakdown section). Both are the empty string when `isActive`
+    /// is `false` — the AC-3 gate — so an OFF report carries no stabilization mention at all,
+    /// byte-identical to the pre-#297 format.
+    nonisolated private static func stabilizationLossFragments(
+        isActive: Bool,
+        breakdown: DropBreakdown
+    )
+    -> (lossLines: String, breakdownLine: String) {
+        guard isActive else { return ("", "") }
+        // Stage-internal drops (#297): slot eviction / pool exhaustion / render failure — the
+        // fresh frame is lost (the tick is refilled by a downstream hold-repeat).
+        let stageDrops = breakdown.stabilizeCamera - breakdown.bpStabilizeCamera
+        let lossLines = "  Стабилизация — этап (камера): \(stageDrops)\n"
+            + "  Стабилизация — backpressure на выходе (камера): \(breakdown.bpStabilizeCamera)\n"
+        let breakdownLine = "  Стабилизация (камера): \(breakdown.stabilizeCamera)\n"
+        return (lossLines, breakdownLine)
     }
 
     // MARK: - Stabilization block (#297 AC-4/AC-8)

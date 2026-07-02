@@ -220,18 +220,36 @@ struct DropReportFormatterTests {
 @Suite("DropReportFormatter — stabilization lines (#297)")
 struct DropReportFormatterStabilizationTests {
     /// AC-4: stage drops are split into stage-internal loss and output backpressure, and the
-    /// per-source breakdown carries the stage's all-reason total.
+    /// per-source breakdown carries the stage's all-reason total. Stabilization ON (non-nil
+    /// latency line) is what makes these lines render at all (AC-3 gate).
     @Test("Stabilization drops render as stage-internal and output-backpressure lines")
     func report_stabilizationDropLines() {
         // stabilizeCamera total 25 = 18 stage-internal + 7 output backpressure.
         let text = makeReport(
             encoderBackpressureDrops: 7,
-            breakdown: makeBreakdown(stabilizeCamera: 25, bpStabilizeCamera: 7)
+            breakdown: makeBreakdown(stabilizeCamera: 25, bpStabilizeCamera: 7),
+            stabilizationLatencyLine: "Стабилизация камеры — латентность этапа: p50=31.2 мс, p95=41.0 мс"
         )
 
         #expect(text.contains("Стабилизация — этап (камера): 18"))
         #expect(text.contains("Стабилизация — backpressure на выходе (камера): 7"))
         #expect(text.contains("Стабилизация (камера): 25"))
+    }
+
+    /// AC-3: with stabilization off (nil latency line) the three per-lane stabilization lines
+    /// must not render at all, even when the breakdown carries non-zero stabilizeCamera counts —
+    /// the OFF report must be byte-identical to the pre-#297 format, which never mentioned
+    /// stabilization. Non-zero counters here prove the gate is on `stabilizationLatencyLine`,
+    /// not on the counter values themselves.
+    @Test("Stage-off session omits the per-lane stabilization drop lines")
+    func report_stageOffOmitsStabilizationDropLines() {
+        let text = makeReport(
+            breakdown: makeBreakdown(stabilizeCamera: 25, bpStabilizeCamera: 7)
+        )
+
+        #expect(!text.contains("Стабилизация — этап (камера):"))
+        #expect(!text.contains("Стабилизация — backpressure на выходе (камера):"))
+        #expect(!text.contains("Стабилизация (камера):"))
     }
 
     /// AC-4: a bypass transition is reported with the session-relative second of the switch.
