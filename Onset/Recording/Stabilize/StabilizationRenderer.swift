@@ -90,7 +90,15 @@ nonisolated protocol StabilizationStage: Sendable {
     /// Upscales `frame` into the current estimation buffer and registers it against the
     /// previously ingested frame.
     ///
-    /// - Returns: The raw translational shift in ESTIMATION-BUFFER pixels, or `nil` for the
+    /// SIGN CONTRACT (AC-6, single definition for live AND fake implementations): the returned
+    /// shift is the OBSERVED CONTENT DISPLACEMENT of `frame` relative to the previous frame —
+    /// content that moved +Δ px yields shift = +Δ. The smoother then produces
+    /// `correction ≈ −shift`, which translates the content back. Any estimator whose native
+    /// convention differs (Vision's `alignmentTransform` maps the floating image ONTO the
+    /// reference, i.e. −displacement) must convert at ITS OWN boundary, never downstream.
+    /// Pinned end-to-end by `StabilizationSignTests`.
+    ///
+    /// - Returns: The content displacement in ESTIMATION-BUFFER pixels, or `nil` for the
     ///   first frame after activation (no pair yet).
     /// - Throws: `StabilizationStageError.estimationFailed` on a Vision failure. The frame
     ///   still becomes the "previous" of the next pair.
@@ -346,8 +354,13 @@ nonisolated final class StabilizationRenderer: StabilizationStage, @unchecked Se
         guard let observation = request.results?.first else {
             throw StabilizationStageError.estimationFailed
         }
+        // Sign conversion at the Vision boundary (AC-6): `alignmentTransform` is the transform
+        // that maps the FLOATING image (current) onto the REFERENCE (previous) — the INVERSE of
+        // the content displacement. The stage contract (see `StabilizationStage.estimateShift`)
+        // is "shift = observed content displacement", so negate here. Empirically pinned by
+        // StabilizationSignTests: without the negation the rendered correction lands ~2Δ away.
         let transform = observation.alignmentTransform
-        return StabilizationVector(deltaX: Double(transform.tx), deltaY: Double(transform.ty))
+        return StabilizationVector(deltaX: -Double(transform.tx), deltaY: -Double(transform.ty))
     }
 
     // MARK: Render (on queue)

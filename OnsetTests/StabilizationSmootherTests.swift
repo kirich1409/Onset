@@ -19,8 +19,10 @@ struct StabilizationSmootherTests {
         var smoother = StabilizationSmoother()
         let correction = smoother.ingest(shift: StabilizationVector(deltaX: 2.0, deltaY: -1.0))
         // ref moved at most maxRefStep toward cum, so correction = ref − cum ≈ −shift.
-        #expect(abs(correction.deltaX - -2.0) <= StabilizationTuning.maxRefStep)
-        #expect(abs(correction.deltaY - 1.0) <= StabilizationTuning.maxRefStep)
+        // 1e-9 slack: 0.01 is not exactly representable in binary floating point, so the
+        // residual can exceed the literal by a few ULPs (observed 0.010000000000000009).
+        #expect(abs(correction.deltaX - -2.0) <= StabilizationTuning.maxRefStep + 1e-9)
+        #expect(abs(correction.deltaY - 1.0) <= StabilizationTuning.maxRefStep + 1e-9)
         #expect(correction.deltaX < 0)
         #expect(correction.deltaY > 0)
     }

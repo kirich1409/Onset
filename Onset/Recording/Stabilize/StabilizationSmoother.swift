@@ -14,10 +14,12 @@
 // planWidth / 1920`). This keeps `alpha` / `maxRefStep` at their empirically tuned meaning
 // (spike #295) at any planned resolution.
 //
-// Sign (AC-6): `correction = ref − cum` where `cum` accumulates the raw Vision
-// `alignmentTransform` shifts — for a lock-tight reference this is `correction ≈
-// −alignmentTransform`. Empirically validated by the spike: the "+" sign DOUBLES the shake.
-// Pinned by `StabilizationSignTests`.
+// Sign (AC-6): `correction = ref − cum` where `cum` accumulates OBSERVED CONTENT DISPLACEMENTS
+// (the `StabilizationStage.estimateShift` contract: content moved +Δ → shift = +Δ) — for a
+// lock-tight reference this is `correction ≈ −displacement`, which translates the content back.
+// Vision's `alignmentTransform` has the OPPOSITE native convention (it maps the floating image
+// onto the reference) and is negated at the renderer boundary — never here. Empirically pinned
+// end-to-end by `StabilizationSignTests`: a flipped sign lands the render ~2Δ away.
 
 import Foundation
 

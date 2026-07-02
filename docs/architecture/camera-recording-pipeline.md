@@ -29,7 +29,7 @@ StabilizingVideoSource  (actor-декоратор, только record-путь)
   └─ warm-up 60 кадров (медиана интервалов ≥40 мс → estScale 3×, иначе 2×)
   └─ StabilizationRenderer (serial queue, continuation-мост):
        Vision translational на 1080p-эквивалентном апскейле →
-       StabilizationSmoother (pure, correction = −alignmentTransform) →
+       StabilizationSmoother (pure, correction = −смещение контента; знак Vision инвертируется в рендерере) →
        CI translate → clampToExtent → session-fixed crop → scale-back →
        НОВЫЙ CVPixelBuffer 420v из пула (threshold 12)
   └─ выход AsyncStream<VideoFrame> .bufferingNewest(4)
