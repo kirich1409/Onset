@@ -42,13 +42,16 @@ nonisolated enum DropReportFormatter {
     ///   - breakdown: Per-source diagnostic drop counts (`DropBreakdown`).
     ///   - sessionEverDegraded: `true` when the session transitioned to `.degraded` at least once.
     ///   - dominantCause: The backpressure stage that accumulated the most drops, or `.notDegraded`.
+    ///   - stabilizationLatencyLine: The stage's latency summary (#297 AC-8), or `nil` when the
+    ///     stabilization stage was not active this session (the line is then omitted entirely).
     /// - Returns: The complete report text, terminated by a trailing newline.
     nonisolated static func report(
         timestamp: Date,
         counters: DropCounters,
         breakdown: DropBreakdown,
         sessionEverDegraded: Bool,
-        dominantCause: DropCause
+        dominantCause: DropCause,
+        stabilizationLatencyLine: String?
     )
     -> String {
         let formattedTimestamp = RecordingOutput.makeDateFormatter().string(from: timestamp)
@@ -56,10 +59,24 @@ nonisolated enum DropReportFormatter {
 
         // Hold repeats: all encoder events minus backpressure minus CFR normalization.
         // Safe because encoder sources only emit encoderBackpressureDrops, encoderHoldDrops, and
-        // cfrNormalizationDrops — capture sources never emit CFR or hold events.
+        // cfrNormalizationDrops — capture sources never emit CFR or hold events. The stabilization
+        // stage's events live in their own breakdown bucket and do not affect this arithmetic.
         let encoderTotal = breakdown.encodeScreen + breakdown.encodeCamera
         let encoderBpTotal = breakdown.bpEncodeScreen + breakdown.bpEncodeCamera
         let holdDrops = encoderTotal - encoderBpTotal - counters.cfrNormalizationDrops
+
+        // Stage-internal drops (#297): slot eviction / pool exhaustion / render failure —
+        // the fresh frame is lost (the tick is refilled by a downstream hold-repeat).
+        let stageDrops = breakdown.stabilizeCamera - breakdown.bpStabilizeCamera
+
+        // Optional trailing stabilization block (#297 AC-4/AC-8): the latency line is present
+        // only when the stage ran; the bypass line always accompanies it.
+        let stabilizationBlock: String = if let stabilizationLatencyLine {
+            self.bypassLine(breakdown.stabilizationBypassAtSeconds) + "\n"
+                + stabilizationLatencyLine + "\n"
+        } else {
+            ""
+        }
 
         return """
         Onset — техническая информация о записи
@@ -68,6 +85,8 @@ nonisolated enum DropReportFormatter {
         Реальные потери кадров (необратимо)
           Кодировщик backpressure — экран: \(breakdown.bpEncodeScreen)
           Кодировщик backpressure — камера: \(breakdown.bpEncodeCamera)
+          Стабилизация — этап (камера): \(stageDrops)
+          Стабилизация — backpressure на выходе (камера): \(breakdown.bpStabilizeCamera)
           Захват — экран: \(breakdown.captureScreen)
           Захват — камера (видео): \(breakdown.captureCameraVideo)
           Захват — камера (аудио): \(breakdown.captureCameraAudio)
@@ -82,12 +101,25 @@ nonisolated enum DropReportFormatter {
           Камера, аудио (захват): \(breakdown.captureCameraAudio)
           Кодировщик (экран): \(breakdown.encodeScreen)
           Кодировщик (камера): \(breakdown.encodeCamera)
+          Стабилизация (камера): \(breakdown.stabilizeCamera)
           Запись в файл: \(breakdown.writer)
 
         Острая деградация (всплеск backpressure): \(degradedLine)
         Основная причина: \(self.causeDescription(dominantCause))
-
+        \(stabilizationBlock)
         """
+    }
+
+    // MARK: - Stabilization bypass line
+
+    /// Renders the stabilization bypass line (#297 AC-4): the transition time in whole seconds
+    /// from session start, or an explicit "no bypass" statement.
+    nonisolated static func bypassLine(_ bypassAtSeconds: Double?) -> String {
+        if let bypassAtSeconds {
+            "Стабилизация камеры: отключена на \(Int(bypassAtSeconds.rounded()))-й секунде записи (перегруз)"
+        } else {
+            "Стабилизация камеры: переход в bypass: нет"
+        }
     }
 
     // MARK: - Cause description
@@ -112,6 +144,9 @@ nonisolated enum DropReportFormatter {
 
         case .writer:
             "запись в файл"
+
+        case .stabilizeCamera:
+            "стабилизация камеры (backpressure на выходе этапа)"
         }
     }
 }

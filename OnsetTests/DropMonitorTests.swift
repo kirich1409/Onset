@@ -290,12 +290,15 @@ struct DropBreakdownSummaryLineTests {
             encodeCamera: 0,
             bpEncodeScreen: 0,
             bpEncodeCamera: 0,
-            writer: 0
+            writer: 0,
+            stabilizeCamera: 0,
+            bpStabilizeCamera: 0,
+            stabilizationBypassAtSeconds: nil
         )
         #expect(
             breakdown.summaryLine ==
                 // swiftlint:disable:next line_length
-                "drop breakdown: capture-screen=0 capture-camera-video=0 capture-camera-audio=0 encode-screen=0 encode-camera=0 writer=0"
+                "drop breakdown: capture-screen=0 capture-camera-video=0 capture-camera-audio=0 encode-screen=0 encode-camera=0 writer=0 stabilize-camera=0"
         )
     }
 
@@ -309,7 +312,10 @@ struct DropBreakdownSummaryLineTests {
             encodeCamera: 8,
             bpEncodeScreen: 0,
             bpEncodeCamera: 8,
-            writer: 5
+            writer: 5,
+            stabilizeCamera: 21,
+            bpStabilizeCamera: 4,
+            stabilizationBypassAtSeconds: nil
         )
         let line = breakdown.summaryLine
         #expect(line.contains("capture-screen=1"))
@@ -318,6 +324,7 @@ struct DropBreakdownSummaryLineTests {
         #expect(line.contains("encode-screen=0"))
         #expect(line.contains("encode-camera=8"))
         #expect(line.contains("writer=5"))
+        #expect(line.contains("stabilize-camera=21"))
     }
 }
 
@@ -1174,5 +1181,119 @@ struct NonisolatedInequalityRegressionTests {
     @Test("!= on DropHealthSnapshot / DropCause / DropSource works from a nonisolated function")
     func inequality_compilesAndHolds_fromNonisolatedContext() {
         #expect(compareOffMainActor())
+    }
+}
+
+// MARK: - Stabilization-stage routing (#297)
+
+@Suite("DropMonitor — stabilization stage routing (#297)")
+struct DropMonitorStabilizationTests {
+    private let windowSeconds = 2.0
+    private let threshold = 3
+
+    /// AC-4 diagnostic-only contract: `.stabilizationDrops` must never trip the degraded window
+    /// (even at threshold 0), never set the latch, and never leak into `DropCounters` — the stage
+    /// total is visible only through the per-source breakdown.
+    @Test("stabilizationDrops are diagnostic-only: no degradation, no counter leak, breakdown only")
+    func stabilizationDrops_diagnosticOnly() async {
+        // threshold:0 means a single backpressure drop would degrade — catches any misrouting
+        // of .stabilizationDrops into the window.
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: 0)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        let pts = CMTime(value: 1000, timescale: 1000)
+        continuation.yield(DropEvent(
+            reason: .stabilizationDrops, source: .stabilizeCamera, count: 100, detectedAt: pts
+        ))
+        continuation.finish()
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        #expect(health.sessionEverDegraded == false)
+        #expect(health.dominantCause == .notDegraded)
+        // DropCounters must not change (#297: counters/snapshot shape untouched).
+        #expect(health.counters.encoderBackpressureDrops == 0)
+        #expect(health.counters.captureDrops == 0)
+        #expect(health.counters.cfrNormalizationDrops == 0)
+
+        let bkd = await monitor.breakdownSnapshot()
+        #expect(bkd.stabilizeCamera == 100)
+        #expect(bkd.bpStabilizeCamera == 0)
+    }
+
+    /// The stage's OUTPUT overflow (reason `.encoderBackpressureDrops`, source `.stabilizeCamera`)
+    /// is real content loss: it feeds the degraded window and resolves the dominant cause to
+    /// `.stabilizeCamera`, and lands in both the total and the bp-only breakdown buckets.
+    @Test("stage output backpressure degrades and resolves dominantCause == .stabilizeCamera")
+    func stageOutputBackpressure_feedsWindowAndDominantCause() async {
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        let pts = CMTime(value: 1000, timescale: 1000)
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops,
+            source: .stabilizeCamera,
+            count: self.threshold + 1,
+            detectedAt: pts
+        ))
+        continuation.finish()
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        #expect(health.sessionEverDegraded == true)
+        #expect(health.dominantCause == .stabilizeCamera)
+        #expect(health.counters.encoderBackpressureDrops == self.threshold + 1)
+
+        let bkd = await monitor.breakdownSnapshot()
+        #expect(bkd.stabilizeCamera == self.threshold + 1)
+        #expect(bkd.bpStabilizeCamera == self.threshold + 1)
+    }
+
+    /// Tie-break position: encode outranks stabilizeCamera at equal counts
+    /// (writer > encode > stabilizeCamera > captureScreen > …).
+    @Test("tie-break: equal encode and stabilizeCamera counts — encode wins")
+    func tieBreak_encodeBeatsStabilizeCamera() async {
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: threshold)
+
+        let (drops, continuation) = AsyncStream.makeStream(of: DropEvent.self)
+        await monitor.observe(drops)
+
+        let pts = CMTime(value: 1000, timescale: 1000)
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops,
+            source: .encodeCamera,
+            count: self.threshold + 1,
+            detectedAt: pts
+        ))
+        continuation.yield(DropEvent(
+            reason: .encoderBackpressureDrops,
+            source: .stabilizeCamera,
+            count: self.threshold + 1,
+            detectedAt: pts
+        ))
+        continuation.finish()
+        await monitor.stop()
+
+        let health = await monitor.snapshot()
+        #expect(health.dominantCause == .encode)
+    }
+
+    /// `noteStabilizationBypass(atSeconds:)` surfaces the transition time on the breakdown;
+    /// a `nil` note is ignored (never bypassed).
+    @Test("noteStabilizationBypass surfaces on the breakdown snapshot; nil is ignored")
+    func noteBypass_surfacesOnBreakdown() async {
+        let monitor = DropMonitor(windowSeconds: windowSeconds, threshold: threshold)
+
+        await monitor.noteStabilizationBypass(atSeconds: nil)
+        var bkd = await monitor.breakdownSnapshot()
+        #expect(bkd.stabilizationBypassAtSeconds == nil)
+
+        await monitor.noteStabilizationBypass(atSeconds: 42.5)
+        bkd = await monitor.breakdownSnapshot()
+        #expect(bkd.stabilizationBypassAtSeconds == 42.5)
     }
 }

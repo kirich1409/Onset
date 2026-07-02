@@ -104,6 +104,16 @@ nonisolated struct DropBreakdown: Equatable {
     nonisolated let bpEncodeCamera: Int
     /// Drops dropped at `FileWriter` due to writer/disk backpressure.
     nonisolated let writer: Int
+    /// All events from the stabilization stage (`DropSource.stabilizeCamera`, #297):
+    /// stage-internal drops (slot eviction / pool exhaustion / render failure) + output
+    /// backpressure. Total/bp-only pair mirrors the encoder lanes (#282).
+    nonisolated let stabilizeCamera: Int
+    /// `DropReason.encoderBackpressureDrops`-only subset of `stabilizeCamera` — the stage's
+    /// output stream overflowed (slow encoder downstream). Real frame loss.
+    nonisolated let bpStabilizeCamera: Int
+    /// Session-relative seconds at which the stabilization stage entered bypass (#297 AC-4),
+    /// or `nil` when the stage never bypassed (or was not active this session).
+    nonisolated let stabilizationBypassAtSeconds: Double?
 
     /// Single-line `.notice`-level summary for `os.Logger`.
     ///
@@ -116,7 +126,8 @@ nonisolated struct DropBreakdown: Equatable {
             " capture-camera-audio=\(self.captureCameraAudio)" +
             " encode-screen=\(self.encodeScreen)" +
             " encode-camera=\(self.encodeCamera)" +
-            " writer=\(self.writer)"
+            " writer=\(self.writer)" +
+            " stabilize-camera=\(self.stabilizeCamera)"
     }
 }
 
@@ -227,6 +238,7 @@ nonisolated struct BackpressureDegradationWindow {
 /// - `.captureDrop` → cumulative `captureDrops` only (never triggers).
 /// - `.cfrNormalizationDrops` → cumulative `cfrNormalizationDrops` only (never triggers).
 /// - `.encoderHoldDrops` → private `encoderHoldDrops` only, diagnostic (never triggers; #200).
+/// - `.stabilizationDrops` → private `stabilizationDrops` only, diagnostic (never triggers; #297).
 ///
 /// ### Degraded = Live with recovery (user decision)
 /// The window goes `.degraded` when backpressure drops in the last `degradedWindowSeconds` exceed
@@ -281,6 +293,16 @@ actor DropMonitor {
     /// per-source visibility comes from `breakdownEncode` via the source-accounting switch below.
     private var encoderHoldDrops = 0
 
+    /// Total `DropReason.stabilizationDrops` seen this session (#297). Same diagnostic-only
+    /// contract as `encoderHoldDrops`: `DropCounters` / `DropHealthSnapshot` do NOT change —
+    /// the stage's drops surface only through the per-source breakdown and the technical report.
+    private var stabilizationDrops = 0
+
+    /// Session-relative seconds of the stabilization stage's bypass transition (#297 AC-4).
+    /// Recorded via `noteStabilizationBypass(atSeconds:)` (called by `RecordingSession` from the
+    /// stage's diagnostics at teardown) and surfaced on `DropBreakdown` for the technical report.
+    private var stabilizationBypassAtSeconds: Double?
+
     // MARK: - Degradation latch (never reset within a session)
 
     /// One-way latch: set to `true` on the first `.normal → .degraded` transition, never reset.
@@ -302,6 +324,7 @@ actor DropMonitor {
     private var bpEncodeScreen = 0
     private var bpEncodeCamera = 0
     private var bpWriter = 0
+    private var bpStabilizeCamera = 0
 
     // MARK: - Per-source diagnostic counters (never reset)
 
@@ -317,6 +340,7 @@ actor DropMonitor {
     private var breakdownEncodeScreen = 0
     private var breakdownEncodeCamera = 0
     private var breakdownWriter = 0
+    private var breakdownStabilizeCamera = 0
 
     // MARK: - Tasks
 
@@ -418,6 +442,12 @@ actor DropMonitor {
 
             case .writer:
                 self.bpWriter += event.count
+
+            case .stabilizeCamera:
+                // Output-stream overflow of the stabilization stage (#297): real content loss,
+                // counted like any encoder backpressure (window fed above) with its own bucket
+                // so the dominant cause can name the stage.
+                self.bpStabilizeCamera += event.count
             }
 
         case .captureBackpressureDrops:
@@ -448,6 +478,15 @@ actor DropMonitor {
             self.encoderHoldDrops += event.count
             let holdDesc = String(describing: event.source)
             self.logger.debug("Drop [encoder-hold] source=\(holdDesc) count=\(event.count)")
+
+        case .stabilizationDrops:
+            // Stage-internal drop of the stabilization stage (#297): diagnostic-only — the missed
+            // tick is refilled downstream by the CFR hold-repeat. Never touches the window,
+            // applyDegraded, or the sessionEverDegraded latch (stage overload is handled by the
+            // stage's own bypass). Per-source visibility comes from breakdownStabilizeCamera below.
+            self.stabilizationDrops += event.count
+            let stabDesc = String(describing: event.source)
+            self.logger.debug("Drop [stabilization] source=\(stabDesc) count=\(event.count)")
         }
 
         // Source accounting: diagnostic only — independent of reason accounting above.
@@ -469,6 +508,9 @@ actor DropMonitor {
 
         case .writer:
             self.breakdownWriter += event.count
+
+        case .stabilizeCamera:
+            self.breakdownStabilizeCamera += event.count
         }
     }
 
@@ -541,19 +583,29 @@ actor DropMonitor {
     }
 
     /// Returns the backpressure stage that accumulated the most drops, using the deterministic
-    /// tie-break order: writer > encode > captureScreen > captureCameraVideo > captureCameraAudio.
+    /// tie-break order: writer > encode > stabilizeCamera > captureScreen > captureCameraVideo >
+    /// captureCameraAudio.
     /// Returns `.notDegraded` when no backpressure drops occurred or the session was never degraded.
     private func computeDominantCause() -> DropCause {
-        // Tie-break order (highest priority first): writer > encode > captureScreen >
-        // captureCameraVideo > captureCameraAudio. The first non-zero bucket among those
-        // with the highest count wins; ties use this order as a deterministic decider.
+        // Tie-break order (highest priority first): writer > encode > stabilizeCamera >
+        // captureScreen > captureCameraVideo > captureCameraAudio. The first non-zero bucket among
+        // those with the highest count wins; ties use this order as a deterministic decider.
         //
         // DropCause.encode covers both encoder lanes: screen and camera backpressure drops
         // are summed into a single encode bucket so the dominant cause reflects combined
         // encoder pressure, matching the existing DropCause taxonomy.
+        //
+        // MAINTENANCE TRAP (#297): this candidate list is a LITERAL, not an exhaustive switch —
+        // the compiler will NOT flag a missing bucket when a new bp-tally is added. Every
+        // bp-counter above MUST appear here, or the invariant
+        // `dominantCause == .notDegraded ⇔ !sessionEverDegraded` silently breaks for sessions
+        // where only the missing bucket accumulated drops.
         let candidates: [(Int, DropCause)] = [
             (self.bpWriter, .writer),
             (self.bpEncodeScreen + self.bpEncodeCamera, .encode),
+            // Stage output overflow sits between the encoder (its consumer) and capture (its
+            // producer) in the tie-break: pressure at the stage's output IS encoder-adjacent.
+            (self.bpStabilizeCamera, .stabilizeCamera),
             (self.bpCaptureScreen, .captureScreen),
             (self.bpCaptureCameraVideo, .captureCameraVideo),
             (self.bpCaptureCameraAudio, .captureCameraAudio),
@@ -573,8 +625,20 @@ actor DropMonitor {
             encodeCamera: self.breakdownEncodeCamera,
             bpEncodeScreen: self.bpEncodeScreen,
             bpEncodeCamera: self.bpEncodeCamera,
-            writer: self.breakdownWriter
+            writer: self.breakdownWriter,
+            stabilizeCamera: self.breakdownStabilizeCamera,
+            bpStabilizeCamera: self.bpStabilizeCamera,
+            stabilizationBypassAtSeconds: self.stabilizationBypassAtSeconds
         )
+    }
+
+    /// Records the stabilization stage's bypass transition time (#297 AC-4) so the technical
+    /// report can state when (and that) the stage degraded. Called by `RecordingSession` with the
+    /// value from the stage's diagnostics after the camera pipeline stops, before the breakdown
+    /// snapshot is read. Idempotent for a fixed value; `nil` input is ignored (never bypassed).
+    func noteStabilizationBypass(atSeconds seconds: Double?) {
+        guard let seconds else { return }
+        self.stabilizationBypassAtSeconds = seconds
     }
 
     // MARK: - Lifecycle

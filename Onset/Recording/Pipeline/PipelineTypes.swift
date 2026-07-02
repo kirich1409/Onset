@@ -264,6 +264,17 @@ nonisolated enum DropReason: Equatable, Hashable {
     /// fills the slot — so it must NOT feed the degraded-state window, the one-way latch, or the
     /// user-facing dropped-frames counter. It remains visible in the per-source breakdown (#200).
     case encoderHoldDrops
+
+    /// A frame was dropped inside the camera-stabilization stage (#297).
+    ///
+    /// Covers three stage-internal loss sites: eviction from the depth-1 estimation slot (the
+    /// stage's eager-drain policy on a Vision latency spike), output-pool exhaustion, and a failed
+    /// CI render. DIAGNOSTIC-ONLY: the missed tick is refilled downstream by the `CFRNormalizer`
+    /// hold-repeat, so this reason must NEVER feed the degraded-state window, the one-way latch, or
+    /// the user-facing dropped-frames counters — it is tracked by a private `DropMonitor` tally and
+    /// the per-source breakdown only. Stage overload is handled by the stage's own bypass
+    /// mechanism, not by the UI recording state.
+    case stabilizationDrops
 }
 
 extension DropReason {
@@ -281,7 +292,8 @@ extension DropReason {
              (.cfrNormalizationDrops, .cfrNormalizationDrops),
              (.captureBackpressureDrops, .captureBackpressureDrops),
              (.encoderBackpressureDrops, .encoderBackpressureDrops),
-             (.encoderHoldDrops, .encoderHoldDrops):
+             (.encoderHoldDrops, .encoderHoldDrops),
+             (.stabilizationDrops, .stabilizationDrops):
             true
 
         default:
@@ -322,6 +334,11 @@ extension DropReason {
             // (Ordinal 2 is a historical gap in this switch — kept stable; 5 avoids any collision.)
             // swiftlint:disable:next no_magic_numbers
             hasher.combine(5)
+
+        case .stabilizationDrops:
+            // Ordinal tag for the sixth enum case (#297); next free ordinal after the hold case.
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(6)
         }
     }
 }
@@ -336,7 +353,7 @@ extension DropReason {
 /// non-`.notDegraded` cause.
 ///
 /// Tie-break order when multiple stages accumulated backpressure drops:
-///   writer > encode > captureScreen > captureCameraVideo > captureCameraAudio
+///   writer > encode > stabilizeCamera > captureScreen > captureCameraVideo > captureCameraAudio
 /// The first matching non-zero bucket wins. The order is deterministic and documented so
 /// tests can rely on it.
 nonisolated enum DropCause: Equatable, Hashable {
@@ -356,6 +373,10 @@ nonisolated enum DropCause: Equatable, Hashable {
     case encode
     /// `FileWriter` input backpressure was the dominant site.
     case writer
+    /// `StabilizingVideoSource` output→encoder `AsyncStream` buffer was the dominant backpressure
+    /// site (#297). Only the stage's `.encoderBackpressureDrops`-reason events count here —
+    /// stage-internal `.stabilizationDrops` are diagnostic-only and never drive degradation.
+    case stabilizeCamera
 }
 
 /// Under SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor + InferIsolatedConformances, synthesised
@@ -370,7 +391,8 @@ extension DropCause {
              (.captureCameraVideo, .captureCameraVideo),
              (.captureCameraAudio, .captureCameraAudio),
              (.encode, .encode),
-             (.writer, .writer):
+             (.writer, .writer),
+             (.stabilizeCamera, .stabilizeCamera):
             true
 
         default:
@@ -410,6 +432,11 @@ extension DropCause {
         case .writer:
             // swiftlint:disable:next no_magic_numbers
             hasher.combine(5)
+
+        case .stabilizeCamera:
+            // Ordinal tag for the seventh enum case (#297).
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(6)
         }
     }
 }
@@ -440,6 +467,16 @@ nonisolated enum DropSource: Equatable, Hashable {
 
     /// FileWriter input was not ready (writer/disk backpressure); compressed sample dropped.
     case writer
+
+    /// The camera-stabilization stage (`StabilizingVideoSource`, #297) detected the drop.
+    ///
+    /// Carried on two reason kinds: `.stabilizationDrops` (stage-internal loss — slot eviction,
+    /// pool exhaustion, render failure; diagnostic-only) and `.encoderBackpressureDrops` (the
+    /// stage's OUTPUT stream overflowed because the downstream encoder is slow — real content
+    /// loss, feeds the degraded-state window like any encoder backpressure). Drops detected by
+    /// the wrapped `CameraSource` itself keep their original capture sources — the stage never
+    /// re-attributes upstream events.
+    case stabilizeCamera
 }
 
 /// Under SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor + InferIsolatedConformances, synthesised
@@ -454,7 +491,8 @@ extension DropSource {
              (.captureCameraAudio, .captureCameraAudio),
              (.encodeScreen, .encodeScreen),
              (.encodeCamera, .encodeCamera),
-             (.writer, .writer):
+             (.writer, .writer),
+             (.stabilizeCamera, .stabilizeCamera):
             true
 
         default:
@@ -494,6 +532,11 @@ extension DropSource {
         case .writer:
             // swiftlint:disable:next no_magic_numbers
             hasher.combine(5)
+
+        case .stabilizeCamera:
+            // Ordinal tag for the seventh enum case (#297).
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(6)
         }
     }
 }

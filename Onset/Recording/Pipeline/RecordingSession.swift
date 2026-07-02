@@ -852,7 +852,10 @@ actor RecordingSession {
                 encodeCamera: 0,
                 bpEncodeScreen: 0,
                 bpEncodeCamera: 0,
-                writer: 0
+                writer: 0,
+                stabilizeCamera: 0,
+                bpStabilizeCamera: 0,
+                stabilizationBypassAtSeconds: nil
             )
         self.dropMonitor = nil
 
@@ -913,7 +916,10 @@ actor RecordingSession {
             counters: snapshot.counters,
             breakdown: breakdown,
             sessionEverDegraded: snapshot.sessionEverDegraded,
-            dominantCause: snapshot.dominantCause
+            dominantCause: snapshot.dominantCause,
+            // Wired to the stage's diagnostics when the stabilization decorator is integrated
+            // (see the camera-pipeline teardown in performStop / stopAndFinalizePipeline).
+            stabilizationLatencyLine: nil
         )
         do {
             try RecordingOutput.writeReport(text, in: self.sessionDirectory, timestamp: self.sessionStartDate)

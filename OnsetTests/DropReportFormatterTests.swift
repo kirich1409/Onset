@@ -7,6 +7,7 @@
 // recording files. These tests assert the report text contains the expected sections and values for
 // both a degraded session and a clean (zero-drop) session, and that real frame loss (backpressure)
 // is unambiguously separated from zero-content-loss coalescing (CFR normalization, hold repeats).
+// #297 adds the stabilization-stage lines (drops, bypass transition, latency summary).
 //
 import Foundation
 @testable import Onset
@@ -21,17 +22,33 @@ struct DropReportFormatterTests {
         Date(timeIntervalSince1970: 1_700_000_000)
     }
 
-    /// Zero-drop breakdown used as a neutral fixture in header/structure tests.
-    private func zeroBreakdown() -> DropBreakdown {
+    /// Breakdown factory with all-zero defaults so each test names only the counters it exercises.
+    private func makeBreakdown(
+        captureScreen: Int = 0,
+        captureCameraVideo: Int = 0,
+        captureCameraAudio: Int = 0,
+        encodeScreen: Int = 0,
+        encodeCamera: Int = 0,
+        bpEncodeScreen: Int = 0,
+        bpEncodeCamera: Int = 0,
+        writer: Int = 0,
+        stabilizeCamera: Int = 0,
+        bpStabilizeCamera: Int = 0,
+        stabilizationBypassAtSeconds: Double? = nil
+    )
+    -> DropBreakdown {
         DropBreakdown(
-            captureScreen: 0,
-            captureCameraVideo: 0,
-            captureCameraAudio: 0,
-            encodeScreen: 0,
-            encodeCamera: 0,
-            bpEncodeScreen: 0,
-            bpEncodeCamera: 0,
-            writer: 0
+            captureScreen: captureScreen,
+            captureCameraVideo: captureCameraVideo,
+            captureCameraAudio: captureCameraAudio,
+            encodeScreen: encodeScreen,
+            encodeCamera: encodeCamera,
+            bpEncodeScreen: bpEncodeScreen,
+            bpEncodeCamera: bpEncodeCamera,
+            writer: writer,
+            stabilizeCamera: stabilizeCamera,
+            bpStabilizeCamera: bpStabilizeCamera,
+            stabilizationBypassAtSeconds: stabilizationBypassAtSeconds
         )
     }
 
@@ -40,9 +57,10 @@ struct DropReportFormatterTests {
         let text = DropReportFormatter.report(
             timestamp: self.timestamp(),
             counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
-            breakdown: self.zeroBreakdown(),
+            breakdown: self.makeBreakdown(),
             sessionEverDegraded: false,
-            dominantCause: .notDegraded
+            dominantCause: .notDegraded,
+            stabilizationLatencyLine: nil
         )
 
         #expect(text.contains("Onset — техническая информация о записи"))
@@ -59,7 +77,7 @@ struct DropReportFormatterTests {
         let text = DropReportFormatter.report(
             timestamp: self.timestamp(),
             counters: DropCounters(encoderBackpressureDrops: 42, captureDrops: 7, cfrNormalizationDrops: 3),
-            breakdown: DropBreakdown(
+            breakdown: self.makeBreakdown(
                 captureScreen: 1,
                 captureCameraVideo: 2,
                 captureCameraAudio: 4,
@@ -70,7 +88,8 @@ struct DropReportFormatterTests {
                 writer: 12
             ),
             sessionEverDegraded: true,
-            dominantCause: .encode
+            dominantCause: .encode,
+            stabilizationLatencyLine: nil
         )
 
         // Real-loss section — per-lane encoder backpressure.
@@ -97,9 +116,10 @@ struct DropReportFormatterTests {
         let text = DropReportFormatter.report(
             timestamp: self.timestamp(),
             counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
-            breakdown: self.zeroBreakdown(),
+            breakdown: self.makeBreakdown(),
             sessionEverDegraded: false,
-            dominantCause: .notDegraded
+            dominantCause: .notDegraded,
+            stabilizationLatencyLine: nil
         )
 
         #expect(text.contains("Кодировщик backpressure — экран: 0"))
@@ -116,9 +136,10 @@ struct DropReportFormatterTests {
         let text = DropReportFormatter.report(
             timestamp: date,
             counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
-            breakdown: self.zeroBreakdown(),
+            breakdown: self.makeBreakdown(),
             sessionEverDegraded: false,
-            dominantCause: .notDegraded
+            dominantCause: .notDegraded,
+            stabilizationLatencyLine: nil
         )
 
         // The header must carry the same formatted timestamp used for file/folder names.
@@ -135,6 +156,7 @@ struct DropReportFormatterTests {
             .captureCameraAudio,
             .encode,
             .writer,
+            .stabilizeCamera,
         ]
         for cause in causes {
             #expect(!DropReportFormatter.causeDescription(cause).isEmpty)
@@ -147,18 +169,15 @@ struct DropReportFormatterTests {
         let text = DropReportFormatter.report(
             timestamp: self.timestamp(),
             counters: DropCounters(encoderBackpressureDrops: 100, captureDrops: 0, cfrNormalizationDrops: 0),
-            breakdown: DropBreakdown(
-                captureScreen: 0,
-                captureCameraVideo: 0,
-                captureCameraAudio: 0,
+            breakdown: self.makeBreakdown(
                 encodeScreen: 10,
                 encodeCamera: 90,
                 bpEncodeScreen: 10,
-                bpEncodeCamera: 90,
-                writer: 0
+                bpEncodeCamera: 90
             ),
             sessionEverDegraded: true,
-            dominantCause: .encode
+            dominantCause: .encode,
+            stabilizationLatencyLine: nil
         )
 
         #expect(text.contains("Кодировщик backpressure — экран: 10"))
@@ -173,18 +192,10 @@ struct DropReportFormatterTests {
         let text = DropReportFormatter.report(
             timestamp: self.timestamp(),
             counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 1204),
-            breakdown: DropBreakdown(
-                captureScreen: 0,
-                captureCameraVideo: 0,
-                captureCameraAudio: 0,
-                encodeScreen: 1204,
-                encodeCamera: 0,
-                bpEncodeScreen: 0,
-                bpEncodeCamera: 0,
-                writer: 0
-            ),
+            breakdown: self.makeBreakdown(encodeScreen: 1204),
             sessionEverDegraded: false,
-            dominantCause: .notDegraded
+            dominantCause: .notDegraded,
+            stabilizationLatencyLine: nil
         )
 
         // CFR count appears in the coalescing section.
@@ -196,5 +207,76 @@ struct DropReportFormatterTests {
 
         // The coalescing section must be identifiable as non-destructive.
         #expect(text.contains("Коалесция без потери содержимого"))
+    }
+
+    // MARK: - Stabilization lines (#297 AC-4/AC-8)
+
+    /// AC-4: stage drops are split into stage-internal loss and output backpressure, and the
+    /// per-source breakdown carries the stage's all-reason total.
+    @Test("Stabilization drops render as stage-internal and output-backpressure lines")
+    func report_stabilizationDropLines() {
+        // stabilizeCamera total 25 = 18 stage-internal + 7 output backpressure.
+        let text = DropReportFormatter.report(
+            timestamp: self.timestamp(),
+            counters: DropCounters(encoderBackpressureDrops: 7, captureDrops: 0, cfrNormalizationDrops: 0),
+            breakdown: self.makeBreakdown(stabilizeCamera: 25, bpStabilizeCamera: 7),
+            sessionEverDegraded: false,
+            dominantCause: .notDegraded,
+            stabilizationLatencyLine: nil
+        )
+
+        #expect(text.contains("Стабилизация — этап (камера): 18"))
+        #expect(text.contains("Стабилизация — backpressure на выходе (камера): 7"))
+        #expect(text.contains("Стабилизация (камера): 25"))
+    }
+
+    /// AC-4: a bypass transition is reported with the session-relative second of the switch.
+    @Test("Bypass transition renders its session-relative time")
+    func report_bypassTransitionTime() {
+        let text = DropReportFormatter.report(
+            timestamp: self.timestamp(),
+            counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
+            breakdown: self.makeBreakdown(stabilizeCamera: 40, stabilizationBypassAtSeconds: 73.4),
+            sessionEverDegraded: false,
+            dominantCause: .notDegraded,
+            stabilizationLatencyLine: "Стабилизация камеры — латентность этапа: p50=31.2 мс, p95=41.0 мс"
+        )
+
+        #expect(text.contains("Стабилизация камеры: отключена на 73-й секунде записи (перегруз)"))
+    }
+
+    /// AC-8: the latency summary line is included verbatim when the stage ran, and the bypass
+    /// line explicitly states "no bypass" for a healthy stabilized session.
+    @Test("Latency line is rendered verbatim with an explicit no-bypass statement")
+    func report_latencyLineAndNoBypass() {
+        let latencyLine = "Стабилизация камеры — латентность этапа (оценка+рендер): p50=31.2 мс, p95=41.0 мс"
+        let text = DropReportFormatter.report(
+            timestamp: self.timestamp(),
+            counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
+            breakdown: self.makeBreakdown(),
+            sessionEverDegraded: false,
+            dominantCause: .notDegraded,
+            stabilizationLatencyLine: latencyLine
+        )
+
+        #expect(text.contains(latencyLine))
+        #expect(text.contains("Стабилизация камеры: переход в bypass: нет"))
+    }
+
+    /// AC-3 adjacency: with stabilization off (nil latency line) the report carries no bypass
+    /// statement — the trailing stabilization block is omitted entirely.
+    @Test("Stage-off session omits the stabilization block")
+    func report_stageOffOmitsBypassLine() {
+        let text = DropReportFormatter.report(
+            timestamp: self.timestamp(),
+            counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
+            breakdown: self.makeBreakdown(),
+            sessionEverDegraded: false,
+            dominantCause: .notDegraded,
+            stabilizationLatencyLine: nil
+        )
+
+        #expect(!text.contains("переход в bypass"))
+        #expect(!text.contains("латентность"))
     }
 }
