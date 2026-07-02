@@ -4,15 +4,20 @@ import SwiftUI
 
 /// The «Камера» settings pane.
 ///
-/// Hosts the camera-mirror toggle — a `.nextRecordingStart` control: outside a recording, a mirror
-/// change takes effect from the next recording's start. During an active recording the control is
-/// locked — not because of any preview divergence (the main window, the sole camera-preview
-/// carrier, is dismissed at recording start, so no live preview is on screen), but because the
-/// one-shot pipeline cannot reconfigure mid-record: an editable toggle would silently have NO
-/// effect on the in-progress file, which is worse than a clearly-disabled control. Camera
-/// resolution is a read-only `LabeledContent` row in v1: the value reads «Максимальное» because the
-/// camera auto-selects the maximum 16:9 format (up to 1080p) — explicit resolution/fps selection is
-/// future work (#276).
+/// Hosts the camera-mirror toggle and the camera-stabilization toggle (#297) — both
+/// `.nextRecordingStart` controls: outside a recording, a change takes effect from the next
+/// recording's start. During an active recording the controls are locked — not because of any
+/// preview divergence (the main window, the sole camera-preview carrier, is dismissed at
+/// recording start, so no live preview is on screen), but because the one-shot pipeline cannot
+/// reconfigure mid-record: an editable toggle would silently have NO effect on the in-progress
+/// file, which is worse than a clearly-disabled control. Each toggle lives in its OWN `Section`
+/// with its own footer caption — the footer is the single explanatory channel (VoiceOver reads
+/// it with the control), and one footer per two controls would blur which caption explains what.
+/// The stabilization footer explicitly states the effect applies to the RECORDING only: the live
+/// preview runs outside the stabilization stage, and without that line a user would toggle it
+/// on, see shake in the preview, and conclude the feature is broken. Camera resolution is a
+/// read-only `LabeledContent` row in v1: the value reads «Максимальное» because the camera
+/// auto-selects the maximum 16:9 format — explicit resolution/fps selection is future work (#276).
 @MainActor
 struct CameraPane: View {
     /// The shared settings model. `@Bindable` so `$appSettings.cameraMirror` writes through to the
@@ -42,6 +47,28 @@ struct CameraPane: View {
         }
     }
 
+    /// Availability of the stabilization toggle (#297) — same `.nextRecordingStart` policy as the
+    /// mirror: the session-fixed crop geometry and buffer pools cannot change mid-record.
+    private var stabilizationAvailability: ControlAvailability {
+        ControlAvailability.classify(
+            policy: .nextRecordingStart,
+            isRecordingActive: self.coordinator.isRecordingActive
+        )
+    }
+
+    /// The stabilization footer caption (#297 AC-5, texts fixed by the spec's Decisions Made).
+    /// The enabled text MUST state the effect is recording-only (the preview is not stabilized)
+    /// and that the image is slightly cropped; the disabled text uses the mirror control's
+    /// formula so the pane speaks one language.
+    private var stabilizationCaption: String {
+        switch self.stabilizationAvailability {
+        case .disabled: "Недоступно во время записи"
+        case .enabled: "Подавляет дрожание от вибраций (например, при наборе текста). "
+            + "Действует только на запись — превью не стабилизируется. "
+            + "Изображение записи немного обрезается по краям. Применяется со следующей записи"
+        }
+    }
+
     var body: some View {
         Form {
             Section {
@@ -49,6 +76,15 @@ struct CameraPane: View {
                     .disabled(self.mirrorAvailability == .disabled)
             } footer: {
                 Text(self.mirrorCaption)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
+                Toggle("Стабилизация камеры", isOn: self.$appSettings.cameraStabilization)
+                    .disabled(self.stabilizationAvailability == .disabled)
+            } footer: {
+                Text(self.stabilizationCaption)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

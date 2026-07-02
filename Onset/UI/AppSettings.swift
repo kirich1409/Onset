@@ -40,6 +40,17 @@ final class AppSettings {
         didSet { self.store.saveCameraMirror(self.cameraMirror) }
     }
 
+    /// Whether camera stabilization is enabled for recordings (#297).
+    ///
+    /// `.nextRecordingStart` policy: the value is read fresh at record start and fixed for the
+    /// session (the session-fixed crop geometry and buffer pools cannot change mid-record).
+    /// Affects ONLY the recorded file — the live preview runs outside the stabilization stage
+    /// by design. Mutating persists synchronously and invalidates observers. Loaded from the
+    /// store at init (default `false`, opt-in).
+    var cameraStabilization: Bool {
+        didSet { self.store.saveCameraStabilization(self.cameraStabilization) }
+    }
+
     /// Creates the model, loading both settings from `store`.
     ///
     /// - Parameter store: The persistence backend. Production callers use the default
@@ -51,5 +62,6 @@ final class AppSettings {
         self.store = store
         self.showMenuBarTimer = store.loadShowMenuBarTimer()
         self.cameraMirror = store.loadCameraMirror()
+        self.cameraStabilization = store.loadCameraStabilization()
     }
 }

@@ -113,11 +113,13 @@ extension MainViewModel {
     /// Stops preview, builds the request, and calls `coordinator.start`.
     func startRecording(display: Display, cameraFormat: CameraFormat?) async {
         // Build config with the user-selected (or default) base output directory (#225) and the
-        // current camera-mirror setting. The mirror is read fresh here (record start), never on a
-        // running session — the one-shot pipeline honors the value captured at this point.
+        // current camera-mirror / camera-stabilization settings. Both are read fresh here
+        // (record start), never on a running session — the one-shot pipeline honors the values
+        // captured at this point (.nextRecordingStart policy).
         let config = RecordingConfiguration.makeMVPDefault(
             baseDirectory: self.outputDirectoryURL,
-            cameraMirror: self.appSettings.cameraMirror
+            cameraMirror: self.appSettings.cameraMirror,
+            cameraStabilization: self.appSettings.cameraStabilization
         )
         let plan = CapabilityResolver.resolveStartProfile(
             display: display,
@@ -147,6 +149,16 @@ extension MainViewModel {
         do {
             try await (self.startSessionOverride ?? self.coordinator.start)(request)
             mainViewModelLogger.info("Recording started successfully")
+        } catch let RecordingError.captureSetupFailed(inner) where inner is StabilizationError {
+            // #297 AC-5: the stabilization stage failed to start (Metal/pool allocation). The
+            // DISTINCT inner type is what makes this attribution reliable — a "toggle is ON →
+            // stabilization text" heuristic would mis-instruct the user on a real camera
+            // failure. Names the feature and the action (spec's Decisions Made, verbatim).
+            self.recordError = "Не удалось запустить стабилизацию камеры. "
+                + "Выключите её в настройках приложения (вкладка „Камера\") и повторите запись."
+            mainViewModelLogger.error(
+                "Recording start failed in stabilization setup: \(String(describing: inner))"
+            )
         } catch {
             self.recordError = "Не удалось начать запись: \(error)"
             mainViewModelLogger.error("Recording start failed: \(String(describing: error))")

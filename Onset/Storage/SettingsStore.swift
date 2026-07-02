@@ -14,6 +14,11 @@ enum SettingsDefaults {
     /// The camera is NOT mirrored by default — the recorded output matches the raw sensor
     /// orientation unless the user opts in.
     static let cameraMirror = false
+
+    /// Camera stabilization is OFF by default (#297) — the stage costs ~30 ms/frame of GPU
+    /// work at the reference camera cadence and crops ~1.7% of the image, so it is an
+    /// explicit opt-in.
+    static let cameraStabilization = false
 }
 
 // MARK: - SettingsPersisting
@@ -41,6 +46,13 @@ protocol SettingsPersisting: Sendable {
 
     /// Persists the "camera mirror" flag under its own key.
     func saveCameraMirror(_ value: Bool)
+
+    /// Returns the persisted "camera stabilization" flag (#297), or
+    /// `SettingsDefaults.cameraStabilization` when the key is absent or holds a non-`Bool` value.
+    func loadCameraStabilization() -> Bool
+
+    /// Persists the "camera stabilization" flag under its own key.
+    func saveCameraStabilization(_ value: Bool)
 }
 
 // MARK: - UserDefaultsSettingsStore
@@ -97,6 +109,19 @@ struct UserDefaultsSettingsStore: SettingsPersisting {
         self.defaults.set(value, forKey: SettingsKeys.cameraMirror)
     }
 
+    /// Reads the camera stabilization flag, folding in its default for absent/non-`Bool` values.
+    func loadCameraStabilization() -> Bool {
+        self.loadBool(
+            forKey: SettingsKeys.cameraStabilization,
+            default: SettingsDefaults.cameraStabilization
+        )
+    }
+
+    /// Writes the camera stabilization flag directly under its key.
+    func saveCameraStabilization(_ value: Bool) {
+        self.defaults.set(value, forKey: SettingsKeys.cameraStabilization)
+    }
+
     // MARK: - Private helpers
 
     /// Presence-checked `Bool` read: an absent key (`object(forKey:) == nil`) or a value that is
@@ -119,15 +144,18 @@ struct UserDefaultsSettingsStore: SettingsPersisting {
 final class InMemorySettingsStore: SettingsPersisting {
     private var showMenuBarTimerValue: Bool
     private var cameraMirrorValue: Bool
+    private var cameraStabilizationValue: Bool
 
     /// Creates an in-memory store seeded with the given values (defaults match the production
     /// per-setting defaults).
     init(
         showMenuBarTimer: Bool = SettingsDefaults.showMenuBarTimer,
-        cameraMirror: Bool = SettingsDefaults.cameraMirror
+        cameraMirror: Bool = SettingsDefaults.cameraMirror,
+        cameraStabilization: Bool = SettingsDefaults.cameraStabilization
     ) {
         self.showMenuBarTimerValue = showMenuBarTimer
         self.cameraMirrorValue = cameraMirror
+        self.cameraStabilizationValue = cameraStabilization
     }
 
     /// Returns the in-memory menu-bar timer flag.
@@ -148,5 +176,15 @@ final class InMemorySettingsStore: SettingsPersisting {
     /// Updates the in-memory camera mirror flag.
     func saveCameraMirror(_ value: Bool) {
         self.cameraMirrorValue = value
+    }
+
+    /// Returns the in-memory camera stabilization flag.
+    func loadCameraStabilization() -> Bool {
+        self.cameraStabilizationValue
+    }
+
+    /// Updates the in-memory camera stabilization flag.
+    func saveCameraStabilization(_ value: Bool) {
+        self.cameraStabilizationValue = value
     }
 }

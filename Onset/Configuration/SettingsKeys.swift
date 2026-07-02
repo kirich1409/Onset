@@ -15,6 +15,10 @@ enum SettingsKeys {
     /// Absent or non-`Bool` → resolves to `SettingsDefaults.cameraMirror`.
     static let cameraMirror = "onset.settings.cameraMirror"
 
+    /// Key for the "camera stabilization" toggle (`Bool`, #297).
+    /// Absent or non-`Bool` → resolves to `SettingsDefaults.cameraStabilization`.
+    static let cameraStabilization = "onset.settings.cameraStabilization"
+
     /// Key for the last-selected Settings tab (`String`, a `SettingsTab.rawValue`).
     /// Absent or unknown → resolves to `SettingsTab.indication`.
     static let selectedTab = "onset.settings.selectedTab"

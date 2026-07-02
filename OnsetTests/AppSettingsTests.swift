@@ -12,12 +12,13 @@ import Testing
 @Suite("AppSettings")
 @MainActor
 struct AppSettingsTests {
-    @Test("Loads both settings from the store at init")
+    @Test("Loads every setting from the store at init")
     func loadsFromStoreAtInit() {
-        let store = InMemorySettingsStore(showMenuBarTimer: false, cameraMirror: true)
+        let store = InMemorySettingsStore(showMenuBarTimer: false, cameraMirror: true, cameraStabilization: true)
         let settings = AppSettings(store: store)
         #expect(settings.showMenuBarTimer == false)
         #expect(settings.cameraMirror == true)
+        #expect(settings.cameraStabilization == true)
     }
 
     @Test("Resolves per-setting defaults when the store holds them")
@@ -25,6 +26,8 @@ struct AppSettingsTests {
         let settings = AppSettings(store: InMemorySettingsStore())
         #expect(settings.showMenuBarTimer == SettingsDefaults.showMenuBarTimer)
         #expect(settings.cameraMirror == SettingsDefaults.cameraMirror)
+        // #297 AC-5: camera stabilization is opt-in — the default MUST be OFF.
+        #expect(settings.cameraStabilization == false)
     }
 
     @Test("Mutating showMenuBarTimer writes through to the store synchronously")
@@ -41,5 +44,13 @@ struct AppSettingsTests {
         let settings = AppSettings(store: store)
         settings.cameraMirror = true
         #expect(store.loadCameraMirror() == true)
+    }
+
+    @Test("Mutating cameraStabilization writes through to the store synchronously")
+    func cameraStabilizationWritesThrough() {
+        let store = InMemorySettingsStore(cameraStabilization: false)
+        let settings = AppSettings(store: store)
+        settings.cameraStabilization = true
+        #expect(store.loadCameraStabilization() == true)
     }
 }
