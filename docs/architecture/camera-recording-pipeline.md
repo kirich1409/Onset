@@ -86,8 +86,7 @@ C callback → EncodedSampleSink
 формата (`CapabilityResolver` → `RecordingComponentFactories`), поэтому апскейл-рассогласования
 между 4K-энкодером и 1080p-доставкой нет ни на одном пути. 60fps остаётся недостижим на любом
 пути — hardware-constraint конкретной камеры (Brio ~20-25fps фактической каденции), не лимит
-AVFoundation; вынесено в [#178](https://github.com/kirich1409/Onset/issues/178) (закрыт как
-won't-fix).
+AVFoundation; отслеживается в [#178](https://github.com/kirich1409/Onset/issues/178).
 Встроенная камера FaceTime HD (квадратный Center-Stage формат 1552×1552) теперь получит
 16:9-режим (например, 1920×1080) — центральное следствие введения 16:9-предпочтения.
 
@@ -318,7 +317,7 @@ worst-case полноэкранным движением экрана 4K60. По
 `docs/quality/macos-avfoundation-camera-limits.md`.
 
 60fps остаётся недостижим на обеих камерах — hardware-constraint конкретно Brio
-([#178](https://github.com/kirich1409/Onset/issues/178), закрыт как won't-fix), не связано со
+(отслеживается в [#178](https://github.com/kirich1409/Onset/issues/178)), не связано со
 снятием 4K-кэпа выше. MVP-скоуп камеры: 16:9, авто-выбором, без ручного пикера (issue #113 закрыт).
 
 Ручное управление источником камеры реализовано через

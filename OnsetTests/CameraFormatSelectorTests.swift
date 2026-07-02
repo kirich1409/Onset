@@ -210,13 +210,26 @@ struct CameraFormatSelectorTests {
     // MainViewModel+Record.swift) — these two tests document the selector's lifted-cap
     // behaviour at the value level, independent of the caller.
 
-    @Test("allowAboveFullHD true with 4K and 1080p available — picks 4K over 1080p")
+    @Test("allowAboveFullHD true with 4K, 1080p and 720p available — picks 4K over the rest")
     func allowAboveFullHD_4KAvailable_picks4KOver1080p() throws {
-        // Proves the cap is lifted: 4K must win over the ≤1080p option that would
+        // Proves the cap is lifted: 4K must win over the ≤1080p options that would
         // have been chosen under the default (false) behaviour.
+        //
+        // This is also the record path's exact scenario: resolveCameraFormat
+        // (MainViewModel+Record.swift) calls pickBestFormat with allowAboveFullHD: true, and
+        // the camera encoder is built from this same resolved format's dimensions
+        // (CapabilityResolver → RecordingComponentFactories), so there is no upscale mismatch.
+        //
+        // PR #281 previously capped this path at 1080p after observing camera stutter under
+        // 4K, attributing it to AVFoundation delivering only 1080p from the Brio. A live L5
+        // spike (2026-07-02, MX Brio) traced the stutter to a VT-session/format mismatch
+        // artifact instead: recording native 4K camera + 4K60 screen produced zero frame loss,
+        // including under worst-case full-screen motion. See
+        // docs/quality/production-quality-bar.md §5.
         let formats = [
-            format(width: 3840, height: 2160, maxFps: 30), // 4K 16:9 — wins when cap lifted
+            format(width: 1280, height: 720, maxFps: 30), // 720p  16:9
             format(width: 1920, height: 1080, maxFps: 30), // 1080p 16:9 — would win with default cap
+            format(width: 3840, height: 2160, maxFps: 30), // 4K    16:9 — wins when cap lifted
         ]
         let best = try CameraFormatSelector.pickBestFormat(from: formats, minFps: 30, allowAboveFullHD: true)
         #expect(best.pixelWidth == 3840)
@@ -234,36 +247,5 @@ struct CameraFormatSelectorTests {
         let best = try CameraFormatSelector.pickBestFormat(from: formats, minFps: 30, allowAboveFullHD: true)
         #expect(best.pixelWidth == 1920)
         #expect(best.pixelHeight == 1080)
-    }
-
-    // MARK: - Record path selects native 4K when available
-
-    @Test("Record path (allowAboveFullHD: true) with 4K 16:9 advertised — selects native 4K")
-    func recordPath_4KAdvertised_selectsNative4K() throws {
-        // The record path calls resolveCameraFormat with allowAboveFullHD: true — the camera
-        // encoder is built from this same resolved format's dimensions (CapabilityResolver →
-        // RecordingComponentFactories), so there is no upscale mismatch.
-        //
-        // PR #281 previously capped this path at 1080p after observing camera stutter under
-        // 4K, attributing it to AVFoundation delivering only 1080p from the Brio. A live L5
-        // spike (2026-07-02, MX Brio) traced the stutter to a VT-session/format mismatch
-        // artifact instead: recording native 4K camera + 4K60 screen produced zero frame loss,
-        // including under worst-case full-screen motion. See
-        // docs/quality/production-quality-bar.md §5.
-        //
-        // Seam note: CameraFormatSelector is a pure value-level function (no AVCaptureDevice),
-        // so this is a direct unit test of the exact logic the record path exercises.
-        // MainViewModel.resolveCameraFormat() is not directly unit-testable without a real
-        // AVCaptureDevice (camera.formats is [CameraFormat] derived from AVCaptureDevice formats),
-        // but the selector is the sole decision point — this test covers the critical path.
-        let formats = [
-            format(width: 1280, height: 720, maxFps: 30), // 720p  16:9
-            format(width: 1920, height: 1080, maxFps: 30), // 1080p 16:9
-            format(width: 3840, height: 2160, maxFps: 30), // 4K    16:9 — must win
-        ]
-        // allowAboveFullHD: true — the same as the record-path resolveCameraFormat call.
-        let best = try CameraFormatSelector.pickBestFormat(from: formats, minFps: 30, allowAboveFullHD: true)
-        #expect(best.pixelWidth == 3840, "record path must select native 4K when advertised")
-        #expect(best.pixelHeight == 2160, "record path must select native 4K when advertised")
     }
 }

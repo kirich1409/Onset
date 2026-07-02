@@ -138,9 +138,7 @@ CFR-30/60 даже поверх более редкого источника. П
 ## Доказательная база
 
 - `CameraSource4KDeliveryL5Tests` — 4K-пробник, оба пути (`setActiveFormat` + `sessionPreset`);
-  регрессионный тест на hold-lock (#265).
-- `CameraSourceBuiltInDeliveryL5Tests` — встроенная: дамп форматов + sustained fps;
-- `CameraModeRecordingL5Tests` — full-pipeline запись + `verify-cfr`;
+  регрессионный тест на hold-lock (#265) и на 4K-доставку с record-роли (`allowAboveFullHD: true`).
 - `DiagFrameCollector` — PTS-коллектор для сырого замера каденции;
 - `scripts/verify-cfr.sh` — эталонный инструмент для packet-rate / fresh-content / run-clusters.
 - `swarm-report/research/research-4k-dual-recording.md` + `swarm-report/4k-spikes-state.md` —
