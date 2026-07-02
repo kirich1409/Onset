@@ -63,6 +63,7 @@ struct CameraPane: View {
     private var stabilizationCaption: String {
         switch self.stabilizationAvailability {
         case .disabled: "Недоступно во время записи"
+
         case .enabled: "Подавляет дрожание от вибраций (например, при наборе текста). "
             + "Действует только на запись — превью не стабилизируется. "
             + "Изображение записи немного обрезается по краям. Применяется со следующей записи"

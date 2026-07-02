@@ -9,7 +9,12 @@
 // `StabilizationRenderer` is the live implementation: Vision translational registration on an
 // upscale + CoreImage translate/crop/scale-back render into a pooled NV12 buffer.
 //
-// Isolation model (mirrors `LiveCompressionSession` / `VideoOutputShim`): a dedicated SERIAL
+// file_length: the seam protocol, the error taxonomy it throws, and the live renderer form one
+// GPU-boundary unit — a fake stage implements the protocol against exactly these errors, so
+// splitting them apart would decouple the contract from its failure modes.
+// swiftlint:disable file_length
+//
+// Isolation: (mirrors `LiveCompressionSession` / `VideoOutputShim`) a dedicated SERIAL
 // DispatchQueue (`qos: .userInitiated`) owns every mutable field and executes all Vision/CI work —
 // 30 ms of synchronous Vision per frame must never run in the Swift Concurrency cooperative pool
 // (actor starvation). Async methods bridge onto the queue via `withCheckedContinuation`
@@ -288,7 +293,8 @@ nonisolated final class StabilizationRenderer: StabilizationStage, @unchecked Se
     /// Throwing variant of `onQueue`.
     nonisolated private func onQueueThrowing<T: Sendable>(
         _ work: @escaping @Sendable () throws -> T
-    ) async throws -> T {
+    ) async throws
+    -> T {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<T, any Error>) in
             self.workQueue.async {
                 continuation.resume(with: Result(catching: work))
@@ -341,7 +347,7 @@ nonisolated final class StabilizationRenderer: StabilizationStage, @unchecked Se
             throw StabilizationStageError.estimationFailed
         }
         let transform = observation.alignmentTransform
-        return StabilizationVector(dx: Double(transform.tx), dy: Double(transform.ty))
+        return StabilizationVector(deltaX: Double(transform.tx), deltaY: Double(transform.ty))
     }
 
     // MARK: Render (on queue)
@@ -371,7 +377,7 @@ nonisolated final class StabilizationRenderer: StabilizationStage, @unchecked Se
         // The input buffer is READ-ONLY (VideoFrame invariant); every op below is functional
         // CIImage composition rendered into the fresh pooled buffer.
         let translated = CIImage(cvPixelBuffer: frame.pixelBuffer)
-            .transformed(by: CGAffineTransform(translationX: correction.dx, y: correction.dy))
+            .transformed(by: CGAffineTransform(translationX: correction.deltaX, y: correction.deltaY))
             .clampedToExtent()
             .cropped(to: self.cropRect)
         // Map the crop rect onto the output extent: shift its origin to zero, then scale back
@@ -403,7 +409,7 @@ nonisolated final class StabilizationRenderer: StabilizationStage, @unchecked Se
     /// under downstream stall into an explicit `outputPoolExhausted` drop.
     nonisolated private static func poolAuxAttributes() -> CFDictionary {
         [
-            kCVPixelBufferPoolAllocationThresholdKey: Self.outputPoolAllocationThreshold,
+            kCVPixelBufferPoolAllocationThresholdKey: self.outputPoolAllocationThreshold,
         ] as CFDictionary
     }
 

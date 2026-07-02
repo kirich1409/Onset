@@ -3,10 +3,11 @@
 //
 // #297 AC-8 — in-process latency aggregation of the stabilization stage.
 //
-// Pure value types only (no CoreMedia / Vision / CoreImage): the actor feeds per-frame stage
-// latencies (estimation + render, measured around the work-queue bridge) and reads back the
-// p50/p95 report line at session stop. The `os_signpost` intervals around the raw GPU work are
-// emitted by `StabilizationRenderer`; this aggregator is the report-facing summary.
+// Purity: value types only, no CoreMedia / Vision / CoreImage imports. The actor feeds
+// per-frame stage latencies (estimation + render, measured around the work-queue bridge) and
+// reads back the p50/p95 report line at session stop. The `os_signpost` intervals around the
+// raw GPU work are emitted by `StabilizationRenderer`; this aggregator is the report-facing
+// summary.
 
 import Foundation
 
@@ -76,19 +77,15 @@ nonisolated struct StabilizationLatencyAggregator {
 /// End-of-session diagnostics of the stabilization stage, consumed by `RecordingSession` when
 /// the camera pipeline stops: the latency line goes verbatim into the technical report (AC-8),
 /// the bypass time is forwarded to `DropMonitor.noteStabilizationBypass` (AC-4).
-nonisolated struct StabilizationDiagnostics: Sendable {
+///
+/// `Equatable` is declared ON THE TYPE so the synthesized witnesses stay `nonisolated` under
+/// `InferIsolatedConformances` (issue #187 pattern).
+nonisolated struct StabilizationDiagnostics: Equatable {
     /// The AC-8 latency report line (see `StabilizationLatencyAggregator.reportLine`).
     nonisolated let latencyLine: String
 
     /// Session-relative seconds of the bypass transition, or `nil` when the stage never bypassed.
     nonisolated let bypassAtSeconds: Double?
-}
-
-extension StabilizationDiagnostics: Equatable {
-    /// Manual `nonisolated` witness (project pattern — see `DropReason`).
-    nonisolated static func == (lhs: StabilizationDiagnostics, rhs: StabilizationDiagnostics) -> Bool {
-        lhs.latencyLine == rhs.latencyLine && lhs.bypassAtSeconds == rhs.bypassAtSeconds
-    }
 }
 
 // MARK: - StabilizationDiagnosticsProviding

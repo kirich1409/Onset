@@ -38,45 +38,32 @@ nonisolated enum DropReportFormatter {
     /// - Parameters:
     ///   - timestamp: Session-start timestamp, formatted with the same `YYYY-MM-DD HH.mm.ss` helper
     ///     used for the recording file/folder names so the report header matches the folder name.
-    ///   - counters: Cumulative per-reason drop tallies (`DropCounters`).
+    ///   - snapshot: The session's drop health (cumulative counters, degradation latch,
+    ///     dominant cause) exactly as `DropMonitor.snapshot()` produced it.
     ///   - breakdown: Per-source diagnostic drop counts (`DropBreakdown`).
-    ///   - sessionEverDegraded: `true` when the session transitioned to `.degraded` at least once.
-    ///   - dominantCause: The backpressure stage that accumulated the most drops, or `.notDegraded`.
     ///   - stabilizationLatencyLine: The stage's latency summary (#297 AC-8), or `nil` when the
-    ///     stabilization stage was not active this session (the line is then omitted entirely).
+    ///     stabilization stage was not active this session (the block is then omitted entirely).
     /// - Returns: The complete report text, terminated by a trailing newline.
     nonisolated static func report(
         timestamp: Date,
-        counters: DropCounters,
+        snapshot: DropHealthSnapshot,
         breakdown: DropBreakdown,
-        sessionEverDegraded: Bool,
-        dominantCause: DropCause,
         stabilizationLatencyLine: String?
     )
     -> String {
+        let counters = snapshot.counters
         let formattedTimestamp = RecordingOutput.makeDateFormatter().string(from: timestamp)
-        let degradedLine = sessionEverDegraded ? "да" : "нет"
-
-        // Hold repeats: all encoder events minus backpressure minus CFR normalization.
-        // Safe because encoder sources only emit encoderBackpressureDrops, encoderHoldDrops, and
-        // cfrNormalizationDrops — capture sources never emit CFR or hold events. The stabilization
-        // stage's events live in their own breakdown bucket and do not affect this arithmetic.
-        let encoderTotal = breakdown.encodeScreen + breakdown.encodeCamera
-        let encoderBpTotal = breakdown.bpEncodeScreen + breakdown.bpEncodeCamera
-        let holdDrops = encoderTotal - encoderBpTotal - counters.cfrNormalizationDrops
+        let degradedLine = snapshot.sessionEverDegraded ? "да" : "нет"
+        let holdDrops = self.holdDrops(breakdown: breakdown, counters: counters)
 
         // Stage-internal drops (#297): slot eviction / pool exhaustion / render failure —
         // the fresh frame is lost (the tick is refilled by a downstream hold-repeat).
         let stageDrops = breakdown.stabilizeCamera - breakdown.bpStabilizeCamera
 
-        // Optional trailing stabilization block (#297 AC-4/AC-8): the latency line is present
-        // only when the stage ran; the bypass line always accompanies it.
-        let stabilizationBlock: String = if let stabilizationLatencyLine {
-            self.bypassLine(breakdown.stabilizationBypassAtSeconds) + "\n"
-                + stabilizationLatencyLine + "\n"
-        } else {
-            ""
-        }
+        let stabilizationBlock = self.stabilizationBlock(
+            bypassAtSeconds: breakdown.stabilizationBypassAtSeconds,
+            latencyLine: stabilizationLatencyLine
+        )
 
         return """
         Onset — техническая информация о записи
@@ -105,12 +92,35 @@ nonisolated enum DropReportFormatter {
           Запись в файл: \(breakdown.writer)
 
         Острая деградация (всплеск backpressure): \(degradedLine)
-        Основная причина: \(self.causeDescription(dominantCause))
+        Основная причина: \(self.causeDescription(snapshot.dominantCause))
         \(stabilizationBlock)
         """
     }
 
-    // MARK: - Stabilization bypass line
+    // MARK: - Coalescing arithmetic
+
+    /// Hold repeats: all encoder events minus backpressure minus CFR normalization.
+    /// Safe because encoder sources only emit encoderBackpressureDrops, encoderHoldDrops, and
+    /// cfrNormalizationDrops — capture sources never emit CFR or hold events. The stabilization
+    /// stage's events live in their own breakdown bucket and do not affect this arithmetic.
+    nonisolated private static func holdDrops(breakdown: DropBreakdown, counters: DropCounters) -> Int {
+        let encoderTotal = breakdown.encodeScreen + breakdown.encodeCamera
+        let encoderBpTotal = breakdown.bpEncodeScreen + breakdown.bpEncodeCamera
+        return encoderTotal - encoderBpTotal - counters.cfrNormalizationDrops
+    }
+
+    // MARK: - Stabilization block (#297 AC-4/AC-8)
+
+    /// Builds the optional trailing stabilization block: present only when the stage ran
+    /// (`latencyLine != nil`); the bypass line always accompanies the latency line.
+    nonisolated private static func stabilizationBlock(
+        bypassAtSeconds: Double?,
+        latencyLine: String?
+    )
+    -> String {
+        guard let latencyLine else { return "" }
+        return self.bypassLine(bypassAtSeconds) + "\n" + latencyLine + "\n"
+    }
 
     /// Renders the stabilization bypass line (#297 AC-4): the transition time in whole seconds
     /// from session start, or an explicit "no bypass" statement.

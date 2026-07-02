@@ -945,10 +945,8 @@ actor RecordingSession {
     private func writeTechnicalReport(snapshot: DropHealthSnapshot, breakdown: DropBreakdown) {
         let text = DropReportFormatter.report(
             timestamp: self.sessionStartDate,
-            counters: snapshot.counters,
+            snapshot: snapshot,
             breakdown: breakdown,
-            sessionEverDegraded: snapshot.sessionEverDegraded,
-            dominantCause: snapshot.dominantCause,
             // Present only when the stabilization stage ran this session (#297 AC-8) — captured
             // from the decorator in performStop / stopAndFinalizePipeline.
             stabilizationLatencyLine: self.stabilizationDiagnostics?.latencyLine

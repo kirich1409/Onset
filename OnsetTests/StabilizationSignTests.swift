@@ -1,9 +1,9 @@
 // StabilizationSignTests.swift
 // OnsetTests
 //
-// AC-6 (#297): the correction sign is pinned by an executable test on the REAL Vision +
-// CIContext(Metal) stack — "на синтетической паре буферов со сдвигом (+Δ) этап выдаёт
-// коррекцию (−Δ)". The check is end-to-end and falsifiable: frame B is frame A's pattern
+// Scope: AC-6 (#297) — the correction sign is pinned by an executable test on the REAL Vision +
+// CIContext(Metal) stack ("на синтетической паре буферов со сдвигом (+Δ) этап выдаёт
+// коррекцию (−Δ)"). The check is end-to-end and falsifiable: frame B is frame A's pattern
 // shifted by +Δ; the estimate→smoother→render chain must bring B's rendered content back
 // onto A's rendered position. A flipped sign would move the content 2Δ away and fail loudly.
 //
@@ -14,6 +14,10 @@
 // Also pins AC-7's unit-checkable half: the output buffer comes from the stage's own pool in
 // NV12/420v at the PLANNED dimensions (scale-back, not "smaller output"), with the PTS and
 // hold flag carried verbatim.
+//
+// no_magic_numbers is file-scoped-exempt per OnsetTests/CLAUDE.md: the synthetic pattern
+// geometry, shift stimulus, and tolerances ARE the fixture data of this suite.
+// swiftlint:disable no_magic_numbers
 
 import CoreGraphics
 import CoreMedia
@@ -27,16 +31,8 @@ import Testing
 private let planWidth = 1920
 private let planHeight = 1080
 
-/// Draws the deterministic test pattern — a dark background with a fixed constellation of
-/// bright rectangles — shifted by `(offsetX, offsetY)` pixels, into a BGRA buffer.
-/// The WHOLE pattern shifts together: Vision estimates the dominant global translation.
-private func makePatternFrame(
-    offsetX: Int,
-    offsetY: Int,
-    ptsSeconds: Double,
-    isHoldRepeat: Bool = false
-)
--> VideoFrame {
+/// Allocates a Metal-compatible, IOSurface-backed BGRA buffer at the plan dimensions.
+private func makeBGRABuffer() -> CVPixelBuffer {
     var buffer: CVPixelBuffer?
     let attrs: [CFString: Any] = [
         kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
@@ -53,7 +49,20 @@ private func makePatternFrame(
     guard status == kCVReturnSuccess, let buffer else {
         preconditionFailure("BGRA buffer alloc failed: \(status)")
     }
+    return buffer
+}
 
+/// Draws the deterministic test pattern — a dark background with a fixed constellation of
+/// bright rectangles — shifted by `(offsetX, offsetY)` pixels, into a BGRA buffer.
+/// The WHOLE pattern shifts together: Vision estimates the dominant global translation.
+private func makePatternFrame(
+    offsetX: Int,
+    offsetY: Int,
+    ptsSeconds: Double,
+    isHoldRepeat: Bool = false
+)
+-> VideoFrame {
+    let buffer = makeBGRABuffer()
     CVPixelBufferLockBaseAddress(buffer, [])
     defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
     guard let context = CGContext(
@@ -128,9 +137,9 @@ private func lumaCentroid(of buffer: CVPixelBuffer) -> (x: Double, y: Double) {
 
 /// Euclidean distance between two centroids.
 private func distance(_ lhs: (x: Double, y: Double), _ rhs: (x: Double, y: Double)) -> Double {
-    let dx = lhs.x - rhs.x
-    let dy = lhs.y - rhs.y
-    return (dx * dx + dy * dy).squareRoot()
+    let deltaX = lhs.x - rhs.x
+    let deltaY = lhs.y - rhs.y
+    return (deltaX * deltaX + deltaY * deltaY).squareRoot()
 }
 
 // MARK: - Suite
@@ -168,14 +177,15 @@ struct StabilizationSignTests {
         // The measured raw shift magnitude must match the stimulus (×2 estimation coords) —
         // the stimulus-validity gate of this test (mirrors the AC-1 OFF-gate philosophy).
         let estScale = 2.0
-        let measuredMagnitude = (rawShift.dx * rawShift.dx + rawShift.dy * rawShift.dy).squareRoot() / estScale
+        let rawMagnitude = (rawShift.deltaX * rawShift.deltaX + rawShift.deltaY * rawShift.deltaY).squareRoot()
+        let measuredMagnitude = rawMagnitude / estScale
         let stimulusMagnitude = (Double(shiftX * shiftX) + Double(shiftY * shiftY)).squareRoot()
         #expect(abs(measuredMagnitude - stimulusMagnitude) <= 1.5)
 
         // Run the pinned smoother chain exactly as the decorator does (1080p plan → scale 1).
         var smoother = StabilizationSmoother()
         let correction = smoother.ingest(
-            shift: StabilizationVector(dx: rawShift.dx / estScale, dy: rawShift.dy / estScale)
+            shift: StabilizationVector(deltaX: rawShift.deltaX / estScale, deltaY: rawShift.deltaY / estScale)
         )
 
         // Render A at rest and B with the produced correction: the contents must align.
@@ -221,3 +231,5 @@ struct StabilizationSignTests {
         await renderer.finish()
     }
 }
+
+// swiftlint:enable no_magic_numbers

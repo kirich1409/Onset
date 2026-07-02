@@ -1,16 +1,18 @@
 // StabilizingVideoSourceTests.swift
 // OnsetTests
 //
-// L2 suites for the StabilizingVideoSource actor decorator (#297): dual-facet forwarding,
-// drop merge + attribution (AC-4), warm-up / estScale choice, correction sign at the
-// orchestration level, freeze, bypass (both triggers' plumbing), one-shot lifecycle, and the
-// failed-start teardown order (fake pattern: RecordingSessionTests fakes).
+// Scope: L2 suites for the StabilizingVideoSource actor decorator (#297) — dual-facet
+// forwarding, drop merge + attribution (AC-4), warm-up / estScale choice, correction sign at
+// the orchestration level, freeze, bypass (both triggers' plumbing), one-shot lifecycle, and
+// the failed-start teardown order (fake pattern: RecordingSessionTests fakes).
 //
 // The fake stage occupies its own serial work queue SYNCHRONOUSLY via a DispatchSemaphore when
 // asked to block (never Task.sleep) — mirroring the live renderer's isolation shape so the
 // eager-drain attribution invariant is exercised for real.
 //
-// swiftlint:disable file_length
+// no_magic_numbers is file-scoped-exempt per OnsetTests/CLAUDE.md: buffer sizes, pts spacings,
+// and plan dimensions are the fixture data of these suites.
+// swiftlint:disable file_length no_magic_numbers
 
 import CoreMedia
 import CoreVideo
@@ -76,8 +78,13 @@ private final class FakeWrappedCamera: VideoFrameSource, AudioSampleSource, @unc
     /// When set, `start(anchoredTo:)` throws this — drives the wrapped-failure teardown path.
     let startError = OSAllocatedUnfairLock<(any Error)?>(initialState: nil)
 
-    var startCalls: Int { self.state.withLock(\.startCalls) }
-    var stopCalls: Int { self.state.withLock(\.stopCalls) }
+    var startCalls: Int {
+        self.state.withLock(\.startCalls)
+    }
+
+    var stopCalls: Int {
+        self.state.withLock(\.stopCalls)
+    }
 
     init() {
         let (frames, framesContinuation) = AsyncStream.makeStream(of: VideoFrame.self)
@@ -221,28 +228,47 @@ private final class FakeStage: StabilizationStage, @unchecked Sendable {
 /// Collects stream elements across isolations for polling assertions.
 private final class FrameLog: @unchecked Sendable {
     private let lock = OSAllocatedUnfairLock(initialState: [VideoFrame]())
-    var frames: [VideoFrame] { self.lock.withLock { $0 } }
-    var count: Int { self.lock.withLock(\.count) }
-    func append(_ frame: VideoFrame) { self.lock.withLock { $0.append(frame) } }
+    var frames: [VideoFrame] {
+        self.lock.withLock { $0 }
+    }
+
+    var count: Int {
+        self.lock.withLock(\.count)
+    }
+
+    func append(_ frame: VideoFrame) {
+        self.lock.withLock { $0.append(frame) }
+    }
 }
 
 /// Collects drop events across isolations for polling assertions.
 private final class DropLog: @unchecked Sendable {
     private let lock = OSAllocatedUnfairLock(initialState: [DropEvent]())
-    var events: [DropEvent] { self.lock.withLock { $0 } }
-    var count: Int { self.lock.withLock(\.count) }
-    func append(_ event: DropEvent) { self.lock.withLock { $0.append(event) } }
+    var events: [DropEvent] {
+        self.lock.withLock { $0 }
+    }
+
+    var count: Int {
+        self.lock.withLock(\.count)
+    }
+
+    func append(_ event: DropEvent) {
+        self.lock.withLock { $0.append(event) }
+    }
 }
 
 // MARK: - SUT factory
 
 /// Builds the decorator + fakes with a canonical 1080p plan geometry.
+///
+/// large_tuple is silenced on the return type: the destructured (sut, camera, stage) triple is
+/// the idiomatic test-factory return; a named carrier struct would only add ceremony.
 private func makeSUT(
     warmUpFrameCount: Int = 1,
     consecutiveErrorLimit: Int = StabilizationTuning.consecutiveErrorLimit,
     overloadDetector: StabilizationOverloadDetector = StabilizationOverloadDetector()
 )
--> (sut: StabilizingVideoSource, camera: FakeWrappedCamera, stage: FakeStage) {
+-> (sut: StabilizingVideoSource, camera: FakeWrappedCamera, stage: FakeStage) { // swiftlint:disable:this large_tuple
     let camera = FakeWrappedCamera()
     let stage = FakeStage()
     let plan = CapabilityResolver.makeStabilizationPlan(planWidth: 1920, planHeight: 1080)
@@ -282,7 +308,9 @@ private func consumeDrops(_ sut: StabilizingVideoSource, into log: DropLog) -> T
 
 @Suite("StabilizingVideoSource — lifecycle & failed-start teardown")
 struct StabilizingVideoSourceLifecycleTests {
-    @Test("Stage prepare failure: wrapped camera never starts; error is captureSetupFailed with StabilizationError inner")
+    @Test(
+        "Stage prepare failure: wrapped camera never starts; error is captureSetupFailed with StabilizationError inner"
+    )
     func prepareFailure_teardownOrder() async {
         let (sut, camera, stage) = makeSUT()
         stage.state.withLock { $0.prepareError = StabilizationError.metalUnavailable }
@@ -422,7 +450,7 @@ struct StabilizingVideoSourceProcessingTests {
         stage.state.withLock {
             $0.estimateScript = [
                 .success(nil), // first stabilized frame: no pair yet
-                .success(StabilizationVector(dx: 6.0, dy: -2.0)), // raw, estimation coords
+                .success(StabilizationVector(deltaX: 6.0, deltaY: -2.0)), // raw, estimation coords
             ]
         }
         let frameLog = FrameLog()
@@ -442,8 +470,8 @@ struct StabilizingVideoSourceProcessingTests {
         #expect(corrections[1] == .zero)
         #expect(corrections[2] == .zero)
         // Frame 4: shiftEq = raw/2 = (3, −1); correction ≈ −shiftEq (± maxRefStep), plan scale 1.
-        #expect(abs(corrections[3].dx - (-3.0)) <= StabilizationTuning.maxRefStep + 1e-9)
-        #expect(abs(corrections[3].dy - 1.0) <= StabilizationTuning.maxRefStep + 1e-9)
+        #expect(abs(corrections[3].deltaX - -3.0) <= StabilizationTuning.maxRefStep + 1e-9)
+        #expect(abs(corrections[3].deltaY - 1.0) <= StabilizationTuning.maxRefStep + 1e-9)
 
         await sut.stop()
         await framesTask.value
@@ -455,7 +483,7 @@ struct StabilizingVideoSourceProcessingTests {
         stage.state.withLock {
             $0.estimateScript = [
                 .success(nil),
-                .success(StabilizationVector(dx: 4.0, dy: 0)),
+                .success(StabilizationVector(deltaX: 4.0, deltaY: 0)),
                 .failure(StabilizationStageError.estimationFailed),
             ]
         }
@@ -575,7 +603,9 @@ struct StabilizingVideoSourceDropTests {
 
 @Suite("StabilizingVideoSource — bypass degradation")
 struct StabilizingVideoSourceBypassTests {
-    @Test("Consecutive estimation errors engage bypass: estimation stops, correction ramps, diagnostics record the time")
+    @Test(
+        "Consecutive estimation errors engage bypass: estimation stops, correction ramps, diagnostics record the time"
+    )
     func consecutiveErrors_engageBypass() async throws {
         let (sut, camera, stage) = makeSUT(warmUpFrameCount: 1, consecutiveErrorLimit: 3)
         // Every estimation fails; the error path still renders with the frozen correction.
@@ -655,4 +685,6 @@ struct StabilizingVideoSourceBypassTests {
     }
 }
 
-// swiftlint:enable file_length
+// swiftlint:enable no_magic_numbers
+// file_length stays disabled through EOF: it is a whole-file rule, so re-enabling it before the
+// last line would re-trigger on the total count (same pattern as FileWriterTests).

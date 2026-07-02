@@ -68,8 +68,8 @@ nonisolated enum CapabilityResolver {
     /// `planWidth / 1920` so the crop keeps the same relative size at any planned resolution.
     private static let stabilizationReferenceWidth = 1920.0
 
-    /// 16:9 aspect factor used to derive the vertical margin from the horizontal one.
-    private static let stabilizationAspect = 9.0 / 16.0
+    /// 16:9 aspect factor (9/16 = 0.5625) used to derive the vertical margin from the horizontal.
+    private static let stabilizationAspect = 0.5625
 
     // MARK: - Private types
 
@@ -239,7 +239,6 @@ nonisolated enum CapabilityResolver {
     )
     -> ResolvedCameraPlan.StabilizationPlan {
         // The margin is cut from BOTH sides of each axis.
-        // swiftlint:disable:next no_magic_numbers
         let bothSides = 2
         // Round to the nearest EVEN integer: (x / 2).rounded() * 2.
         let rawMarginX = Self.stabilizationBaseMarginX * Double(planWidth) / Self.stabilizationReferenceWidth

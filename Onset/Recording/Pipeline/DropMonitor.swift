@@ -19,9 +19,12 @@
 // `actor DropMonitor` is explicit so the monitor runs off the main actor; all value types are
 // `nonisolated` with manual nonisolated Equatable witnesses (mirrors `DropReason`).
 //
-// file_length: DropCounters, DropBreakdown, BackpressureDegradationWindow, and DropMonitor are
-// tightly coupled (shared actor state, shared witness pattern). Splitting them across files
-// would duplicate the InferIsolatedConformances rationale. swiftlint:disable file_length
+// file_length / type_body_length: DropCounters, DropBreakdown, BackpressureDegradationWindow, and
+// DropMonitor are tightly coupled (shared actor state, shared witness pattern); the actor's
+// reason/source accounting switches grew with the stabilization source (#297) but remain ONE
+// routing table — splitting either dimension across files would duplicate the
+// InferIsolatedConformances rationale and scatter the counter invariants.
+// swiftlint:disable file_length type_body_length
 
 import CoreMedia
 import Foundation
@@ -713,3 +716,7 @@ actor DropMonitor {
         self.stateContinuation.finish()
     }
 }
+
+// swiftlint:enable type_body_length
+// file_length stays disabled through EOF: it is a whole-file rule, so re-enabling it before the
+// last line would re-trigger on the total count (same pattern as RecordingSession).

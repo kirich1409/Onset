@@ -8,13 +8,13 @@
 // testable on L2 with synthetic numbers. The impure GPU work (upscale, Vision registration,
 // CI render) lives in `StabilizationRenderer`; the orchestration lives in `StabilizingVideoSource`.
 //
-// Coordinate contract: the smoother operates in 1080p-EQUIVALENT pixels. The stage divides the
+// Coordinates: the smoother operates in 1080p-EQUIVALENT pixels. The stage divides the
 // raw Vision shift by the estimation scale before ingest (`shiftEq = shiftRaw / estScale`) and
 // multiplies the returned correction once on the way out (`correctionPlan = correctionEq ×
 // planWidth / 1920`). This keeps `alpha` / `maxRefStep` at their empirically tuned meaning
 // (spike #295) at any planned resolution.
 //
-// Sign contract (AC-6): `correction = ref − cum` where `cum` accumulates the raw Vision
+// Sign (AC-6): `correction = ref − cum` where `cum` accumulates the raw Vision
 // `alignmentTransform` shifts — for a lock-tight reference this is `correction ≈
 // −alignmentTransform`. Empirically validated by the spike: the "+" sign DOUBLES the shake.
 // Pinned by `StabilizationSignTests`.
@@ -82,52 +82,41 @@ nonisolated enum StabilizationTuning {
 
 /// A 2D translation in pixels — the smoother's own CoreGraphics-free vector type.
 ///
-/// A dedicated type (not `CGVector`) keeps this pure unit free of framework imports and gives
-/// the manual `nonisolated` equality the project's value types require.
-nonisolated struct StabilizationVector: Sendable {
+/// A dedicated type (not `CGVector`) keeps this pure unit free of framework imports. The
+/// `Equatable` conformance is declared ON THE TYPE (not a bare extension) so the synthesized
+/// witnesses are `nonisolated` under `InferIsolatedConformances` — a separate-extension
+/// conformance would be inferred `@MainActor`, making `!=` unusable from nonisolated contexts
+/// (issue #187 pattern; "for structs this is sufficient", no manual witness needed).
+nonisolated struct StabilizationVector: Equatable {
     /// Horizontal component, px.
-    nonisolated let dx: Double
+    nonisolated let deltaX: Double
     /// Vertical component, px.
-    nonisolated let dy: Double
+    nonisolated let deltaY: Double
 
     /// The zero vector.
-    nonisolated static let zero = StabilizationVector(dx: 0, dy: 0)
+    nonisolated static let zero = Self(deltaX: 0, deltaY: 0)
 
-    /// Creates a vector from its components.
-    nonisolated init(dx: Double, dy: Double) {
-        self.dx = dx
-        self.dy = dy
-    }
-
-    /// Component-wise sum.
-    nonisolated static func + (lhs: StabilizationVector, rhs: StabilizationVector) -> StabilizationVector {
-        StabilizationVector(dx: lhs.dx + rhs.dx, dy: lhs.dy + rhs.dy)
+    /// Component-wise in-place sum.
+    nonisolated static func += (lhs: inout Self, rhs: Self) {
+        lhs = Self(deltaX: lhs.deltaX + rhs.deltaX, deltaY: lhs.deltaY + rhs.deltaY)
     }
 
     /// Component-wise difference.
-    nonisolated static func - (lhs: StabilizationVector, rhs: StabilizationVector) -> StabilizationVector {
-        StabilizationVector(dx: lhs.dx - rhs.dx, dy: lhs.dy - rhs.dy)
+    nonisolated static func - (lhs: Self, rhs: Self) -> Self {
+        Self(deltaX: lhs.deltaX - rhs.deltaX, deltaY: lhs.deltaY - rhs.deltaY)
     }
 
     /// Uniform scale.
-    nonisolated static func * (lhs: StabilizationVector, rhs: Double) -> StabilizationVector {
-        StabilizationVector(dx: lhs.dx * rhs, dy: lhs.dy * rhs)
+    nonisolated static func * (lhs: Self, rhs: Double) -> Self {
+        Self(deltaX: lhs.deltaX * rhs, deltaY: lhs.deltaY * rhs)
     }
 
     /// Component-wise clamp to `±limit` on each axis.
-    nonisolated func clamped(to limit: Double) -> StabilizationVector {
-        StabilizationVector(
-            dx: min(max(self.dx, -limit), limit),
-            dy: min(max(self.dy, -limit), limit)
+    nonisolated func clamped(to limit: Double) -> Self {
+        Self(
+            deltaX: min(max(self.deltaX, -limit), limit),
+            deltaY: min(max(self.deltaY, -limit), limit)
         )
-    }
-}
-
-extension StabilizationVector: Equatable {
-    /// Manual `nonisolated` witness (project pattern — see `DropReason` for the
-    /// `InferIsolatedConformances` rationale).
-    nonisolated static func == (lhs: StabilizationVector, rhs: StabilizationVector) -> Bool {
-        lhs.dx == rhs.dx && lhs.dy == rhs.dy
     }
 }
 
@@ -185,9 +174,9 @@ nonisolated struct StabilizationSmoother {
     /// - Returns: `ref − cum` — the translation to apply to the frame (AC-6 sign: ≈ −shift
     ///   for a locked reference).
     nonisolated mutating func ingest(shift: StabilizationVector) -> StabilizationVector {
-        self.cum = self.cum + shift
+        self.cum += shift
         let pull = (self.cum - self.ref) * self.alpha
-        self.ref = self.ref + pull.clamped(to: self.maxRefStep)
+        self.ref += pull.clamped(to: self.maxRefStep)
         return self.correction
     }
 
@@ -204,8 +193,8 @@ nonisolated struct StabilizationSmoother {
     )
     -> StabilizationVector {
         StabilizationVector(
-            dx: Self.rampComponent(current.dx, step: step),
-            dy: Self.rampComponent(current.dy, step: step)
+            deltaX: self.rampComponent(current.deltaX, step: step),
+            deltaY: self.rampComponent(current.deltaY, step: step)
         )
     }
 

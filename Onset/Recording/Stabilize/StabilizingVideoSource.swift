@@ -3,7 +3,7 @@
 //
 // #297 — the camera-stabilization stage as a dual-facet decorator over `CameraSource`.
 //
-// Data flow: `CameraSource.frames` → [depth-1 slot → work task → estimation → smoother → render]
+// Dataflow: `CameraSource.frames` → [depth-1 slot → work task → estimation → smoother → render]
 // → own bounded `frames` stream → `VideoEncoder.ingest`. `audioSamples` / `events` forward to the
 // wrapped source untouched; `drops` is an OWN stream merging the wrapped source's drops (original
 // attribution preserved) with the stage's drops (`DropSource.stabilizeCamera`).
@@ -19,6 +19,11 @@
 // terminal, `stop()` is idempotent. Stop order mirrors `VideoEncoder.stop()`'s join discipline:
 // wrapped.stop → drain joins (input tail) → work joins (in-flight frame lands) → own streams
 // finish → GPU resources released. No frame is lost on a graceful stop.
+//
+// file_length / type_body_length: the drain side, work side, bypass machine, and teardown share
+// one actor's state and a load-bearing ordering (the same rationale RecordingSession documents);
+// splitting into cross-file extensions would force the private state open and scatter the
+// eager-drain / stop-order invariants. swiftlint:disable file_length type_body_length
 
 import CoreGraphics
 import CoreMedia
@@ -550,8 +555,8 @@ actor StabilizingVideoSource: VideoFrameSource, AudioSampleSource {
         let marginX = Double(self.stabilization.cropRect.minX)
         let marginY = Double(self.stabilization.cropRect.minY)
         return StabilizationVector(
-            dx: min(max(correction.dx, -marginX), marginX),
-            dy: min(max(correction.dy, -marginY), marginY)
+            deltaX: min(max(correction.deltaX, -marginX), marginX),
+            deltaY: min(max(correction.deltaY, -marginY), marginY)
         )
     }
 
@@ -593,3 +598,7 @@ extension StabilizingVideoSource: StabilizationDiagnosticsProviding {
         )
     }
 }
+
+// swiftlint:enable type_body_length
+// file_length stays disabled through EOF: it is a whole-file rule, so re-enabling it before the
+// last line would re-trigger on the total count (same pattern as RecordingSession).

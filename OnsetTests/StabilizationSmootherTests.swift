@@ -1,7 +1,7 @@
 // StabilizationSmootherTests.swift
 // OnsetTests
 //
-// L2 suites for the pure decision core of the camera-stabilization stage (#297):
+// Scope: L2 suites for the pure decision core of the camera-stabilization stage (#297) —
 // StabilizationSmoother (lock-with-slow-recenter + bypass ramp), StabilizationWarmUp
 // (cadence-driven estScale choice), StabilizationOverloadDetector (bypass trigger 1), and
 // StabilizationLatencyAggregator (AC-8 report line). Pure value types, synthetic numbers,
@@ -17,41 +17,41 @@ struct StabilizationSmootherTests {
     @Test("Single shift +Δ produces correction ≈ −Δ (sign contract at the smoother level)")
     func singleShift_correctionIsNegatedShift() {
         var smoother = StabilizationSmoother()
-        let correction = smoother.ingest(shift: StabilizationVector(dx: 2.0, dy: -1.0))
+        let correction = smoother.ingest(shift: StabilizationVector(deltaX: 2.0, deltaY: -1.0))
         // ref moved at most maxRefStep toward cum, so correction = ref − cum ≈ −shift.
-        #expect(abs(correction.dx - (-2.0)) <= StabilizationTuning.maxRefStep)
-        #expect(abs(correction.dy - 1.0) <= StabilizationTuning.maxRefStep)
-        #expect(correction.dx < 0)
-        #expect(correction.dy > 0)
+        #expect(abs(correction.deltaX - -2.0) <= StabilizationTuning.maxRefStep)
+        #expect(abs(correction.deltaY - 1.0) <= StabilizationTuning.maxRefStep)
+        #expect(correction.deltaX < 0)
+        #expect(correction.deltaY > 0)
     }
 
     @Test("Rate limit: a burst cannot drag the reference more than maxRefStep per frame")
     func burst_referenceIsRateLimited() {
         var smoother = StabilizationSmoother()
         // A huge one-frame spike: alpha·(cum − ref) = 0.05·10 = 0.5 ≫ maxRefStep.
-        _ = smoother.ingest(shift: StabilizationVector(dx: 10.0, dy: 0))
-        #expect(smoother.ref.dx == StabilizationTuning.maxRefStep)
+        _ = smoother.ingest(shift: StabilizationVector(deltaX: 10.0, deltaY: 0))
+        #expect(smoother.ref.deltaX == StabilizationTuning.maxRefStep)
         // Second frame with zero shift: the reference keeps crawling with the same clamp.
         _ = smoother.ingest(shift: .zero)
-        #expect(smoother.ref.dx == 2 * StabilizationTuning.maxRefStep)
+        #expect(smoother.ref.deltaX == 2 * StabilizationTuning.maxRefStep)
     }
 
     @Test("Recenter: after a step offset the correction decays by ≤ maxRefStep per frame")
     func stepOffset_slowRecenter() {
         var smoother = StabilizationSmoother()
-        var correction = smoother.ingest(shift: StabilizationVector(dx: 1.0, dy: 0))
-        let initial = correction.dx
+        var correction = smoother.ingest(shift: StabilizationVector(deltaX: 1.0, deltaY: 0))
+        let initial = correction.deltaX
         // 100 zero-shift frames: |correction| shrinks monotonically, one rate-limited step each.
         var previous = initial
         for _ in 0..<100 {
             correction = smoother.ingest(shift: .zero)
-            let stepMagnitude = abs(correction.dx - previous)
+            let stepMagnitude = abs(correction.deltaX - previous)
             #expect(stepMagnitude <= StabilizationTuning.maxRefStep + 1e-12)
-            #expect(abs(correction.dx) <= abs(previous))
-            previous = correction.dx
+            #expect(abs(correction.deltaX) <= abs(previous))
+            previous = correction.deltaX
         }
         // 100 × 0.01 = 1.0 → the offset is fully recentered by now (clamped at cum).
-        #expect(abs(correction.dx) <= abs(initial))
+        #expect(abs(correction.deltaX) <= abs(initial))
     }
 
     @Test("Slow real drift passes through the rate limit with small steady-state lag")
@@ -60,30 +60,30 @@ struct StabilizationSmootherTests {
         var correction = StabilizationVector.zero
         // Real measured drift ≈ 0.001 px/frame — an order below the rate limit.
         for _ in 0..<1000 {
-            correction = smoother.ingest(shift: StabilizationVector(dx: 0.001, dy: 0))
+            correction = smoother.ingest(shift: StabilizationVector(deltaX: 0.001, deltaY: 0))
         }
         // Steady-state lag e solves alpha·e = rate → e = 0.02; correction ≈ −e.
-        #expect(abs(correction.dx) < 0.05)
+        #expect(abs(correction.deltaX) < 0.05)
     }
 
     @Test("Freeze accessor: correction without ingest equals ref − cum")
     func correctionAccessor_matchesState() {
         var smoother = StabilizationSmoother()
-        let ingested = smoother.ingest(shift: StabilizationVector(dx: 3.0, dy: -2.0))
+        let ingested = smoother.ingest(shift: StabilizationVector(deltaX: 3.0, deltaY: -2.0))
         // The freeze path re-reads the same value without feeding a shift.
         #expect(smoother.correction == ingested)
     }
 
     @Test("Bypass ramp moves each axis toward zero by ≤ step and stops exactly at zero")
     func ramp_reachesZeroWithoutOvershoot() {
-        var current = StabilizationVector(dx: 0.35, dy: -0.25)
+        var current = StabilizationVector(deltaX: 0.35, deltaY: -0.25)
         var steps = 0
         while current != .zero, steps < 10 {
             let next = StabilizationSmoother.ramp(current)
-            #expect(abs(next.dx - current.dx) <= StabilizationTuning.bypassRampStepPx + 1e-12)
-            #expect(abs(next.dy - current.dy) <= StabilizationTuning.bypassRampStepPx + 1e-12)
-            #expect(abs(next.dx) <= abs(current.dx))
-            #expect(abs(next.dy) <= abs(current.dy))
+            #expect(abs(next.deltaX - current.deltaX) <= StabilizationTuning.bypassRampStepPx + 1e-12)
+            #expect(abs(next.deltaY - current.deltaY) <= StabilizationTuning.bypassRampStepPx + 1e-12)
+            #expect(abs(next.deltaX) <= abs(current.deltaX))
+            #expect(abs(next.deltaY) <= abs(current.deltaY))
             current = next
             steps += 1
         }
@@ -94,8 +94,8 @@ struct StabilizationSmootherTests {
 
     @Test("Vector clamp bounds each axis independently")
     func vectorClamp_perAxis() {
-        let clamped = StabilizationVector(dx: 20.0, dy: -3.0).clamped(to: 5.0)
-        #expect(clamped == StabilizationVector(dx: 5.0, dy: -3.0))
+        let clamped = StabilizationVector(deltaX: 20.0, deltaY: -3.0).clamped(to: 5.0)
+        #expect(clamped == StabilizationVector(deltaX: 5.0, deltaY: -3.0))
     }
 }
 
