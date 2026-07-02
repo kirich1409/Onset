@@ -100,9 +100,31 @@ extension CameraSource {
         // Hand the lock's ownership to teardown: from here releaseRunning() in stop() /
         // disconnect / fault is responsible for unlocking, so the defer must NOT fire.
         locked = false
-        cameraSourceLogger.info(
-            "Capture started — dims: \(self.format.pixelWidth)×\(self.format.pixelHeight)"
-        )
+
+        // Read back only after .running above, never earlier (see the INVARIANT above).
+        self.logActualCaptureFormat(device: device)
+    }
+
+    /// Logs the delivered capture dimensions, or an error if they don't match `self.format`.
+    ///
+    /// AVFoundation can silently revert `activeFormat` after `startRunning()` on some device/host
+    /// combinations (#265, #281) — logging the requested snapshot alone would hide a reversion.
+    /// Logs only: `SourceEvent` is pipeline-fatal (stops the session) and `DropMonitor`'s
+    /// degraded-state signal is drop-count based, not format-based — neither fits without new
+    /// cross-actor plumbing, left as a follow-up rather than added speculatively here.
+    func logActualCaptureFormat(device: AVCaptureDevice) {
+        let actualDims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        guard actualDims.width == self.format.pixelWidth, actualDims.height == self.format.pixelHeight else {
+            cameraSourceLogger.error(
+                """
+                Capture started with reverted format — requested \
+                \(self.format.pixelWidth)×\(self.format.pixelHeight), device delivered \
+                \(actualDims.width)×\(actualDims.height)
+                """
+            )
+            return
+        }
+        cameraSourceLogger.info("Capture started — dims: \(actualDims.width)×\(actualDims.height)")
     }
 
     /// Acquires `AVCaptureDevice.lockForConfiguration()`, wrapping the error in `RecordingError`.
