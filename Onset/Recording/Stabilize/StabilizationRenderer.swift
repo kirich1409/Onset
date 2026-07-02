@@ -136,6 +136,19 @@ nonisolated final class StabilizationRenderer: StabilizationStage, @unchecked Se
     /// output-stream depth `.bufferingNewest(4)` under encoder backpressure = 12.
     private static let outputPoolAllocationThreshold = 12
 
+    /// Aux attributes for pooled allocations: the fixed threshold turns unbounded pool growth
+    /// under downstream stall into an explicit `outputPoolExhausted` drop. Built once — the
+    /// dictionary only wraps `outputPoolAllocationThreshold`, a process-lifetime constant, so
+    /// rebuilding it on every `renderOnQueue` call was a needless per-frame CFDictionary allocation.
+    /// `nonisolated(unsafe)`: `CFDictionary` is not `Sendable`, but this instance is deeply
+    /// immutable (built once from an `Int` literal, never mutated) and only ever read — safe to
+    /// share across the work queue without a lock, same rationale as the queue-confined vars above.
+    /// The unqualified `outputPoolAllocationThreshold` below (no `self`/`Self`) is required: a
+    /// stored property initializer cannot reference either.
+    nonisolated(unsafe) private static let poolAuxAttributes: CFDictionary = [
+        kCVPixelBufferPoolAllocationThresholdKey: outputPoolAllocationThreshold,
+    ] as CFDictionary
+
     private static let logger = Logger(
         subsystem: "dev.androidbroadcast.Onset",
         category: "StabilizationRenderer"
@@ -382,7 +395,7 @@ nonisolated final class StabilizationRenderer: StabilizationStage, @unchecked Se
         let status = unsafe CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(
             kCFAllocatorDefault,
             pool,
-            Self.poolAuxAttributes(),
+            Self.poolAuxAttributes,
             &output
         )
         if status == kCVReturnWouldExceedAllocationThreshold {
@@ -428,14 +441,6 @@ nonisolated final class StabilizationRenderer: StabilizationStage, @unchecked Se
             kCVPixelBufferHeightKey: height,
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
             kCVPixelBufferMetalCompatibilityKey: true,
-        ] as CFDictionary
-    }
-
-    /// Aux attributes for pooled allocations: the fixed threshold turns unbounded pool growth
-    /// under downstream stall into an explicit `outputPoolExhausted` drop.
-    nonisolated private static func poolAuxAttributes() -> CFDictionary {
-        [
-            kCVPixelBufferPoolAllocationThresholdKey: self.outputPoolAllocationThreshold,
         ] as CFDictionary
     }
 
