@@ -85,12 +85,21 @@ extension MainViewModel {
 
     /// Resolves the camera format for the active camera. Returns `nil` when camera is disabled
     /// or no camera is selected. Throws and sets `recordError` when the camera has no suitable format.
+    ///
+    /// Record path opts into `allowAboveFullHD: true` — native 4K (e.g. the Brio's 3840×2160 16:9
+    /// format) is preferred when the camera advertises it. The camera encoder is built from this
+    /// same resolved format's dimensions (`CapabilityResolver` → `RecordingComponentFactories`), so
+    /// there is no upscale mismatch. Budget math: camera 4K30 (~248.8M px/s) + screen 4K60
+    /// (~497.7M px/s) ≈ 746.5M px/s, under the 995M `EngineBudgetCap` with ~25% headroom; L5 on the
+    /// reference Brio (2026-07-02) confirmed zero frame loss recording both at native resolution,
+    /// including under worst-case full-screen motion.
     func resolveCameraFormat() throws -> CameraFormat? {
         guard let camera = self.activeCamera else { return nil }
         do {
             return try CameraFormatSelector.pickBestFormat(
                 from: camera.formats,
-                minFps: Double(RecordingConfiguration.mvpDefault.minCameraFps)
+                minFps: Double(RecordingConfiguration.mvpDefault.minCameraFps),
+                allowAboveFullHD: true
             )
         } catch {
             self.recordError = "Не удалось выбрать формат камеры"
