@@ -71,6 +71,15 @@ nonisolated struct RecordingConfiguration {
     /// session start. Default `false` (raw sensor orientation).
     nonisolated let cameraMirror: Bool
 
+    /// Whether the camera-stabilization stage (#297) is enabled for the recording.
+    ///
+    /// Read fresh at record start (`.nextRecordingStart` policy — the session-fixed crop geometry
+    /// and buffer pools cannot change mid-record); `CapabilityResolver` turns it into
+    /// `ResolvedCameraPlan.stabilization`. Affects the RECORD path only — the live preview runs
+    /// outside the stabilization decorator by design. Default `false` (opt-in: the stage costs
+    /// ~30 ms/frame of GPU work at the Brio cadence and crops ~1.7% of the image).
+    nonisolated let cameraStabilization: Bool
+
     // MARK: - Rate Control (VBR)
 
     /// Average-bitrate lookup table as an ordered array of (key, value) pairs.
@@ -268,7 +277,15 @@ nonisolated struct RecordingConfiguration {
     ///     `~/Movies/Onset/` is used as the default.
     ///   - cameraMirror: Whether the recorded camera image is horizontally mirrored. Default
     ///     `false` so `static let mvpDefault` and existing callers compile unchanged.
-    nonisolated static func makeMVPDefault(baseDirectory: URL? = nil, cameraMirror: Bool = false) -> Self {
+    ///   - cameraStabilization: Whether the camera-stabilization stage is enabled (#297).
+    ///     Default `false` (opt-in) so `static let mvpDefault` and existing callers compile
+    ///     unchanged.
+    nonisolated static func makeMVPDefault(
+        baseDirectory: URL? = nil,
+        cameraMirror: Bool = false,
+        cameraStabilization: Bool = false
+    )
+    -> Self {
         // `RecordingOutput.directory()` is the single authoritative source for `~/Movies/Onset/`.
         // It uses `NSHomeDirectory()` internally — a plain Foundation free function with no actor
         // isolation — so it is safe to call from this `nonisolated` context.
@@ -299,6 +316,7 @@ nonisolated struct RecordingConfiguration {
             maxScreenFps: 60,
             minCameraFps: 30,
             cameraMirror: cameraMirror,
+            cameraStabilization: cameraStabilization,
             bitrateTable: bitrateTable,
             dataRateLimitsPeakMultiplier: 2.0,
             keyFrameIntervalSeconds: 2.0,
@@ -338,6 +356,7 @@ extension RecordingConfiguration: Equatable {
             && lhs.maxScreenFps == rhs.maxScreenFps
             && lhs.minCameraFps == rhs.minCameraFps
             && lhs.cameraMirror == rhs.cameraMirror
+            && lhs.cameraStabilization == rhs.cameraStabilization
             && bitrateTablesEqual
             && lhs.dataRateLimitsPeakMultiplier == rhs.dataRateLimitsPeakMultiplier
             && lhs.keyFrameIntervalSeconds == rhs.keyFrameIntervalSeconds

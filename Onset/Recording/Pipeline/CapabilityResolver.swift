@@ -33,6 +33,16 @@ import CoreGraphics
 ///
 /// The resolver is TOTAL: it always returns a plan. Deciding whether the plan is
 /// acceptable for the hardware is U1.2's responsibility (`EngineBudgetCap.fits`).
+///
+/// ### Future degradation-lever order (fixed by #297, no code yet)
+/// When a pre-flight degradation path is ever needed, the levers apply in this order:
+/// **clamp → drop stabilization → downscale → fps**. Stabilization is dropped BEFORE the
+/// screen is shrunk or the fps halved: it is an optional enhancement, and its estimation cost
+/// is resolution-independent (always the 1080p-equivalent working resolution), so no current
+/// condition triggers degradation — #297 deliberately ships no degradation code (YAGNI).
+/// Stabilization also does NOT consume `EngineBudgetCap`: the encoder's output dimensions are
+/// unchanged (scale-back), so the VT load is identical; the stage's own GPU load is governed by
+/// its runtime bypass mechanism, not by the pixel budget.
 nonisolated enum CapabilityResolver {
     // MARK: - Constants (spec §"CapabilityProbe и pre-flight бюджет", AC-5)
 
@@ -47,6 +57,19 @@ nonisolated enum CapabilityResolver {
 
     /// Minimum even dimension for a down-scaled screen axis (HEVC floor).
     private static let minEvenDimension = 2
+
+    // MARK: - Stabilization geometry constants (#297)
+
+    /// Horizontal crop margin at the 1080p reference width, in pixels. The spike (#295) proved a
+    /// 16 px margin covers the measured max shake deviation (4.84 px) with 2–3× headroom.
+    private static let stabilizationBaseMarginX = 16.0
+
+    /// Reference width the stabilization margins were tuned at (1080p). Margins scale as
+    /// `planWidth / 1920` so the crop keeps the same relative size at any planned resolution.
+    private static let stabilizationReferenceWidth = 1920.0
+
+    /// 16:9 aspect factor used to derive the vertical margin from the horizontal one.
+    private static let stabilizationAspect = 9.0 / 16.0
 
     // MARK: - Private types
 
@@ -156,7 +179,10 @@ nonisolated enum CapabilityResolver {
             return ResolvedCameraPlan(
                 width: evenCamW,
                 height: evenCamH,
-                fps: cameraFps
+                fps: cameraFps,
+                stabilization: config.cameraStabilization
+                    ? Self.makeStabilizationPlan(planWidth: evenCamW, planHeight: evenCamH)
+                    : nil
             )
         }
 
@@ -189,6 +215,44 @@ nonisolated enum CapabilityResolver {
     )
     -> ResolvedRecordingPlan {
         self.resolve(display: display, cameraFormat: cameraFormat, config: config).plan
+    }
+
+    // MARK: - Stabilization geometry (#297)
+
+    /// Derives the session-fixed stabilization crop + scale-back for a planned camera frame.
+    ///
+    /// Margin formula (spec #297): `marginX = roundEven(16 × planWidth / 1920)`,
+    /// `marginY = marginX × 9/16` — for the 16:9 planned frames the camera pipeline produces
+    /// (`CameraFormatSelector` picks 16:9 formats only), the resulting rect is exactly 16:9 with
+    /// even dimensions: 1080p → `(16, 9, 1888, 1062)` (scale-back ×1.016949), 4K →
+    /// `(32, 18, 3776, 2124)`. Crop dimensions stay even for any even input because both margins
+    /// are subtracted twice; `marginX` is additionally floored at the even minimum so a
+    /// degenerate tiny plan can never produce an empty crop.
+    ///
+    /// - Parameters:
+    ///   - planWidth: Planned (even) camera frame width in pixels.
+    ///   - planHeight: Planned (even) camera frame height in pixels.
+    /// - Returns: The stabilization geometry carried on `ResolvedCameraPlan`.
+    nonisolated static func makeStabilizationPlan(
+        planWidth: Int,
+        planHeight: Int
+    )
+    -> ResolvedCameraPlan.StabilizationPlan {
+        // The margin is cut from BOTH sides of each axis.
+        // swiftlint:disable:next no_magic_numbers
+        let bothSides = 2
+        // Round to the nearest EVEN integer: (x / 2).rounded() * 2.
+        let rawMarginX = Self.stabilizationBaseMarginX * Double(planWidth) / Self.stabilizationReferenceWidth
+        let halfRounded = (rawMarginX / Double(bothSides)).rounded()
+        let marginX = max(Int(halfRounded) * bothSides, Self.minEvenDimension)
+        let marginY = Int((Double(marginX) * Self.stabilizationAspect).rounded())
+        let cropWidth = planWidth - bothSides * marginX
+        let cropHeight = planHeight - bothSides * marginY
+        let cropRect = CGRect(x: marginX, y: marginY, width: cropWidth, height: cropHeight)
+        return ResolvedCameraPlan.StabilizationPlan(
+            cropRect: cropRect,
+            scaleBack: Double(planWidth) / Double(cropWidth)
+        )
     }
 
     // MARK: - Helpers
