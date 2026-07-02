@@ -241,7 +241,8 @@ nonisolated struct BackpressureDegradationWindow {
 /// - `.captureDrop` → cumulative `captureDrops` only (never triggers).
 /// - `.cfrNormalizationDrops` → cumulative `cfrNormalizationDrops` only (never triggers).
 /// - `.encoderHoldDrops` → private `encoderHoldDrops` only, diagnostic (never triggers; #200).
-/// - `.stabilizationDrops` → private `stabilizationDrops` only, diagnostic (never triggers; #297).
+/// - `.stabilizationDrops` → no dedicated reason counter, diagnostic (never triggers; #297) —
+///   per-source visibility only, via `breakdownStabilizeCamera`.
 ///
 /// ### Degraded = Live with recovery (user decision)
 /// The window goes `.degraded` when backpressure drops in the last `degradedWindowSeconds` exceed
@@ -295,11 +296,6 @@ actor DropMonitor {
     /// window, or the `sessionEverDegraded` latch. Tracked only for the diagnostic debug log; its
     /// per-source visibility comes from `breakdownEncode` via the source-accounting switch below.
     private var encoderHoldDrops = 0
-
-    /// Total `DropReason.stabilizationDrops` seen this session (#297). Same diagnostic-only
-    /// contract as `encoderHoldDrops`: `DropCounters` / `DropHealthSnapshot` do NOT change —
-    /// the stage's drops surface only through the per-source breakdown and the technical report.
-    private var stabilizationDrops = 0
 
     /// Session-relative seconds of the stabilization stage's bypass transition (#297 AC-4).
     /// Recorded via `noteStabilizationBypass(atSeconds:)` (called by `RecordingSession` from the
@@ -486,8 +482,8 @@ actor DropMonitor {
             // Stage-internal drop of the stabilization stage (#297): diagnostic-only — the missed
             // tick is refilled downstream by the CFR hold-repeat. Never touches the window,
             // applyDegraded, or the sessionEverDegraded latch (stage overload is handled by the
-            // stage's own bypass). Per-source visibility comes from breakdownStabilizeCamera below.
-            self.stabilizationDrops += event.count
+            // stage's own bypass). No dedicated reason counter — per-source visibility comes
+            // from breakdownStabilizeCamera below.
             let stabDesc = String(describing: event.source)
             self.logger.debug("Drop [stabilization] source=\(stabDesc) count=\(event.count)")
         }
