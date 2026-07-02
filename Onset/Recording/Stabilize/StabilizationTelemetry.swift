@@ -11,6 +11,25 @@
 
 import Foundation
 
+// MARK: - StabilizationFormat
+
+/// Locale-independent one-decimal fixed-point formatting shared by the stage's report line and
+/// its log lines.
+///
+/// Integer arithmetic instead of `String(format:)`: the `CVarArg` machinery behind
+/// `String(format:)` is an unsafe construct under `SWIFT_STRICT_MEMORY_SAFETY = YES`, and a
+/// one-decimal render simply does not need it.
+nonisolated enum StabilizationFormat {
+    /// Renders `value` with exactly one decimal digit (round-half-away-from-zero), e.g. `31.2`.
+    nonisolated static func oneDecimal(_ value: Double) -> String {
+        let tenthsPerUnit = 10
+        let tenths = Int((value * Double(tenthsPerUnit)).rounded())
+        let sign = tenths < 0 ? "-" : ""
+        let magnitude = abs(tenths)
+        return "\(sign)\(magnitude / tenthsPerUnit).\(magnitude % tenthsPerUnit)"
+    }
+}
+
 // MARK: - StabilizationLatencyAggregator
 
 /// Collects per-frame stage latencies (estimation + render, ms) and renders the AC-8 session
@@ -55,20 +74,15 @@ nonisolated struct StabilizationLatencyAggregator {
         let p95Fraction = 0.95
         let scalePart = estScale.map { "estScale=\($0)×" } ?? "estScale=не выбран"
         let intervalPart = warmUpMedianIntervalMs
-            .map { "медианный интервал warm-up=\(Self.format($0)) мс" }
+            .map { "медианный интервал warm-up=\(StabilizationFormat.oneDecimal($0)) мс" }
             ?? "медианный интервал warm-up=не измерен"
         guard let p50 = self.percentileMs(p50Fraction), let p95 = self.percentileMs(p95Fraction) else {
             return "Стабилизация камеры — латентность этапа (оценка+рендер): "
                 + "нет измеренных кадров (warm-up/bypass); \(scalePart); \(intervalPart)"
         }
         return "Стабилизация камеры — латентность этапа (оценка+рендер): "
-            + "p50=\(Self.format(p50)) мс, p95=\(Self.format(p95)) мс "
+            + "p50=\(StabilizationFormat.oneDecimal(p50)) мс, p95=\(StabilizationFormat.oneDecimal(p95)) мс "
             + "(кадров: \(self.count); \(scalePart); \(intervalPart))"
-    }
-
-    /// Formats a millisecond value with one decimal digit, locale-independent.
-    nonisolated private static func format(_ value: Double) -> String {
-        String(format: "%.1f", locale: nil, value)
     }
 }
 

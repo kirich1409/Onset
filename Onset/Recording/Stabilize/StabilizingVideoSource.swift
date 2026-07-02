@@ -383,7 +383,7 @@ actor StabilizingVideoSource: VideoFrameSource, AudioSampleSource {
                 self.warmUpMedianIntervalMs = self.warmUp.medianIntervalMs
                 self.chosenEstScale = scale
                 self.phase = .stabilizing(estScale: scale)
-                let median = self.warmUpMedianIntervalMs.map { String(format: "%.1f", $0) } ?? "n/a"
+                let median = self.warmUpMedianIntervalMs.map { StabilizationFormat.oneDecimal($0) } ?? "n/a"
                 // Mandatory AC-8 measurement artifact: the estScale choice log.
                 let choiceLine = "stabilization warm-up complete: medianIntervalMs=\(median) estScale=\(scale)"
                 self.logger.notice("\(choiceLine, privacy: .public)")
@@ -540,7 +540,7 @@ actor StabilizingVideoSource: VideoFrameSource, AudioSampleSource {
         let seconds = self.sessionSeconds(of: detectedAt)
         self.bypassAtSeconds = seconds
         self.phase = .bypass
-        let secondsDescription = String(format: "%.1f", seconds)
+        let secondsDescription = StabilizationFormat.oneDecimal(seconds)
         self.logger.warning(
             "stabilization bypass engaged at \(secondsDescription, privacy: .public)s: \(reason, privacy: .public)"
         )
