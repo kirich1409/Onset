@@ -235,7 +235,13 @@ nonisolated final class StabilizationRenderer: StabilizationStage, @unchecked Se
                 throw StabilizationError.outputPoolCreationFailed(status)
             }
             unsafe self.pool = createdPool
-            unsafe self.context = CIContext(mtlDevice: device)
+            // Color management disabled: the stage is geometry-only (translate/crop/scale-back;
+            // Vision reads luma only, no color transform is ever applied), so the default
+            // NV12→linear-RGB→NV12 working-space round trip on every render is pure overhead.
+            // Scaling then interpolates in video (non-linear) space — the standard CoreImage
+            // real-time-video tradeoff, imperceptible for sub-pixel stabilization; output
+            // color-neutrality confirmed in L5 (#298).
+            unsafe self.context = CIContext(mtlDevice: device, options: [.workingColorSpace: NSNull()])
         }
     }
 
