@@ -79,11 +79,11 @@ private final class FakeWrappedCamera: VideoFrameSource, AudioSampleSource, @unc
     let startError = OSAllocatedUnfairLock<(any Error)?>(initialState: nil)
 
     var startCalls: Int {
-        self.state.withLock(\.startCalls)
+        self.state.withLock { $0.startCalls }
     }
 
     var stopCalls: Int {
-        self.state.withLock(\.stopCalls)
+        self.state.withLock { $0.stopCalls }
     }
 
     init() {
@@ -233,7 +233,7 @@ private final class FrameLog: @unchecked Sendable {
     }
 
     var count: Int {
-        self.lock.withLock(\.count)
+        self.lock.withLock { $0.count }
     }
 
     func append(_ frame: VideoFrame) {
@@ -249,7 +249,7 @@ private final class DropLog: @unchecked Sendable {
     }
 
     var count: Int {
-        self.lock.withLock(\.count)
+        self.lock.withLock { $0.count }
     }
 
     func append(_ event: DropEvent) {
@@ -344,7 +344,7 @@ struct StabilizingVideoSourceLifecycleTests {
         } catch {
             Issue.record("unexpected error type: \(error)")
         }
-        #expect(stage.state.withLock(\.finishCalls) == 1)
+        #expect(stage.state.withLock { $0.finishCalls } == 1)
     }
 
     @Test("start is one-shot: a second call is ignored")
@@ -376,7 +376,7 @@ struct StabilizingVideoSourceLifecycleTests {
         await framesTask.value
         await dropsTask.value
         #expect(camera.stopCalls >= 1)
-        #expect(stage.state.withLock(\.finishCalls) == 1)
+        #expect(stage.state.withLock { $0.finishCalls } == 1)
         // Both frames survived the graceful stop (no tail loss).
         #expect(frameLog.count == 2)
     }
@@ -415,7 +415,7 @@ struct StabilizingVideoSourceProcessingTests {
             camera.emitFrame(makeFrame(atSeconds: 10.0 + Double(index) * 0.05))
         }
         #expect(await eventually { frameLog.count == 3 })
-        #expect(stage.state.withLock(\.estimateCalls) == 0)
+        #expect(stage.state.withLock { $0.estimateCalls } == 0)
         #expect(stage.state.withLock { $0.renderCorrections.allSatisfy { $0 == .zero } })
 
         await sut.stop()
@@ -435,7 +435,7 @@ struct StabilizingVideoSourceProcessingTests {
                 camera.emitFrame(makeFrame(atSeconds: 10.0 + Double(index) * intervalSeconds))
             }
             #expect(await eventually { frameLog.count == 5 })
-            #expect(stage.state.withLock(\.activatedScales) == [expectedScale])
+            #expect(stage.state.withLock { $0.activatedScales } == [expectedScale])
 
             await sut.stop()
             await framesTask.value
@@ -461,9 +461,9 @@ struct StabilizingVideoSourceProcessingTests {
             camera.emitFrame(makeFrame(atSeconds: 10.0 + Double(index) * 0.020))
         }
         #expect(await eventually { frameLog.count == 4 })
-        #expect(stage.state.withLock(\.activatedScales) == [2])
+        #expect(stage.state.withLock { $0.activatedScales } == [2])
 
-        let corrections = stage.state.withLock(\.renderCorrections)
+        let corrections = stage.state.withLock { $0.renderCorrections }
         try #require(corrections.count == 4)
         // Frames 1–2 (warm-up) and frame 3 (no pair yet): zero correction.
         #expect(corrections[0] == .zero)
@@ -496,7 +496,7 @@ struct StabilizingVideoSourceProcessingTests {
         }
         #expect(await eventually { frameLog.count == 4 })
 
-        let corrections = stage.state.withLock(\.renderCorrections)
+        let corrections = stage.state.withLock { $0.renderCorrections }
         try #require(corrections.count == 4)
         // Frame 3 failed estimation: it re-applies frame 2's correction exactly (freeze).
         #expect(corrections[2] == corrections[1])
@@ -547,7 +547,7 @@ struct StabilizingVideoSourceDropTests {
         // Park the stage on its work queue (synchronous semaphore, the live isolation shape).
         stage.state.withLock { $0.blockRender = true }
         camera.emitFrame(makeFrame(atSeconds: 10.00))
-        #expect(await eventually { stage.state.withLock(\.blockedRenderEntries) == 1 })
+        #expect(await eventually { stage.state.withLock { $0.blockedRenderEntries } == 1 })
 
         // Frame 2 fills the depth-1 slot; frames 3..6 each displace their predecessor.
         for index in 1...5 {
@@ -585,7 +585,7 @@ struct StabilizingVideoSourceDropTests {
             // Serialize deliveries so the depth-1 slot never evicts: each frame is fully
             // rendered before the next is emitted.
             let expected = index + 1
-            #expect(await eventually { stage.state.withLock(\.renderCalls) == expected })
+            #expect(await eventually { stage.state.withLock { $0.renderCalls } == expected })
         }
         // Renders 5 and 6 overflowed the depth-4 output buffer.
         #expect(await eventually { dropLog.count == 2 })
@@ -627,8 +627,8 @@ struct StabilizingVideoSourceBypassTests {
 
         // Frames 1..3 error out (limit 3 → bypass on frame 3); frames 4..5 take the bypass
         // path: estimation is deactivated once and never called again.
-        #expect(stage.state.withLock(\.estimateCalls) == 3)
-        #expect(await eventually { stage.state.withLock(\.deactivateCalls) == 1 })
+        #expect(stage.state.withLock { $0.estimateCalls } == 3)
+        #expect(await eventually { stage.state.withLock { $0.deactivateCalls } == 1 })
 
         await sut.stop()
         await framesTask.value
