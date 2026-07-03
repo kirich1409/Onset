@@ -1497,6 +1497,73 @@ struct RecordingCoordinatorActiveGateTests {
 
         #expect(!coordinator.isRecordingActive, "gate must reset to false after a user cancel during consent wait")
     }
+
+    // MARK: - Dock reopen (#272)
+
+    @Test("handleReopen() while recording focuses the recording window and suppresses the default")
+    func handleReopen_whileRecording_focusesRecordingWindow_andSuppressesDefault() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+        var openedRecording = false
+        coordinator.bindWindowActions(
+            openRecordingWindow: { openedRecording = true },
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        #expect(coordinator.phase == .recording)
+
+        let shouldPerformDefault = coordinator.handleReopen()
+
+        #expect(!shouldPerformDefault, "recording phase must suppress SwiftUI's default reopen")
+        #expect(openedRecording, "recording phase must focus the recording window")
+
+        await coordinator.stop()
+    }
+
+    @Test("handleReopen() while showing main window allows the default reopen")
+    func handleReopen_whenMain_allowsDefault() {
+        let coordinator = RecordingCoordinator {
+            UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults())
+        }
+        var openedRecording = false
+        coordinator.bindWindowActions(
+            openRecordingWindow: { openedRecording = true },
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+        coordinator.enterMain()
+
+        let shouldPerformDefault = coordinator.handleReopen()
+
+        #expect(shouldPerformDefault, "main phase must allow the default reopen")
+        #expect(!openedRecording, "main phase must not focus the recording window")
+    }
+
+    @Test("handleReopen() while idle allows the default reopen")
+    func handleReopen_whenIdle_allowsDefault() {
+        let coordinator = RecordingCoordinator {
+            UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults())
+        }
+        var openedRecording = false
+        coordinator.bindWindowActions(
+            openRecordingWindow: { openedRecording = true },
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+
+        let shouldPerformDefault = coordinator.handleReopen()
+
+        #expect(shouldPerformDefault, "idle phase must allow the default reopen")
+        #expect(!openedRecording, "idle phase must not focus the recording window")
+    }
 }
 
 // MARK: - Termination finalization (#243)
