@@ -103,7 +103,7 @@ jobs:
         run: xcodebuild -version
 
       - name: Cache DerivedData
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/Library/Developer/Xcode/DerivedData/Onset-*
           key: deriveddata-${{ runner.os }}-${{ hashFiles('Onset.xcodeproj/project.pbxproj', '**/*.xcconfig') }}
@@ -170,7 +170,7 @@ jobs:
       # Xcode bumps.
       - name: Cache SwiftLint package
         id: cache-swiftlint
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/SwiftLint.pkg
           key: swiftlint-pkg-${{ runner.os }}-${{ steps.swiftlint-version.outputs.version }}
