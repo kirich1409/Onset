@@ -33,7 +33,7 @@ struct MainViewModelCameraToggleTests {
         microphone: PermissionStatus = .notDetermined,
         cameras: [CameraDevice] = [],
         displays: [Display] = [],
-        defaults: InMemoryUserDefaults = InMemoryUserDefaults()
+        defaults: InMemoryUserDefaults
     )
     -> MainViewModel {
         let perms = FakePermissionsService(screen: screen, camera: camera, microphone: microphone)
@@ -66,239 +66,273 @@ struct MainViewModelCameraToggleTests {
 
     @Test("cameraEnabled defaults to true")
     func cameraEnabled_defaultIsTrue() {
-        let sut = self.makeSUT()
+        withScopedDefaults { defaults in
+            let sut = self.makeSUT(defaults: defaults)
 
-        #expect(sut.cameraEnabled == true)
+            #expect(sut.cameraEnabled == true)
+        }
     }
 
     // MARK: - Camera disabled (cameraEnabled = false internally)
 
     @Test("cameraEnabled false → isCameraActive false, activeCamera nil")
     func cameraDisabled_isCameraActiveIsFalse() async {
-        let cam = Self.makeCamera()
-        let sut = self.makeSUT(cameras: [cam])
-        await sut.loadDevices()
-        // selectedCameraID is auto-set by loadDevices
+        await withScopedDefaults { defaults in
+            let cam = Self.makeCamera()
+            let sut = self.makeSUT(cameras: [cam], defaults: defaults)
+            await sut.loadDevices()
+            // selectedCameraID is auto-set by loadDevices
 
-        sut.cameraEnabled = false
+            sut.cameraEnabled = false
 
-        #expect(sut.isCameraActive == false)
-        #expect(sut.activeCamera == nil)
+            #expect(sut.isCameraActive == false)
+            #expect(sut.activeCamera == nil)
+        }
     }
 
     @Test("cameraEnabled false → resolveCameraFormat returns nil (camera excluded from request)")
     func cameraDisabled_resolveCameraFormat_returnsNil() async throws {
-        let cam = Self.makeCamera()
-        let sut = self.makeSUT(cameras: [cam])
-        await sut.loadDevices()
+        try await withScopedDefaults { defaults in
+            let cam = Self.makeCamera()
+            let sut = self.makeSUT(cameras: [cam], defaults: defaults)
+            await sut.loadDevices()
 
-        sut.cameraEnabled = false
+            sut.cameraEnabled = false
 
-        let format = try sut.resolveCameraFormat()
-        #expect(format == nil)
+            let format = try sut.resolveCameraFormat()
+            #expect(format == nil)
+        }
     }
 
     // MARK: - Camera enabled + device selected
 
     @Test("cameraEnabled true + camera selected → isCameraActive true, activeCamera non-nil")
     func cameraEnabled_withCamera_isActive() async {
-        let cam = Self.makeCamera(id: "cam-abc")
-        let sut = self.makeSUT(cameras: [cam])
-        await sut.loadDevices()
+        await withScopedDefaults { defaults in
+            let cam = Self.makeCamera(id: "cam-abc")
+            let sut = self.makeSUT(cameras: [cam], defaults: defaults)
+            await sut.loadDevices()
 
-        #expect(sut.isCameraActive == true)
-        #expect(sut.activeCamera?.uniqueID == "cam-abc")
+            #expect(sut.isCameraActive == true)
+            #expect(sut.activeCamera?.uniqueID == "cam-abc")
+        }
     }
 
     @Test("cameraEnabled true + camera selected → resolveCameraFormat returns non-nil")
     func cameraEnabled_withCamera_resolveCameraFormat_returnsFormat() async throws {
-        let cam = Self.makeCamera()
-        let sut = self.makeSUT(cameras: [cam])
-        await sut.loadDevices()
+        try await withScopedDefaults { defaults in
+            let cam = Self.makeCamera()
+            let sut = self.makeSUT(cameras: [cam], defaults: defaults)
+            await sut.loadDevices()
 
-        let format = try sut.resolveCameraFormat()
-        #expect(format != nil)
+            let format = try sut.resolveCameraFormat()
+            #expect(format != nil)
+        }
     }
 
     @Test("cameraEnabled true + camera advertises 1080p and 4K → resolveCameraFormat picks native 4K")
     func cameraEnabled_withCamera_resolveCameraFormat_picksNative4K() async throws {
-        // resolveCameraFormat (MainViewModel+Record.swift) opts into `allowAboveFullHD: true` —
-        // reverting that flag would make the selector cap at 1080p instead. This exercises
-        // resolveCameraFormat() itself (not just CameraFormatSelector.pickBestFormat directly),
-        // so it catches a regression at the call site, not only in the selector's own logic.
-        let cam = CameraDevice(uniqueID: "cam-4k", formats: [
-            CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30, maxFps: 30),
-            CameraFormat(pixelWidth: 3840, pixelHeight: 2160, minFps: 30, maxFps: 30),
-        ])
-        let sut = self.makeSUT(cameras: [cam])
-        await sut.loadDevices()
+        try await withScopedDefaults { defaults in
+            // resolveCameraFormat (MainViewModel+Record.swift) opts into `allowAboveFullHD: true` —
+            // reverting that flag would make the selector cap at 1080p instead. This exercises
+            // resolveCameraFormat() itself (not just CameraFormatSelector.pickBestFormat directly),
+            // so it catches a regression at the call site, not only in the selector's own logic.
+            let cam = CameraDevice(uniqueID: "cam-4k", formats: [
+                CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30, maxFps: 30),
+                CameraFormat(pixelWidth: 3840, pixelHeight: 2160, minFps: 30, maxFps: 30),
+            ])
+            let sut = self.makeSUT(cameras: [cam], defaults: defaults)
+            await sut.loadDevices()
 
-        let format = try sut.resolveCameraFormat()
+            let format = try sut.resolveCameraFormat()
 
-        #expect(format?.pixelWidth == 3840)
-        #expect(format?.pixelHeight == 2160)
+            #expect(format?.pixelWidth == 3840)
+            #expect(format?.pixelHeight == 2160)
+        }
     }
 
     // MARK: - Camera enabled with no cameras available
 
     @Test("cameraEnabled true + cameras empty → isCameraActive false (no crash)")
     func cameraEnabled_noCameras_isNotActive() async {
-        let sut = self.makeSUT(cameras: [])
-        await sut.loadDevices()
-        // cameraEnabled defaults to true but no cameras loaded
+        await withScopedDefaults { defaults in
+            let sut = self.makeSUT(cameras: [], defaults: defaults)
+            await sut.loadDevices()
+            // cameraEnabled defaults to true but no cameras loaded
 
-        #expect(sut.isCameraActive == false)
-        #expect(sut.activeCamera == nil)
+            #expect(sut.isCameraActive == false)
+            #expect(sut.activeCamera == nil)
+        }
     }
 
     // MARK: - canRecord is camera-independent
 
     @Test("Toggling cameraEnabled does not affect canRecord when screen + display present")
     func cameraToggle_doesNotAffectCanRecord() async {
-        let cam = Self.makeCamera()
-        let display = Self.makeDisplay()
-        let sut = self.makeSUT(cameras: [cam], displays: [display])
-        await sut.loadDevices()
+        await withScopedDefaults { defaults in
+            let cam = Self.makeCamera()
+            let display = Self.makeDisplay()
+            let sut = self.makeSUT(cameras: [cam], displays: [display], defaults: defaults)
+            await sut.loadDevices()
 
-        let canRecordBefore = sut.canRecord
+            let canRecordBefore = sut.canRecord
 
-        sut.cameraEnabled = false
-        let canRecordAfterDisable = sut.canRecord
+            sut.cameraEnabled = false
+            let canRecordAfterDisable = sut.canRecord
 
-        sut.cameraEnabled = true
-        let canRecordAfterEnable = sut.canRecord
+            sut.cameraEnabled = true
+            let canRecordAfterEnable = sut.canRecord
 
-        #expect(canRecordBefore == canRecordAfterDisable)
-        #expect(canRecordAfterDisable == canRecordAfterEnable)
+            #expect(canRecordBefore == canRecordAfterDisable)
+            #expect(canRecordAfterDisable == canRecordAfterEnable)
+        }
     }
 
     // MARK: - Auto-select on re-enable
 
     @Test("Re-enabling cameraEnabled when selectedCameraID is nil auto-selects first camera")
     func reEnableCameraEnabled_autoSelectsFirst() async {
-        let cam = Self.makeCamera(id: "cam-first")
-        let sut = self.makeSUT(cameras: [cam])
-        await sut.loadDevices()
-        // Disable, then clear selection manually (simulating a state where selection was nil)
-        sut.cameraEnabled = false
-        sut.selectedCameraID = nil
+        await withScopedDefaults { defaults in
+            let cam = Self.makeCamera(id: "cam-first")
+            let sut = self.makeSUT(cameras: [cam], defaults: defaults)
+            await sut.loadDevices()
+            // Disable, then clear selection manually (simulating a state where selection was nil)
+            sut.cameraEnabled = false
+            sut.selectedCameraID = nil
 
-        sut.cameraEnabled = true
+            sut.cameraEnabled = true
 
-        #expect(sut.selectedCameraID == "cam-first")
-        #expect(sut.isCameraActive == true)
+            #expect(sut.selectedCameraID == "cam-first")
+            #expect(sut.isCameraActive == true)
+        }
     }
 
     // MARK: - buildChecklist reflects camera active state
 
     @Test("buildChecklist omits cameraDescription when cameraEnabled is false")
     func buildChecklist_cameraDisabled_omitsCameraDesc() async {
-        let cam = Self.makeCamera()
-        let display = Self.makeDisplay()
-        let sut = self.makeSUT(cameras: [cam], displays: [display])
-        await sut.loadDevices()
-        sut.cameraEnabled = false
+        await withScopedDefaults { defaults in
+            let cam = Self.makeCamera()
+            let display = Self.makeDisplay()
+            let sut = self.makeSUT(cameras: [cam], displays: [display], defaults: defaults)
+            await sut.loadDevices()
+            sut.cameraEnabled = false
 
-        let checklist = sut.buildChecklist(display: display)
+            let checklist = sut.buildChecklist(display: display)
 
-        #expect(checklist.cameraDescription == nil)
+            #expect(checklist.cameraDescription == nil)
+        }
     }
 
     @Test("buildChecklist includes cameraDescription when cameraEnabled is true")
     func buildChecklist_cameraEnabled_includesCameraDesc() async {
-        let cam = Self.makeCamera()
-        let display = Self.makeDisplay()
-        let sut = self.makeSUT(cameras: [cam], displays: [display])
-        await sut.loadDevices()
-        // cameraEnabled defaults to true
+        await withScopedDefaults { defaults in
+            let cam = Self.makeCamera()
+            let display = Self.makeDisplay()
+            let sut = self.makeSUT(cameras: [cam], displays: [display], defaults: defaults)
+            await sut.loadDevices()
+            // cameraEnabled defaults to true
 
-        let checklist = sut.buildChecklist(display: display)
+            let checklist = sut.buildChecklist(display: display)
 
-        #expect(checklist.cameraDescription != nil)
+            #expect(checklist.cameraDescription != nil)
+        }
     }
 
     // MARK: - Re-enable preserves existing selection
 
     @Test("Re-enabling cameraEnabled preserves non-first selectedCameraID")
     func reEnableCameraEnabled_preservesExistingSelection() async {
-        let cam1 = Self.makeCamera(id: "cam-1")
-        let cam2 = Self.makeCamera(id: "cam-2")
-        let sut = self.makeSUT(cameras: [cam1, cam2])
-        await sut.loadDevices()
-        // Override auto-selection to the non-first camera.
-        sut.selectedCameraID = "cam-2"
+        await withScopedDefaults { defaults in
+            let cam1 = Self.makeCamera(id: "cam-1")
+            let cam2 = Self.makeCamera(id: "cam-2")
+            let sut = self.makeSUT(cameras: [cam1, cam2], defaults: defaults)
+            await sut.loadDevices()
+            // Override auto-selection to the non-first camera.
+            sut.selectedCameraID = "cam-2"
 
-        sut.cameraEnabled = false
-        sut.cameraEnabled = true
+            sut.cameraEnabled = false
+            sut.cameraEnabled = true
 
-        // selectFirstCameraIfNeeded must early-return because selectedCameraID is non-nil.
-        #expect(sut.selectedCameraID == "cam-2")
-        #expect(sut.isCameraActive == true)
+            // selectFirstCameraIfNeeded must early-return because selectedCameraID is non-nil.
+            #expect(sut.selectedCameraID == "cam-2")
+            #expect(sut.isCameraActive == true)
+        }
     }
 
     // MARK: - Disabling camera masks but does not clear selection
 
     @Test("cameraEnabled false masks activeCamera but leaves selectedCameraID unchanged")
     func cameraDisabled_masksActiveCamera_doesNotClearSelectedCameraID() async {
-        let cam = Self.makeCamera(id: "cam-1")
-        let sut = self.makeSUT(cameras: [cam])
-        await sut.loadDevices()
-        let selectedBefore = sut.selectedCameraID
+        await withScopedDefaults { defaults in
+            let cam = Self.makeCamera(id: "cam-1")
+            let sut = self.makeSUT(cameras: [cam], defaults: defaults)
+            await sut.loadDevices()
+            let selectedBefore = sut.selectedCameraID
 
-        sut.cameraEnabled = false
+            sut.cameraEnabled = false
 
-        // activeCamera is masked to nil, but the stored ID must be intact.
-        #expect(sut.activeCamera == nil)
-        #expect(sut.selectedCameraID == selectedBefore)
+            // activeCamera is masked to nil, but the stored ID must be intact.
+            #expect(sut.activeCamera == nil)
+            #expect(sut.selectedCameraID == selectedBefore)
+        }
     }
 
     // MARK: - Stale selectedCameraID with non-empty camera list
 
     @Test("Stale selectedCameraID not present in cameras list → activeCamera nil, isCameraActive false")
     func staleSelectedCameraID_notInCameraList_isInactive() async {
-        let camNew = Self.makeCamera(id: "cam-new")
-        let sut = self.makeSUT(cameras: [camNew])
-        await sut.loadDevices()
-        // Simulate a hot-unplug: the stored id no longer matches any available camera.
-        sut.selectedCameraID = "cam-removed"
+        await withScopedDefaults { defaults in
+            let camNew = Self.makeCamera(id: "cam-new")
+            let sut = self.makeSUT(cameras: [camNew], defaults: defaults)
+            await sut.loadDevices()
+            // Simulate a hot-unplug: the stored id no longer matches any available camera.
+            sut.selectedCameraID = "cam-removed"
 
-        #expect(sut.activeCamera == nil)
-        #expect(sut.isCameraActive == false)
+            #expect(sut.activeCamera == nil)
+            #expect(sut.isCameraActive == false)
+        }
     }
 
     // MARK: - cameraPickerSelection (#224)
 
     @Test("cameraPickerSelection equals selectedCameraID when camera is enabled")
     func cameraPickerSelection_enabled_equalsSelectedCameraID() async {
-        let cam = Self.makeCamera(id: "cam-picker")
-        let sut = self.makeSUT(cameras: [cam])
-        await sut.loadDevices()
-        // loadDevices auto-selects the first camera and sets cameraEnabled = true.
+        await withScopedDefaults { defaults in
+            let cam = Self.makeCamera(id: "cam-picker")
+            let sut = self.makeSUT(cameras: [cam], defaults: defaults)
+            await sut.loadDevices()
+            // loadDevices auto-selects the first camera and sets cameraEnabled = true.
 
-        #expect(sut.cameraPickerSelection == "cam-picker")
+            #expect(sut.cameraPickerSelection == "cam-picker")
+        }
     }
 
     @Test("cameraPickerSelection is nil when camera is disabled")
     func cameraPickerSelection_disabled_isNil() async {
-        let cam = Self.makeCamera(id: "cam-picker")
-        let sut = self.makeSUT(cameras: [cam])
-        await sut.loadDevices()
+        await withScopedDefaults { defaults in
+            let cam = Self.makeCamera(id: "cam-picker")
+            let sut = self.makeSUT(cameras: [cam], defaults: defaults)
+            await sut.loadDevices()
 
-        sut.cameraEnabled = false
+            sut.cameraEnabled = false
 
-        #expect(sut.cameraPickerSelection == nil)
+            #expect(sut.cameraPickerSelection == nil)
+        }
     }
 
     @Test("cameraPickerSelection is nil when cameraEnabled true but no device selected (disconnected)")
     func cameraPickerSelection_disconnected_isNil() async {
-        // Disconnected state: cameraEnabled = true, selectedCameraID = nil
-        let sut = self.makeSUT(cameras: [])
-        await sut.loadDevices()
-        // No cameras → auto-select skipped; cameraEnabled still defaults to true.
+        await withScopedDefaults { defaults in
+            // Disconnected state: cameraEnabled = true, selectedCameraID = nil
+            let sut = self.makeSUT(cameras: [], defaults: defaults)
+            await sut.loadDevices()
+            // No cameras → auto-select skipped; cameraEnabled still defaults to true.
 
-        #expect(sut.cameraEnabled == true)
-        #expect(sut.selectedCameraID == nil)
-        #expect(sut.cameraPickerSelection == nil)
+            #expect(sut.cameraEnabled == true)
+            #expect(sut.selectedCameraID == nil)
+            #expect(sut.cameraPickerSelection == nil)
+        }
     }
 
     // MARK: - cameraPickerSelection setter — disable (nil)
@@ -330,37 +364,41 @@ struct MainViewModelCameraToggleTests {
 
     @Test("Setting cameraPickerSelection to nil from disconnected state clears disconnectedCameraName")
     func setCameraPickerSelection_nil_fromDisconnected_clearsNotice() async {
-        let cam = Self.makeCamera(id: "cam-1")
-        let sut = self.makeSUT(cameras: [cam])
-        await sut.loadDevices()
+        await withScopedDefaults { defaults in
+            let cam = Self.makeCamera(id: "cam-1")
+            let sut = self.makeSUT(cameras: [cam], defaults: defaults)
+            await sut.loadDevices()
 
-        // Simulate disconnected state: camera enabled but no matching device.
-        sut.cameraEnabled = true
-        sut.disconnectedCameraName = "Logitech MX Brio"
+            // Simulate disconnected state: camera enabled but no matching device.
+            sut.cameraEnabled = true
+            sut.disconnectedCameraName = "Logitech MX Brio"
 
-        // Explicit "Выключена" selection must clear the stale notice.
-        sut.cameraPickerSelection = nil
+            // Explicit "Выключена" selection must clear the stale notice.
+            sut.cameraPickerSelection = nil
 
-        #expect(sut.cameraEnabled == false)
-        #expect(sut.disconnectedCameraName == nil)
+            #expect(sut.cameraEnabled == false)
+            #expect(sut.disconnectedCameraName == nil)
+        }
     }
 
     // MARK: - cameraPickerSelection setter — select device from disabled state
 
     @Test("Setting cameraPickerSelection to a device ID from disabled state enables camera")
     func setCameraPickerSelection_deviceID_fromDisabled_enablesCamera() async {
-        let cam1 = Self.makeCamera(id: "cam-1")
-        let cam2 = Self.makeCamera(id: "cam-2")
-        let sut = self.makeSUT(cameras: [cam1, cam2])
-        await sut.loadDevices()
-        sut.cameraEnabled = false
+        await withScopedDefaults { defaults in
+            let cam1 = Self.makeCamera(id: "cam-1")
+            let cam2 = Self.makeCamera(id: "cam-2")
+            let sut = self.makeSUT(cameras: [cam1, cam2], defaults: defaults)
+            await sut.loadDevices()
+            sut.cameraEnabled = false
 
-        sut.cameraPickerSelection = "cam-2"
+            sut.cameraPickerSelection = "cam-2"
 
-        #expect(sut.cameraEnabled == true)
-        #expect(sut.selectedCameraID == "cam-2")
-        #expect(sut.activeCamera?.uniqueID == "cam-2")
-        #expect(sut.cameraPickerSelection == "cam-2")
+            #expect(sut.cameraEnabled == true)
+            #expect(sut.selectedCameraID == "cam-2")
+            #expect(sut.activeCamera?.uniqueID == "cam-2")
+            #expect(sut.cameraPickerSelection == "cam-2")
+        }
     }
 
     // MARK: - cameraPickerSelection setter — fresh disabled state selects exactly the requested device
@@ -637,9 +675,8 @@ private final class CameraSaveSpy: DeviceSelectionPersisting {
 @Suite("MainViewModel — isCameraConnecting")
 @MainActor
 struct MainViewModelCameraConnectingTests {
-    private func makeSUT(cameras: [CameraDevice] = []) -> MainViewModel {
+    private func makeSUT(cameras: [CameraDevice] = [], defaults: InMemoryUserDefaults) -> MainViewModel {
         let perms = FakePermissionsService(screen: .authorized, camera: .authorized, microphone: .notDetermined)
-        let defaults = InMemoryUserDefaults()
         let coordinator = RecordingCoordinator {
             UserDefaultsBackendSelectionStore(defaults: defaults)
         }
@@ -663,42 +700,50 @@ struct MainViewModelCameraConnectingTests {
 
     @Test("camera inactive → isCameraConnecting false")
     func cameraInactive_isNotConnecting() {
-        let sut = self.makeSUT()
-        #expect(!sut.isCameraConnecting)
+        withScopedDefaults { defaults in
+            let sut = self.makeSUT(defaults: defaults)
+            #expect(!sut.isCameraConnecting)
+        }
     }
 
     @Test("camera active, no handle, not failed → isCameraConnecting true")
     func cameraActive_noHandle_notFailed_isConnecting() async {
-        let camera = Self.makeCamera()
-        let sut = self.makeSUT(cameras: [camera])
-        // loadDevices populates the internal `cameras` list and auto-selects the
-        // device, which is what drives `selectedCamera` → `activeCamera` non-nil.
-        // Setting `selectedCameraID` alone leaves `cameras` empty, so the lookup
-        // would return nil and `isCameraActive` would be false.
-        await sut.loadDevices()
-        // previewHandle is nil by default, previewFailed is false by default
-        #expect(sut.isCameraActive)
-        #expect(sut.isCameraConnecting)
+        await withScopedDefaults { defaults in
+            let camera = Self.makeCamera()
+            let sut = self.makeSUT(cameras: [camera], defaults: defaults)
+            // loadDevices populates the internal `cameras` list and auto-selects the
+            // device, which is what drives `selectedCamera` → `activeCamera` non-nil.
+            // Setting `selectedCameraID` alone leaves `cameras` empty, so the lookup
+            // would return nil and `isCameraActive` would be false.
+            await sut.loadDevices()
+            // previewHandle is nil by default, previewFailed is false by default
+            #expect(sut.isCameraActive)
+            #expect(sut.isCameraConnecting)
+        }
     }
 
     @Test("camera active, handle set → isCameraConnecting false")
     func cameraActive_handleSet_isNotConnecting() {
-        let camera = Self.makeCamera()
-        let sut = self.makeSUT(cameras: [camera])
-        sut.cameraEnabled = true
-        sut.selectedCameraID = camera.uniqueID
-        sut.previewState = .live(SessionHandle(session: AVCaptureSession()))
-        #expect(!sut.isCameraConnecting)
+        withScopedDefaults { defaults in
+            let camera = Self.makeCamera()
+            let sut = self.makeSUT(cameras: [camera], defaults: defaults)
+            sut.cameraEnabled = true
+            sut.selectedCameraID = camera.uniqueID
+            sut.previewState = .live(SessionHandle(session: AVCaptureSession()))
+            #expect(!sut.isCameraConnecting)
+        }
     }
 
     @Test("camera active, previewFailed true → isCameraConnecting false")
     func cameraActive_previewFailed_isNotConnecting() {
-        let camera = Self.makeCamera()
-        let sut = self.makeSUT(cameras: [camera])
-        sut.cameraEnabled = true
-        sut.selectedCameraID = camera.uniqueID
-        sut.previewState = .failed
-        #expect(!sut.isCameraConnecting)
+        withScopedDefaults { defaults in
+            let camera = Self.makeCamera()
+            let sut = self.makeSUT(cameras: [camera], defaults: defaults)
+            sut.cameraEnabled = true
+            sut.selectedCameraID = camera.uniqueID
+            sut.previewState = .failed
+            #expect(!sut.isCameraConnecting)
+        }
     }
 }
 
