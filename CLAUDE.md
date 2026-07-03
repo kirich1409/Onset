@@ -95,9 +95,9 @@ Artifact checks (CI `artifact-checks` job):
   or hung host — no live lock held, a dead lock PID, or the owner's OK — but never kill a live run (another
   session's test or the owner's app). One `xcodebuild test` at a time — hardware tests fight over the camera and hang.
 - **Shared target Mac** — concurrent agent sessions and the owner share one machine's camera/screen. Before any
-  hardware or `.app` grab (L5, the UI loop, launching `.app`, `screencapture`) take an atomic lock: `mkdir /tmp/onset-hw.lock`
-  succeeds for exactly one session; write your PID to `/tmp/onset-hw.lock/pid`, release with `rm -r /tmp/onset-hw.lock`. The
-  lock is no panacea — a crashed session leaves it stale, so reclaim it when the holder PID is dead; else wait or defer.
+  hardware or `.app` grab (L5, the UI loop, launching `.app`, `screencapture`) hold the machine-global lock via
+  `scripts/hw-lock.sh` (`run [--wait] -- CMD` auto-releases a single grab; `acquire`/`release` wraps a multi-step
+  UI-loop hold). It reclaims a crashed session's stale lock by dead PID — no panacea; `--wait` serializes, `status` shows the holder.
 - Reference hardware for L5: Logitech MX Brio (`docs/quality/production-quality-bar.md`).
 - Perf L5 must include a representative-load scenario (other apps active), not only a quiet machine — see the runtime-is-loaded principle above.
 - Recordings land in session subfolders `Onset <timestamp>/` inside the user-selected base directory (default `~/Movies/Onset/`) — L5 outputs for verify-cfr/ffprobe live there.
