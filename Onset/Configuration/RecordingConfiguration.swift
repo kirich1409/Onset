@@ -61,6 +61,16 @@ nonisolated struct RecordingConfiguration {
     /// resolution format with fps ≥ this value.
     nonisolated let minCameraFps: Int
 
+    // MARK: - Camera
+
+    /// Whether the camera image is horizontally mirrored in the recorded output.
+    ///
+    /// Capture-side preference (consistent with `minCameraFps`), read fresh at record start and
+    /// applied to the recording VDO connection's `isVideoMirrored` at session setup. The live
+    /// preview honors the same value reactively; the recorded file honors it from the next
+    /// session start. Default `false` (raw sensor orientation).
+    nonisolated let cameraMirror: Bool
+
     // MARK: - Rate Control (VBR)
 
     /// Average-bitrate lookup table as an ordered array of (key, value) pairs.
@@ -253,9 +263,12 @@ nonisolated struct RecordingConfiguration {
     /// is still inferred as `@MainActor`-isolated, causing a compile error. A named function
     /// carries its `nonisolated` annotation unambiguously through the type-checker.
     ///
-    /// - Parameter baseDirectory: The user-selected base output directory. When `nil`,
-    ///   `~/Movies/Onset/` is used as the default.
-    nonisolated static func makeMVPDefault(baseDirectory: URL? = nil) -> Self {
+    /// - Parameters:
+    ///   - baseDirectory: The user-selected base output directory. When `nil`,
+    ///     `~/Movies/Onset/` is used as the default.
+    ///   - cameraMirror: Whether the recorded camera image is horizontally mirrored. Default
+    ///     `false` so `static let mvpDefault` and existing callers compile unchanged.
+    nonisolated static func makeMVPDefault(baseDirectory: URL? = nil, cameraMirror: Bool = false) -> Self {
         // `RecordingOutput.directory()` is the single authoritative source for `~/Movies/Onset/`.
         // It uses `NSHomeDirectory()` internally — a plain Foundation free function with no actor
         // isolation — so it is safe to call from this `nonisolated` context.
@@ -285,6 +298,7 @@ nonisolated struct RecordingConfiguration {
             bitDepth: 8,
             maxScreenFps: 60,
             minCameraFps: 30,
+            cameraMirror: cameraMirror,
             bitrateTable: bitrateTable,
             dataRateLimitsPeakMultiplier: 2.0,
             keyFrameIntervalSeconds: 2.0,
@@ -323,6 +337,7 @@ extension RecordingConfiguration: Equatable {
             && lhs.bitDepth == rhs.bitDepth
             && lhs.maxScreenFps == rhs.maxScreenFps
             && lhs.minCameraFps == rhs.minCameraFps
+            && lhs.cameraMirror == rhs.cameraMirror
             && bitrateTablesEqual
             && lhs.dataRateLimitsPeakMultiplier == rhs.dataRateLimitsPeakMultiplier
             && lhs.keyFrameIntervalSeconds == rhs.keyFrameIntervalSeconds

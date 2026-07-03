@@ -100,9 +100,31 @@ extension CameraSource {
         // Hand the lock's ownership to teardown: from here releaseRunning() in stop() /
         // disconnect / fault is responsible for unlocking, so the defer must NOT fire.
         locked = false
-        cameraSourceLogger.info(
-            "Capture started — dims: \(self.format.pixelWidth)×\(self.format.pixelHeight)"
-        )
+
+        // Read back only after .running above, never earlier (see the INVARIANT above).
+        self.logActualCaptureFormat(device: device)
+    }
+
+    /// Logs the delivered capture dimensions, or an error if they don't match `self.format`.
+    ///
+    /// AVFoundation can silently revert `activeFormat` after `startRunning()` on some device/host
+    /// combinations (#265, #281) — logging the requested snapshot alone would hide a reversion.
+    /// Logs only: `SourceEvent` is pipeline-fatal (stops the session) and `DropMonitor`'s
+    /// degraded-state signal is drop-count based, not format-based — neither fits without new
+    /// cross-actor plumbing, left as a follow-up rather than added speculatively here.
+    func logActualCaptureFormat(device: AVCaptureDevice) {
+        let actualDims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        guard actualDims.width == self.format.pixelWidth, actualDims.height == self.format.pixelHeight else {
+            cameraSourceLogger.error(
+                """
+                Capture started with reverted format — requested \
+                \(self.format.pixelWidth)×\(self.format.pixelHeight), device delivered \
+                \(actualDims.width)×\(actualDims.height)
+                """
+            )
+            return
+        }
+        cameraSourceLogger.info("Capture started — dims: \(actualDims.width)×\(actualDims.height)")
     }
 
     /// Acquires `AVCaptureDevice.lockForConfiguration()`, wrapping the error in `RecordingError`.
@@ -299,6 +321,7 @@ extension CameraSource {
         }
         session.addOutput(videoOutput)
         videoOutput.setSampleBufferDelegate(shims.video, queue: self.videoQueue)
+        self.applyRecordingMirror(to: videoOutput, in: session)
 
         if self.micDevice != nil {
             let audioOutput = AVCaptureAudioDataOutput()
@@ -325,6 +348,27 @@ extension CameraSource {
             session.addOutput(audioOutput)
             audioOutput.setSampleBufferDelegate(shims.audio, queue: self.audioQueue)
         }
+    }
+
+    /// Sets the recording VDO connection's mirroring deterministically to `config.cameraMirror`.
+    ///
+    /// Applied ONCE at setup, before the first frame — never on a running session (one-shot
+    /// lifecycle; the value is read fresh at record start). `attachOutputs` runs OUTSIDE
+    /// `configureSession`'s `begin`/`commitConfiguration` pair, so the change gets its own.
+    /// Guarded by `isVideoMirroringSupported`; when unsupported the connection is left as-is.
+    ///
+    /// `automaticallyAdjustsVideoMirroring` is forced off and `isVideoMirrored` is set in BOTH
+    /// branches: the connection's default `automaticallyAdjustsVideoMirroring == true` auto-mirrors
+    /// front/built-in cameras, which would mirror the recorded file even when `cameraMirror` is
+    /// false — violating the contract that output is unmirrored when `cameraMirror == false`.
+    private func applyRecordingMirror(to videoOutput: AVCaptureVideoDataOutput, in session: AVCaptureSession) {
+        guard let connection = videoOutput.connection(with: .video), connection.isVideoMirroringSupported else {
+            return
+        }
+        session.beginConfiguration()
+        connection.automaticallyAdjustsVideoMirroring = false
+        connection.isVideoMirrored = self.config.cameraMirror
+        session.commitConfiguration()
     }
 
     func registerDisconnectObserver(shims: CameraCaptureShims, session: AVCaptureSession) {

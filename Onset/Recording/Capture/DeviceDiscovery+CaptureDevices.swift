@@ -187,12 +187,31 @@ extension DeviceDiscovery {
 
     /// Maps a live `AVCaptureDevice` (audio) to a `MicrophoneDevice` snapshot.
     ///
-    /// Sets `isBuiltIn` from the device's transport type: a `kAudioDeviceTransportTypeBuiltIn`
-    /// transport identifies the notebook's built-in microphone.
+    /// Sets `isBuiltIn` from `isBuiltInMicrophone(uniqueID:transportType:)` — the
+    /// fail-safe discriminator that hides every built-in-transport mic in clamshell
+    /// except the 3.5mm jack input.
     nonisolated static func makeMicrophoneDevice(from device: AVCaptureDevice) -> MicrophoneDevice {
+        let isBuiltIn = Self.isBuiltInMicrophone(
+            uniqueID: device.uniqueID,
+            transportType: device.transportType
+        )
+        return MicrophoneDevice(uniqueID: device.uniqueID, isBuiltIn: isBuiltIn)
+    }
+
+    /// `true` when this audio device is the kind hidden in clamshell (internal mic array).
+    ///
+    /// Fail-safe design: any device on the built-in (`bltn`) transport is treated as the
+    /// internal mic and hidden when the lid is closed — model-agnostic, so a Mac whose
+    /// internal mic reports a different `uniqueID` is still hidden rather than silently
+    /// recording digital silence. The single exception is the 3.5mm headphone-jack input
+    /// (`BuiltInHeadphoneInputDevice`), which shares the `bltn` transport but is a physical
+    /// external mic that works lid-closed and must stay visible. If a future jack reports a
+    /// different uniqueID the worst case is the mild original bug (mic missing, user opens
+    /// lid / picks external) — never silent capture.
+    nonisolated static func isBuiltInMicrophone(uniqueID: String, transportType: Int32) -> Bool {
         // `AVCaptureDevice.transportType` is Int32; CoreAudio's constant is UInt32.
         // Bit-pattern cast avoids a sign-extension mismatch on the comparison.
-        let isBuiltIn = UInt32(bitPattern: device.transportType) == UInt32(kAudioDeviceTransportTypeBuiltIn)
-        return MicrophoneDevice(uniqueID: device.uniqueID, isBuiltIn: isBuiltIn)
+        let isBuiltInTransport = UInt32(bitPattern: transportType) == UInt32(kAudioDeviceTransportTypeBuiltIn)
+        return isBuiltInTransport && uniqueID != "BuiltInHeadphoneInputDevice"
     }
 }

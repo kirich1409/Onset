@@ -83,6 +83,7 @@ import SwiftUI
         let coordinator = RecordingCoordinator()
         return MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: coordinator,
             discoverDisplays: { _ in displays },
             discoverCameras: { _ in cameras },

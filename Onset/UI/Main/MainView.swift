@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import os
 import SwiftUI
 
@@ -193,6 +194,19 @@ struct MainView: View {
             }
             self.stickyFooter
         }
+        // Menu-bar-first app: ⌘, only fires when Onset is frontmost, so the config screen
+        // needs a visible way into Settings. `SettingsLink` opens the Settings scene without
+        // an @Environment(\.openSettings) seam. The toolbar lives in the window title bar
+        // (chrome), so it does not consume the fixed `.contentSize` content frame.
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                SettingsLink {
+                    Image(systemName: "gearshape")
+                }
+                .accessibilityLabel("Настройки")
+                .help("Настройки")
+            }
+        }
     }
 
     /// The sticky footer: record button + optional reason/error text.
@@ -335,17 +349,35 @@ struct SectionCard<Content: View>: View {
 
 /// `NSViewRepresentable` wrapper for `CameraPreviewView`.
 ///
-/// `CameraPreviewView.init` wires the `AVCaptureVideoPreviewLayer`; `updateNSView` is a no-op
-/// by design. Force recreation by toggling `.id(model.previewGeneration)` on the call site.
+/// `CameraPreviewView.init` wires the `AVCaptureVideoPreviewLayer`; the device-change recreation
+/// is forced by toggling `.id(model.previewGeneration)` on the call site. `updateNSView` is the
+/// SOLE writer of the preview connection's `isVideoMirrored`: driven by `cameraMirror` (observed
+/// from `AppSettings`), it flips the preview live as a cheap layer transform — no session
+/// reconfiguration, no `CameraSource` rebuild, no flicker.
 struct CameraPreviewRepresentable: NSViewRepresentable {
     let sessionHandle: SessionHandle?
+
+    /// Whether the live preview is horizontally mirrored. Sourced from `AppSettings.cameraMirror`
+    /// at the call site so SwiftUI re-invokes `updateNSView` when the toggle changes.
+    let cameraMirror: Bool
 
     func makeNSView(context: Context) -> CameraPreviewView {
         CameraPreviewView(sessionHandle: self.sessionHandle)
     }
 
     func updateNSView(_ nsView: CameraPreviewView, context: Context) {
-        // No-op: CameraPreviewView wires the layer in init.
-        // Caller must use .id() to force recreation when sessionHandle changes.
+        // Sole writer of the preview connection's mirror state. The layer itself is wired in
+        // CameraPreviewView.init (which also disables automatic mirroring); device changes are
+        // handled by .id()-driven recreation at the call site.
+        // isVideoMirroringSupported guard mirrors the recording path (applyRecordingMirror).
+        guard let connection = nsView.previewLayer?.connection, connection.isVideoMirroringSupported else {
+            return
+        }
+        // updateNSView runs on every SwiftUI pass (device discovery, permission/hover/state churn);
+        // only touch the connection when the value actually differs to avoid redundant writes.
+        guard connection.isVideoMirrored != self.cameraMirror else {
+            return
+        }
+        connection.isVideoMirrored = self.cameraMirror
     }
 }

@@ -77,30 +77,45 @@ nonisolated struct DropHealthSnapshot: Equatable {
 /// Per-source diagnostic drop counts accumulated over a session.
 ///
 /// Unlike `DropCounters` (which maps to `DropReason` and drives UI state), `DropBreakdown`
-/// maps to `DropSource` and is used EXCLUSIVELY for the single `.notice` log line emitted
-/// at session stop. It does not affect UI counters, `RecordingState`, or the degraded-state
-/// window — diagnostic only.
+/// maps to `DropSource` and is used by the on-disk technical report and the single `.notice`
+/// log line emitted at session stop. It does not affect UI counters, `RecordingState`, or the
+/// degraded-state window — diagnostic only.
+///
+/// ## Real-loss attribution
+/// `bpEncodeScreen` and `bpEncodeCamera` are the `DropReason.encoderBackpressureDrops`-only
+/// subsets of `encodeScreen`/`encodeCamera`. They let `DropReportFormatter` separate
+/// real frame loss (backpressure) from zero-content-loss coalescing (CFR normalization,
+/// hold repeats) per encoder lane without adding fields to `DropCounters`.
 nonisolated struct DropBreakdown: Equatable {
-    /// Drops detected by `ScreenSource` (SCStream video overflow).
+    /// Drops detected by `ScreenSource` (SCStream video overflow). All reasons — real loss only
+    /// since capture sources never emit CFR/hold events.
     nonisolated let captureScreen: Int
-    /// Drops detected by `CameraSource` video path (AVCapture video overflow).
+    /// Drops detected by `CameraSource` video path (AVCapture video overflow). Real loss only.
     nonisolated let captureCameraVideo: Int
-    /// Drops detected by `CameraSource` audio path (AVCapture audio overflow).
+    /// Drops detected by `CameraSource` audio path (AVCapture audio overflow). Real loss only.
     nonisolated let captureCameraAudio: Int
-    /// Drops dropped at the `VideoEncoder` pending-frame gate.
-    nonisolated let encode: Int
+    /// All events from the screen encoder lane (`DropSource.encodeScreen`): backpressure + CFR + hold.
+    nonisolated let encodeScreen: Int
+    /// All events from the camera encoder lane (`DropSource.encodeCamera`): backpressure + CFR + hold.
+    nonisolated let encodeCamera: Int
+    /// `DropReason.encoderBackpressureDrops`-only subset of `encodeScreen`. Real frame loss.
+    nonisolated let bpEncodeScreen: Int
+    /// `DropReason.encoderBackpressureDrops`-only subset of `encodeCamera`. Real frame loss.
+    nonisolated let bpEncodeCamera: Int
     /// Drops dropped at `FileWriter` due to writer/disk backpressure.
     nonisolated let writer: Int
 
     /// Single-line `.notice`-level summary for `os.Logger`.
     ///
-    /// All values are public (no PII) — safe at `.notice` so the line survives in release
-    /// `log show` output, satisfying AC-8's release-diagnosability requirement.
+    /// Shows all-reason totals per source (not the bp-only subsets). All values are
+    /// public (no PII) — safe at `.notice` so the line survives in release `log show`
+    /// output, satisfying AC-8's release-diagnosability requirement.
     nonisolated var summaryLine: String {
         "drop breakdown: capture-screen=\(self.captureScreen)" +
             " capture-camera-video=\(self.captureCameraVideo)" +
             " capture-camera-audio=\(self.captureCameraAudio)" +
-            " encode=\(self.encode)" +
+            " encode-screen=\(self.encodeScreen)" +
+            " encode-camera=\(self.encodeCamera)" +
             " writer=\(self.writer)"
     }
 }
@@ -276,26 +291,31 @@ actor DropMonitor {
     // MARK: - Backpressure-only per-source counters (never reset)
 
     // These count ONLY encoderBackpressureDrops events, keyed by DropSource. They are separate
-    // from breakdownCaptureScreen / breakdownEncode / etc. (which count ALL reasons) so that
+    // from breakdownCaptureScreen / breakdownEncodeScreen / etc. (which count ALL reasons) so that
     // CFR-normalization and captureDrop events never misattribute the dominant backpressure cause.
     // Incremented exclusively inside the .encoderBackpressureDrops branch of ingest(_:).
+    // bpEncodeScreen and bpEncodeCamera are also exposed via breakdownSnapshot() so the formatter
+    // can split real encoder loss from zero-loss coalescing per lane.
     private var bpCaptureScreen = 0
     private var bpCaptureCameraVideo = 0
     private var bpCaptureCameraAudio = 0
-    private var bpEncode = 0
+    private var bpEncodeScreen = 0
+    private var bpEncodeCamera = 0
     private var bpWriter = 0
 
     // MARK: - Per-source diagnostic counters (never reset)
 
     // These parallel the DropReason counters above but are keyed by DropSource, not DropReason.
-    // They feed the single .notice summary line at stop() — they do NOT replace or modify the
-    // DropReason accounting above. An event with reason .encoderBackpressureDrops increments
-    // both encoderBackpressureDrops (existing) AND one source bucket below (new). The totals
-    // are independent: the reason total drives UI; the source total drives diagnostics.
+    // They feed the .notice summary line at stop() and the on-disk technical report — they do NOT
+    // replace or modify the DropReason accounting above. An event with reason
+    // .encoderBackpressureDrops increments both encoderBackpressureDrops (existing) AND one source
+    // bucket below (new). The totals are independent: the reason total drives UI; the source total
+    // drives diagnostics.
     private var breakdownCaptureScreen = 0
     private var breakdownCaptureCameraVideo = 0
     private var breakdownCaptureCameraAudio = 0
-    private var breakdownEncode = 0
+    private var breakdownEncodeScreen = 0
+    private var breakdownEncodeCamera = 0
     private var breakdownWriter = 0
 
     // MARK: - Tasks
@@ -390,8 +410,11 @@ actor DropMonitor {
             case .captureCameraAudio:
                 self.bpCaptureCameraAudio += event.count
 
-            case .encode:
-                self.bpEncode += event.count
+            case .encodeScreen:
+                self.bpEncodeScreen += event.count
+
+            case .encodeCamera:
+                self.bpEncodeCamera += event.count
 
             case .writer:
                 self.bpWriter += event.count
@@ -438,8 +461,11 @@ actor DropMonitor {
         case .captureCameraAudio:
             self.breakdownCaptureCameraAudio += event.count
 
-        case .encode:
-            self.breakdownEncode += event.count
+        case .encodeScreen:
+            self.breakdownEncodeScreen += event.count
+
+        case .encodeCamera:
+            self.breakdownEncodeCamera += event.count
 
         case .writer:
             self.breakdownWriter += event.count
@@ -521,9 +547,13 @@ actor DropMonitor {
         // Tie-break order (highest priority first): writer > encode > captureScreen >
         // captureCameraVideo > captureCameraAudio. The first non-zero bucket among those
         // with the highest count wins; ties use this order as a deterministic decider.
+        //
+        // DropCause.encode covers both encoder lanes: screen and camera backpressure drops
+        // are summed into a single encode bucket so the dominant cause reflects combined
+        // encoder pressure, matching the existing DropCause taxonomy.
         let candidates: [(Int, DropCause)] = [
             (self.bpWriter, .writer),
-            (self.bpEncode, .encode),
+            (self.bpEncodeScreen + self.bpEncodeCamera, .encode),
             (self.bpCaptureScreen, .captureScreen),
             (self.bpCaptureCameraVideo, .captureCameraVideo),
             (self.bpCaptureCameraAudio, .captureCameraAudio),
@@ -539,7 +569,10 @@ actor DropMonitor {
             captureScreen: self.breakdownCaptureScreen,
             captureCameraVideo: self.breakdownCaptureCameraVideo,
             captureCameraAudio: self.breakdownCaptureCameraAudio,
-            encode: self.breakdownEncode,
+            encodeScreen: self.breakdownEncodeScreen,
+            encodeCamera: self.breakdownEncodeCamera,
+            bpEncodeScreen: self.bpEncodeScreen,
+            bpEncodeCamera: self.bpEncodeCamera,
             writer: self.breakdownWriter
         )
     }

@@ -71,6 +71,7 @@ struct MainViewModelDeviceRefreshTests {
         )
         return MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: RecordingCoordinator {
                 UserDefaultsBackendSelectionStore(defaults: defaults)
             },

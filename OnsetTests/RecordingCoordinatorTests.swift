@@ -1335,5 +1335,139 @@ struct RecordingCoordinatorConsentOrderingTests {
     }
 }
 
+// MARK: - isRecordingActive gate (Settings T-8 — recording-affecting controls)
+
+/// Tests for the `isRecordingActive` observable gate that `ControlAvailability` reads to grey out
+/// settings whose `SettingApplyPolicy` is `.nextRecordingStart` during an active recording.
+///
+/// The contract (see the property doc on `RecordingCoordinator.isRecordingActive`): `true` from the
+/// ENTRY of `start()` through the COMPLETION of `stop()` — covering the whole startup window plus the
+/// recording — and `false` once fully stopped OR after any start that reverts. The three reset sites
+/// are exercised here: the `session.start()` catch, the `if !activated` cleanup defer
+/// (denial / timeout / user-cancel), and the end of `stop()`. The `isStarting` `defer` must NOT
+/// reset it — otherwise the gate would drop to `false` on the success path mid-start.
+@Suite("RecordingCoordinator — isRecordingActive gate (Settings T-8)")
+@MainActor
+struct RecordingCoordinatorActiveGateTests {
+    @Test("isRecordingActive is false when idle")
+    func isRecordingActive_falseWhenIdle() {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+
+        #expect(!coordinator.isRecordingActive, "gate must be false before any recording starts")
+    }
+
+    @Test("isRecordingActive becomes true across the start window — before phase == .recording")
+    func isRecordingActive_trueAcrossStartWindow() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        // Suppress auto-emit so start() stays in the activation wait and we can observe the gate
+        // while isStarting is still true and phase has not yet flipped to .recording.
+        fake.simulateCaptureNeverActivates = true
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+
+        // Launch start() without awaiting — it suspends in the activation wait.
+        let startTask = Task { try await coordinator.start(CoordinatorFixtures.request()) }
+        // Let the task run up to the activation wait (same ordering dependency as the #171 tests).
+        try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+
+        // The gate must already be true mid-start, even though phase has not reached .recording.
+        #expect(coordinator.phase != .recording, "prerequisite: still in the start window")
+        #expect(coordinator.isRecordingActive, "gate must be true across the whole start window (set at entry)")
+
+        // Activation fires → start() completes; the success path leaves the gate true.
+        fake.emitCaptureActive()
+        try await startTask.value
+        #expect(coordinator.phase == .recording, "prerequisite: now recording")
+        #expect(coordinator.isRecordingActive, "gate must remain true while recording (success path)")
+
+        await coordinator.stop()
+    }
+
+    @Test("isRecordingActive returns to false after a normal stop()")
+    func isRecordingActive_falseAfterNormalStop() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        #expect(coordinator.isRecordingActive, "prerequisite: gate is true while recording")
+
+        await coordinator.stop()
+        #expect(!coordinator.isRecordingActive, "gate must reset to false after a normal stop()")
+    }
+
+    @Test("isRecordingActive resets to false when session.start() throws (catch path)")
+    func isRecordingActive_falseOnSessionStartError() async {
+        // Exercises the reset in the `session.start()` catch block — the gate is set true at entry,
+        // so a throw before activation must not leave it stuck true.
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        fake.startError = RecordingError.noVideoSource
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+
+        do {
+            try await coordinator.start(CoordinatorFixtures.request())
+        } catch {
+            // Expected — the session refused to start.
+        }
+
+        #expect(!coordinator.isRecordingActive, "gate must reset to false when session.start() throws")
+    }
+
+    @Test("isRecordingActive resets to false on a start that never activates (timeout)")
+    func isRecordingActive_falseOnActivationTimeout() async {
+        // Exercises the `if !activated` cleanup defer: capture never activates and the bounded
+        // timeout fires, so start() throws .captureDidNotActivate and the gate must revert.
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        fake.simulateCaptureNeverActivates = true
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            activationTimeoutSeconds: 0.05
+        )
+
+        do {
+            try await coordinator.start(CoordinatorFixtures.request())
+        } catch {
+            // Expected — capture did not activate.
+        }
+
+        #expect(!coordinator.isRecordingActive, "gate must reset to false after an activation timeout")
+    }
+
+    @Test("isRecordingActive resets to false when stop() cancels the consent wait")
+    func isRecordingActive_falseOnUserCancelDuringConsentWait() async throws {
+        // Exercises the `if !activated` cleanup defer via the user-cancel path: stop() during the
+        // consent wait reverts silently, and the gate must not be left stuck true.
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        fake.simulateCaptureNeverActivates = true
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            activationTimeoutSeconds: 100
+        )
+        coordinator.enterMain()
+
+        let startTask = Task { try await coordinator.start(CoordinatorFixtures.request()) }
+        try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+
+        // User cancels mid-consent — silent revert.
+        await coordinator.stop()
+        try await startTask.value
+
+        #expect(!coordinator.isRecordingActive, "gate must reset to false after a user cancel during consent wait")
+    }
+}
+
 // swiftlint:enable no_magic_numbers
 // swiftlint:enable type_body_length

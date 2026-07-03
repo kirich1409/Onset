@@ -343,6 +343,14 @@ struct CapabilityResolverTests {
         // Sanity: even dimensions preserved.
         #expect(plan.screenWidth.isMultiple(of: 2))
         #expect(plan.screenHeight.isMultiple(of: 2))
+
+        // Camera plan must also be present at its native 4K resolution — not just the screen.
+        guard let cameraPlan = plan.cameraPlan else {
+            Issue.record("Expected a camera plan, but got nil")
+            return
+        }
+        #expect(cameraPlan.width == 3840)
+        #expect(cameraPlan.height == 2160)
     }
 }
 

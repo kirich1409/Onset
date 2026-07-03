@@ -26,7 +26,7 @@ if command -v xcbeautify >/dev/null 2>&1; then
 fi
 
 echo "── 1/4 SwiftFormat (lint) ──────────────────────────────────────────────"
-swiftformat . --lint --config .swiftformat
+swiftformat --lint .
 
 echo "── 2/4 SwiftLint (strict) ──────────────────────────────────────────────"
 swiftlint lint --strict --config .swiftlint.yml

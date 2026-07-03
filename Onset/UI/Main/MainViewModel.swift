@@ -54,6 +54,13 @@ final class MainViewModel {
     @ObservationIgnored
     let coordinator: RecordingCoordinator
 
+    /// The shared settings model. `@ObservationIgnored` because the reference is constant — the
+    /// reactive value (`cameraMirror`) is observed through `AppSettings`'s own `@Observable`
+    /// tracking where it is read (the live preview), not through this property. Read at record
+    /// start to thread `cameraMirror` into the recording `RecordingConfiguration`.
+    @ObservationIgnored
+    let appSettings: AppSettings
+
     /// Closure seam for display discovery — injectable for tests.
     @ObservationIgnored
     let discoverDisplays: (Bool) async throws -> [Display]
@@ -573,6 +580,7 @@ final class MainViewModel {
 
     init(
         permissions: any PermissionsProviding,
+        appSettings: AppSettings,
         coordinator: RecordingCoordinator,
         discoverDisplays: @escaping (Bool) async throws -> [Display] = { authorized in
             try await DeviceDiscovery.displays(screenAuthorized: authorized)
@@ -630,6 +638,7 @@ final class MainViewModel {
     ) {
         self.permissions = permissions
         self.coordinator = coordinator
+        self.appSettings = appSettings
         self.discoverDisplays = discoverDisplays
         self.discoverCameras = discoverCameras
         self.discoverMicrophones = discoverMicrophones

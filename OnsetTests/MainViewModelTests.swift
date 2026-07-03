@@ -45,6 +45,7 @@ struct MainViewModelTests {
         }
         let sut = MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: coordinator,
             discoverDisplays: { _ in displays },
             discoverCameras: { _ in cameras },
@@ -544,6 +545,7 @@ struct MainViewModelBuildChecklistTests {
         let store = InMemoryUserDefaults()
         return MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: coordinator,
             discoverDisplays: { _ in [] },
             discoverCameras: { _ in [] },
@@ -616,6 +618,7 @@ struct MainViewModelStaleCameraIDTests {
         let cam = Self.makeCamera(id: "cam-new")
         let sut = MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: coordinator,
             discoverDisplays: { _ in [] },
             discoverCameras: { _ in [cam] },
@@ -644,6 +647,7 @@ struct MainViewModelStaleCameraIDTests {
         let cam2 = Self.makeCamera(id: "cam-2")
         let sut = MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: coordinator,
             discoverDisplays: { _ in [] },
             discoverCameras: { _ in [cam1, cam2] },
@@ -671,6 +675,7 @@ struct MainViewModelStaleCameraIDTests {
         let cam = Self.makeCamera(id: "cam-only")
         let sut = MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: coordinator,
             discoverDisplays: { _ in [] },
             discoverCameras: { _ in [cam] },

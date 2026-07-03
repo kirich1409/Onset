@@ -42,6 +42,7 @@ struct MainViewModelCameraToggleTests {
         }
         return MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: coordinator,
             discoverDisplays: { _ in displays },
             discoverCameras: { _ in cameras },
@@ -117,6 +118,25 @@ struct MainViewModelCameraToggleTests {
 
         let format = try sut.resolveCameraFormat()
         #expect(format != nil)
+    }
+
+    @Test("cameraEnabled true + camera advertises 1080p and 4K → resolveCameraFormat picks native 4K")
+    func cameraEnabled_withCamera_resolveCameraFormat_picksNative4K() async throws {
+        // resolveCameraFormat (MainViewModel+Record.swift) opts into `allowAboveFullHD: true` —
+        // reverting that flag would make the selector cap at 1080p instead. This exercises
+        // resolveCameraFormat() itself (not just CameraFormatSelector.pickBestFormat directly),
+        // so it catches a regression at the call site, not only in the selector's own logic.
+        let cam = CameraDevice(uniqueID: "cam-4k", formats: [
+            CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30, maxFps: 30),
+            CameraFormat(pixelWidth: 3840, pixelHeight: 2160, minFps: 30, maxFps: 30),
+        ])
+        let sut = self.makeSUT(cameras: [cam])
+        await sut.loadDevices()
+
+        let format = try sut.resolveCameraFormat()
+
+        #expect(format?.pixelWidth == 3840)
+        #expect(format?.pixelHeight == 2160)
     }
 
     // MARK: - Camera enabled with no cameras available
@@ -442,6 +462,7 @@ struct MainViewModelCameraToggleTests {
         let outputDefaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: RecordingCoordinator {
                 UserDefaultsBackendSelectionStore(defaults: outputDefaults)
             },
@@ -476,6 +497,7 @@ struct MainViewModelCameraToggleTests {
         let outputDefaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: RecordingCoordinator {
                 UserDefaultsBackendSelectionStore(defaults: outputDefaults)
             },
@@ -511,6 +533,7 @@ struct MainViewModelCameraToggleTests {
             let perms = FakePermissionsService(screen: .authorized, camera: .authorized, microphone: .notDetermined)
             let sut = MainViewModel(
                 permissions: perms,
+                appSettings: AppSettings(store: InMemorySettingsStore()),
                 coordinator: RecordingCoordinator {
                     UserDefaultsBackendSelectionStore(defaults: defaults)
                 },
@@ -541,6 +564,7 @@ struct MainViewModelCameraToggleTests {
         let outputDefaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: RecordingCoordinator {
                 UserDefaultsBackendSelectionStore(defaults: outputDefaults)
             },
@@ -621,6 +645,7 @@ struct MainViewModelCameraConnectingTests {
         }
         return MainViewModel(
             permissions: perms,
+            appSettings: AppSettings(store: InMemorySettingsStore()),
             coordinator: coordinator,
             discoverDisplays: { _ in [] },
             discoverCameras: { _ in cameras },

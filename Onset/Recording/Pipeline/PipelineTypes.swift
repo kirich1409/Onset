@@ -432,8 +432,11 @@ nonisolated enum DropSource: Equatable, Hashable {
     /// AVCapture microphone audio sample overflowed the capture → encoder `AsyncStream` buffer.
     case captureCameraAudio
 
-    /// VideoEncoder pending-frame gate dropped a frame before VT compression.
-    case encode
+    /// VideoEncoder pending-frame gate dropped a frame before VT compression — screen encoder lane.
+    case encodeScreen
+
+    /// VideoEncoder pending-frame gate dropped a frame before VT compression — camera encoder lane.
+    case encodeCamera
 
     /// FileWriter input was not ready (writer/disk backpressure); compressed sample dropped.
     case writer
@@ -449,7 +452,8 @@ extension DropSource {
         case (.captureScreen, .captureScreen),
              (.captureCameraVideo, .captureCameraVideo),
              (.captureCameraAudio, .captureCameraAudio),
-             (.encode, .encode),
+             (.encodeScreen, .encodeScreen),
+             (.encodeCamera, .encodeCamera),
              (.writer, .writer):
             true
 
@@ -479,13 +483,17 @@ extension DropSource {
             // swiftlint:disable:next no_magic_numbers
             hasher.combine(2)
 
-        case .encode:
+        case .encodeScreen:
             // swiftlint:disable:next no_magic_numbers
             hasher.combine(3)
 
-        case .writer:
+        case .encodeCamera:
             // swiftlint:disable:next no_magic_numbers
             hasher.combine(4)
+
+        case .writer:
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(5)
         }
     }
 }

@@ -131,6 +131,20 @@ final class RecordingCoordinator {
     /// The app's top-level lifecycle phase.
     private(set) var phase: AppPhase = .idle
 
+    /// `true` from the ENTRY of `start()` through the COMPLETION of `stop()` — i.e. the whole
+    /// startup window plus the recording — and `false` once fully stopped or after a start that
+    /// reverted. Settings controls gated on `SettingApplyPolicy.nextRecordingStart` read this via
+    /// `ControlAvailability` to grey out during the (possibly seconds-long) start/stop windows.
+    ///
+    /// Deliberately an OBSERVABLE STORED property, not a computed getter over the
+    /// `@ObservationIgnored` `isStarting`/`isStopping` flags: a computed value would not trigger
+    /// SwiftUI invalidation when those flags flip, and `phase` only reaches `.recording` at the
+    /// END of `start()`, leaving the start window unobservable. It is reset on every `start()`
+    /// failure/cancel path (so a denied first-run TCC consent does not leave the gate stuck
+    /// `true`), but NOT by the `isStarting` `defer` — that resets a different variable and fires
+    /// on the success path too, where this gate must stay `true`.
+    private(set) var isRecordingActive = false
+
     /// Live backpressure health, re-published from the session state stream (`.normal` until the
     /// first `.degraded` transition arrives).
     private(set) var recordingState: RecordingState = .normal
@@ -443,6 +457,9 @@ final class RecordingCoordinator {
             return
         }
         self.isStarting = true
+        // Recording-active gate ON at entry — covers the whole startup window (see property doc).
+        // Every failure/cancel path below resets it to false; the success path leaves it true.
+        self.isRecordingActive = true
         // Reset the cancel flag immediately — before any `await` — so a stop() that races
         // session.start() (where activationTask is still nil) cannot be wiped on resume.
         self.activationCancelledByUser = false
@@ -457,6 +474,8 @@ final class RecordingCoordinator {
             try await session.start(permissions: request.permissions)
         } catch {
             coordinatorLogger.error("RecordingSession.start failed: \(String(describing: error))")
+            // This catch precedes the `if !activated` cleanup defer below, so reset the gate here.
+            self.isRecordingActive = false
             throw error
         }
 
@@ -474,6 +493,9 @@ final class RecordingCoordinator {
             // it false. nil-out the session so no zombie session survives after start() exits.
             if !activated {
                 self.session = nil
+                // Revert the recording-active gate on every non-success exit (user cancel during
+                // consent wait, denial, timeout) — the success path leaves it true until stop().
+                self.isRecordingActive = false
             }
         }
 
@@ -751,6 +773,9 @@ final class RecordingCoordinator {
         }
 
         self.isStopping = false
+        // Recording-active gate OFF only now — after the terminal phase is set above — so the
+        // gate stays true across the entire stop window, false only once fully stopped.
+        self.isRecordingActive = false
         // Session directory name (not full path) is safe to log — no home path (issue #188).
         let fileCount = result.outputURLs.count
         let originDescription = String(describing: self.origin)
