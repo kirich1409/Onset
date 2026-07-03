@@ -33,8 +33,10 @@ struct MainView: View {
         static let sectionSpacing: CGFloat = 12
         /// Aspect ratio for the camera preview card (16:9 landscape).
         static let previewAspectRatio: CGFloat = 16.0 / 9.0 // swiftlint:disable:this no_magic_numbers
-        /// Maximum height for the camera preview card so it stays compact inside the fixed window (#74).
-        static let previewMaxHeight: CGFloat = 140
+        /// Maximum height for the camera preview card: still compact inside the fixed 460×560 window (#74),
+        /// but tall enough that the 16:9 preview nearly fills the 392pt card inner width, minimizing the
+        /// pillarbox margins on either side (#267). At 180pt the preview is 320pt wide → ~36pt margin per side.
+        static let previewMaxHeight: CGFloat = 180
         static let recordButtonHeight: CGFloat = 44
         static let rowSpacing: CGFloat = 8
         static let iconColumnWidth: CGFloat = 16

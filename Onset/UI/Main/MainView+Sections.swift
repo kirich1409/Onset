@@ -123,7 +123,8 @@ extension MainView {
                 }
             }
             .aspectRatio(Metrics.previewAspectRatio, contentMode: .fit)
-            // Cap on maxWidth (concrete in ScrollView) so the card is ≤140pt tall.
+            // Cap on maxWidth (concrete in ScrollView) so the card is ≤180pt tall, close to the
+            // 392pt card inner width to minimize the pillarbox margins on either side (#267).
             // maxHeight is also set for documentation intent; maxWidth is the reliable
             // binding dimension since ScrollView propagates width, not height.
             .frame(
@@ -131,7 +132,7 @@ extension MainView {
                 maxHeight: Metrics.previewMaxHeight
             )
             .clipShape(RoundedRectangle(cornerRadius: Metrics.previewCornerRadius))
-            // Center the narrower card within the section's full width.
+            // Center the narrower (320pt) card within the section's full width, leaving ~36pt margin per side.
             .frame(maxWidth: .infinity)
             // Crossfade between placeholder and live states. Scoped to `cameraPlaceholderPending`
             // so it does NOT animate the `.id()`-driven NSView recreation.
