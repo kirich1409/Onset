@@ -36,6 +36,12 @@ enum WindowDefaults {
 
 @main
 struct OnsetApp: App {
+    // MARK: - App delegate
+
+    /// Handles graceful termination (#243) — see `AppDelegate`. Wired to the coordinator from
+    /// `WindowActionsBridge.onAppear`, mirroring how the bridge wires the hotkey monitor.
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     // MARK: - Composition root
 
     /// The single `PermissionsService` instance shared across all scenes.
@@ -100,7 +106,11 @@ struct OnsetApp: App {
                 )
                 // Capture the env window actions into the coordinator (a plain class cannot read
                 // @Environment(\.openWindow) itself). Also registers the system-wide hotkey (#67).
-                .background(WindowActionsBridge(coordinator: self.coordinator, hotKeyMonitor: self.hotKeyMonitor))
+                .background(WindowActionsBridge(
+                        coordinator: self.coordinator,
+                        hotKeyMonitor: self.hotKeyMonitor,
+                        appDelegate: self.appDelegate
+                    ))
             }
         }
         // Fixed-size window that wraps the content — prevents user resizing.
@@ -162,6 +172,7 @@ struct OnsetApp: App {
 private struct WindowActionsBridge: View {
     let coordinator: RecordingCoordinator
     let hotKeyMonitor: GlobalHotKeyMonitor
+    let appDelegate: AppDelegate
 
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissWindow) private var dismissWindow
@@ -185,6 +196,11 @@ private struct WindowActionsBridge: View {
                 )
                 self.coordinator.enterMain()
 
+                // Wire the coordinator into the app delegate so applicationShouldTerminate(_:)
+                // can finalize an active recording on Cmd-Q / Dock Quit (#243). A plain
+                // NSApplicationDelegate has no SwiftUI environment access of its own.
+                self.appDelegate.coordinator = self.coordinator
+
                 // Register the system-wide hotkey after the coordinator is fully wired
                 // (#67 / AC-9). The monitor's register() is idempotent; onAppear may fire
                 // more than once on scene re-attachment, so the guard inside register() is
@@ -199,6 +215,38 @@ private struct WindowActionsBridge: View {
                     coordinator.handleHotKey()
                 }
             }
+    }
+}
+
+// MARK: - AppDelegate
+
+/// Finalizes an active recording on graceful app termination (#243).
+///
+/// `NSApplication` calls `applicationShouldTerminate(_:)` synchronously on Cmd-Q, Dock Quit, and
+/// `NSApp.terminate(_:)`. Without this delegate, quitting mid-recording falls straight through to
+/// `movieFragmentInterval` fragment-recovery — the output files are only *recoverable*, never
+/// cleanly finalized. `coordinator.finalizeForTermination()` routes through the normal `stop()`
+/// funnel instead (bounded — see its doc comment), so termination gets the same finalize/reveal
+/// teardown as the button/hotkey/menu stop paths.
+///
+/// `coordinator` is wired in from `WindowActionsBridge.onAppear` — a plain `NSObject` delegate has
+/// no SwiftUI environment access of its own, so it cannot read the composition-root `@State`
+/// directly (mirrors how the bridge wires `GlobalHotKeyMonitor`).
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Set once at startup by `WindowActionsBridge`. `nil` only in the brief window before that
+    /// wiring runs, in which case termination proceeds immediately — no recording can have
+    /// started yet, so there is nothing to finalize.
+    var coordinator: RecordingCoordinator?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let coordinator, coordinator.isRecordingActive else { return .terminateNow }
+        appLogger.notice("Termination requested during an active recording — finalizing before quit")
+        Task {
+            await coordinator.finalizeForTermination()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 }
 

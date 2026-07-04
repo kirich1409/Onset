@@ -784,6 +784,51 @@ final class RecordingCoordinator {
         )
     }
 
+    // MARK: - Termination (#243)
+
+    // swiftlint:disable no_magic_numbers
+    // The literal below is the definition site (mirrors CameraPreviewTimeout's threshold constants).
+    /// Default bound for `finalizeForTermination`'s wait.
+    ///
+    /// A few seconds above the ~4s `RecordingConfiguration.mvpDefault.movieFragmentInterval` —
+    /// enough slack for `stop()`'s own awaited work (drop-poll tick, session teardown) to finish
+    /// first in the common case, while still bounding the worst case so app termination can never
+    /// hang indefinitely on a stuck teardown.
+    static let defaultTerminationFinalizationTimeout: Duration = .seconds(5)
+    // swiftlint:enable no_magic_numbers
+
+    /// Best-effort finalization for graceful app termination (Cmd-Q / Dock Quit / `NSApp.terminate`).
+    ///
+    /// Before #242 (menu-bar-first recording) the recording window's `.onDisappear` called
+    /// `stop()`, so quitting mid-recording always ran the normal teardown. That path was removed
+    /// when the window stopped being the only way to see a recording, leaving a regression:
+    /// terminating the app during an active recording fell straight through to
+    /// `movieFragmentInterval` fragment-recovery (AC-10) — the files are only *recoverable* from
+    /// fragment headers, never cleanly finalized. This routes termination back through the sole
+    /// `stop()` funnel so it gets the same finalize/reveal teardown as the button/hotkey/menu paths.
+    ///
+    /// No-op when idle — `applicationShouldTerminate` calls this unconditionally, and only the
+    /// active-recording case has anything to await.
+    ///
+    /// Bounded: races `stop()` against `timeout` (see `defaultTerminationFinalizationTimeout` for
+    /// the default bound's rationale). If the bound is hit, termination proceeds anyway and
+    /// fragment-recovery is the fallback (AC-10) — `stop()` keeps running in the background but its
+    /// result can no longer be awaited once the process starts tearing down.
+    func finalizeForTermination(timeout: Duration = defaultTerminationFinalizationTimeout) async {
+        guard self.isRecordingActive else { return }
+        coordinatorLogger.notice("App termination requested during an active recording — finalizing")
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await self.stop() }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                guard !Task.isCancelled else { return }
+                coordinatorLogger.error("Termination finalization timed out — proceeding with quit")
+            }
+            await group.next()
+            group.cancelAll()
+        }
+    }
+
     // MARK: - Global hotkey (#67 / AC-9 third stop path)
 
     /// Toggle entry point for the global hotkey (#67, AC-9 third stop path) and any future

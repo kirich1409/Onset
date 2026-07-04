@@ -1469,5 +1469,60 @@ struct RecordingCoordinatorActiveGateTests {
     }
 }
 
+// MARK: - Termination finalization (#243)
+
+/// Regression coverage for #243: graceful app termination (Cmd-Q / Dock Quit) during an active
+/// recording must await the normal `stop()` teardown instead of falling straight through to
+/// `movieFragmentInterval` fragment-recovery. Exercises `RecordingCoordinator.finalizeForTermination`
+/// directly — the injectable seam `AppDelegate.applicationShouldTerminate(_:)` calls into — rather
+/// than driving `NSApplication` itself.
+@Suite("RecordingCoordinator — finalizeForTermination (#243)")
+@MainActor
+struct RecordingCoordinatorTerminationTests {
+    @Test("active recording — finalizeForTermination awaits stop() before returning")
+    func finalizeForTermination_activeRecording_awaitsStop() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+        try await coordinator.start(CoordinatorFixtures.request())
+        #expect(coordinator.phase == .recording, "prerequisite: must be recording")
+
+        await coordinator.finalizeForTermination()
+
+        // stop() was awaited to completion — not merely called and left in flight — the
+        // coordinator's own post-stop state (isRecordingActive gate, stopCount) proves it ran to
+        // the end rather than racing finalizeForTermination's return.
+        #expect(fake.stopCalled, "stop() must be called when a recording is active at termination")
+        #expect(fake.stopCount == 1, "stop() must be awaited exactly once, not left running unawaited")
+        #expect(
+            !coordinator.isRecordingActive,
+            "gate must be false — finalizeForTermination awaited stop() to completion"
+        )
+    }
+
+    @Test("no active recording — finalizeForTermination returns immediately without calling stop()")
+    func finalizeForTermination_noActiveRecording_doesNotCallStop() async {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+        coordinator.enterMain()
+        #expect(!coordinator.isRecordingActive, "prerequisite: idle, no recording started")
+
+        await coordinator.finalizeForTermination()
+
+        #expect(!fake.stopCalled, "stop() must not be called — the regression is an UNCONDITIONAL await, not a no-op")
+    }
+}
+
 // swiftlint:enable no_magic_numbers
 // swiftlint:enable type_body_length
