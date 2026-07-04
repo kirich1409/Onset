@@ -295,6 +295,12 @@ nonisolated struct StageRateAggregator {
         self.tickLag.maxMs
     }
 
+    /// Count of `pendingFrameCount()` queries recorded since the last flush.
+    /// Exposed for L2 tests verifying every submit() drives exactly one VT query (#151).
+    var pendingQueryCount: Int {
+        self.pendMs.samples
+    }
+
     // MARK: - Flush
 
     /// Returns a formatted telemetry line and resets all accumulators.
@@ -363,6 +369,7 @@ nonisolated struct StageRateAggregator {
             + " pend_ms_avg=\(self.fmt(self.pendMs.avgMs))"
             + " pend_ms_max=\(self.fmt(self.pendMs.maxMs))"
             + " pending_max=\(self.pendingMax)"
+            + " pend_qps=\(self.fmt(self.rate(self.pendMs.samples, over: elapsedSeconds)))"
             + " ing_ms_avg=\(self.fmt(self.ingMs.avgMs))"
             + " ing_ms_max=\(self.fmt(self.ingMs.maxMs))"
             + " win_s=\(self.fmt(elapsedSeconds))"

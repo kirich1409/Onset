@@ -352,6 +352,13 @@ actor VideoEncoder {
         self.aggregator.tickLagMaxMs
     }
 
+    /// Test-only observation accessor; exposes the count of `pendingFrameCount()` queries
+    /// recorded since the last flush. Used by L2 tests to verify every submit() drives
+    /// exactly one VT backpressure query (#151).
+    var aggregatorPendingQueryCount: Int {
+        self.aggregator.pendingQueryCount
+    }
+
     /// Whether the active session uses a hardware encoder (false when not started).
     /// Drives the L5 HW assertion.
     var isUsingHardwareEncoder: Bool {
