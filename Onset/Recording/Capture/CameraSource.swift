@@ -207,6 +207,7 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
         }
         self.captureState = .stopped
         NotificationCenter.default.removeObserver(shims.video)
+        shims.suspensionObservation.invalidate()
         self.releaseRunning(shims: shims, session: session)
         cameraSourceLogger.info("Capture stopped")
     }
@@ -233,6 +234,7 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
         guard case let .running(session, shims) = self.captureState else { return }
         self.captureState = .stopped
         NotificationCenter.default.removeObserver(shims.video)
+        shims.suspensionObservation.invalidate()
         self.releaseRunning(shims: shims, session: session)
         cameraSourceLogger.error("Camera device disconnected — stopping")
         self.eventsContinuation.yield(.cameraDisconnected)
@@ -254,6 +256,7 @@ actor CameraSource: VideoFrameSource, AudioSampleSource {
         guard case let .running(session, shims) = self.captureState else { return }
         self.captureState = .stopped
         NotificationCenter.default.removeObserver(shims.video)
+        shims.suspensionObservation.invalidate()
         self.releaseRunning(shims: shims, session: session)
         cameraSourceLogger.error("Camera session fault — stopping: \(reason, privacy: .public)")
         self.eventsContinuation.yield(.cameraDisconnected)

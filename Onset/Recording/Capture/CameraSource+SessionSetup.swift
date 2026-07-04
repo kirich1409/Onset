@@ -69,14 +69,12 @@ extension CameraSource {
             onSessionFault: { [weak self] reason in await self?.handleCameraSessionFault(reason: reason) }
         )
 
-        // The locked device is bundled into the shims only for `.record`; preview passes nil
-        // (it already released the lock). Teardown reads it back to unlock via releaseRunning().
         let shims = self.makeShims(
             session: session,
+            device: device,
             sessionStart: anchor.anchorTime,
             syncClock: syncClock,
-            callbacks: callbacks,
-            lockedDevice: self.role == .record ? device : nil
+            callbacks: callbacks
         )
         try self.attachOutputs(to: session, shims: shims)
 
@@ -275,34 +273,6 @@ extension CameraSource {
             throw RecordingError.captureSetupFailed(CameraSourceError.cannotAddInput)
         }
         session.addInput(micInput)
-    }
-
-    func makeShims(
-        session: AVCaptureSession,
-        sessionStart: CMTime,
-        syncClock: CMClock,
-        callbacks: CameraSessionCallbacks,
-        lockedDevice: AVCaptureDevice?
-    )
-    -> CameraCaptureShims {
-        let video = VideoOutputShim(
-            sessionStart: sessionStart,
-            syncClock: syncClock,
-            framesContinuation: self.framesContinuation,
-            dropsContinuation: self.dropsContinuation,
-            onDisconnect: callbacks.onDisconnect,
-            onSessionFault: callbacks.onSessionFault,
-            cameraUniqueID: self.cameraDevice.uniqueID,
-            captureSessionID: ObjectIdentifier(session),
-            rateLock: self.captureRateLock
-        )
-        let audio = AudioOutputShim(
-            sessionStart: sessionStart,
-            syncClock: syncClock,
-            audioSamplesContinuation: self.audioSamplesContinuation,
-            dropsContinuation: self.dropsContinuation
-        )
-        return CameraCaptureShims(video: video, audio: audio, lockedDevice: lockedDevice)
     }
 
     func attachOutputs(to session: AVCaptureSession, shims: CameraCaptureShims) throws {
