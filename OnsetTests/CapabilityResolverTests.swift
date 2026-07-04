@@ -352,6 +352,46 @@ struct CapabilityResolverTests {
         #expect(cameraPlan.width == 3840)
         #expect(cameraPlan.height == 2160)
     }
+
+    // MARK: - Camera plan fps matches the activated cadence, not the announced maxFps (#269)
+
+    @Test("Camera plan fps binds to minCameraFps (activated), not the format's maxFps ≥ 60")
+    func resolve_highMaxFpsCamera_planFpsMatchesActivatedCadence() {
+        let display = makeDisplay(pixelWidth: 1920, pixelHeight: 1080, refreshHz: 30.0)
+        // Announced maxFps=60 (e.g. Continuity Camera 1080p) — CameraSource still
+        // activates the device at config.minCameraFps (30), so the CFR grid must follow.
+        let camera = makeCamera(pixelWidth: 1920, pixelHeight: 1080, maxFps: 60.0)
+
+        let plan = CapabilityResolver.resolveStartProfile(
+            display: display,
+            cameraFormat: camera,
+            config: self.config
+        )
+
+        guard let cameraPlan = plan.cameraPlan else {
+            Issue.record("Expected a camera plan, but got nil")
+            return
+        }
+        #expect(cameraPlan.fps == self.config.minCameraFps)
+    }
+
+    @Test("Camera plan fps unaffected when maxFps already equals minCameraFps (no regression)")
+    func resolve_lowMaxFpsCamera_planFpsUnaffected() {
+        let display = makeDisplay(pixelWidth: 1920, pixelHeight: 1080, refreshHz: 30.0)
+        let camera = makeCamera(pixelWidth: 1920, pixelHeight: 1080, maxFps: 30.0)
+
+        let plan = CapabilityResolver.resolveStartProfile(
+            display: display,
+            cameraFormat: camera,
+            config: self.config
+        )
+
+        guard let cameraPlan = plan.cameraPlan else {
+            Issue.record("Expected a camera plan, but got nil")
+            return
+        }
+        #expect(cameraPlan.fps == 30)
+    }
 }
 
 // swiftlint:enable type_body_length
