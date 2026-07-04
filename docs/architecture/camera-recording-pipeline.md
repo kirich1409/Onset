@@ -57,6 +57,7 @@ C callback → EncodedSampleSink
 | `enc_ms` | encoder | время VTCompressionSessionEncodeFrame |
 | `pend_ms` | encoder | время pendingFrameCount() |
 | `pending_max` | encoder | пик NumberOfPendingFrames за окно |
+| `pend_qps` | encoder | частота запросов pendingFrameCount() (VTSessionCopyProperty), запросов/с — замер для #151 |
 | `ing_ms` | encoder | полное время ingest() |
 
 ---
@@ -196,6 +197,12 @@ device.activeVideoMaxFrameDuration = bestRange.minFrameDuration  // min == max
 от B-кадров не стоит сломанного каденса.
 
 **Изменение:** ветка fix #112 (конфиг-флип + телеметрия + L5 A/B-харнесс).
+
+**Связанный замер (#151).** На статичном экране clock-driver эмитит ~fps holds/дорожку,
+и каждый hold через `submit()` делает один `pendingFrameCount()` (`VTSessionCopyProperty`).
+Ключ `pend_qps` в encoder-строке показывает частоту этих запросов. Решение о tick-scoped
+кэше pending (чтобы holds одного тика читали одно значение вместо N round-trip в VT)
+принимается ТОЛЬКО после замера `pend_qps` на L5 (тихая машина, MX Brio) — не спекулятивно.
 
 ### 6.3 Гипотезы #112, опровергнутые A/B на железе (2026-06-07)
 
