@@ -36,7 +36,7 @@ struct MainViewModelTests {
         displays: [Display] = [],
         cameras: [CameraDevice] = [],
         microphones: [MicrophoneDevice] = [],
-        defaults: InMemoryUserDefaults = InMemoryUserDefaults()
+        defaults: InMemoryUserDefaults
     )
     -> (sut: MainViewModel, perms: FakePermissionsService) {
         let perms = FakePermissionsService(screen: screen, camera: camera, microphone: microphone)
@@ -86,197 +86,248 @@ struct MainViewModelTests {
 
     @Test("One display → selectedDisplayID auto-set after loadDevices (AC-1)")
     func singleDisplay_autoSelected() async {
-        let display = Self.makeDisplay()
-        let (sut, _) = self.makeSUT(displays: [display])
+        await withScopedDefaults { defaults in
+            let display = Self.makeDisplay()
+            let (sut, _) = self.makeSUT(displays: [display], defaults: defaults)
 
-        #expect(sut.selectedDisplayID == nil)
+            #expect(sut.selectedDisplayID == nil)
 
-        await sut.loadDevices()
+            await sut.loadDevices()
 
-        #expect(sut.selectedDisplayID == display.displayID)
+            #expect(sut.selectedDisplayID == display.displayID)
+        }
     }
 
     @Test("Two displays → selectedDisplayID stays nil (no auto-select)")
     func twoDisplays_noAutoSelect() async {
-        let displays = [Self.makeDisplay(id: 1), Self.makeDisplay(id: 2)]
-        let (sut, _) = self.makeSUT(displays: displays)
+        await withScopedDefaults { defaults in
+            let displays = [Self.makeDisplay(id: 1), Self.makeDisplay(id: 2)]
+            let (sut, _) = self.makeSUT(displays: displays, defaults: defaults)
 
-        await sut.loadDevices()
+            await sut.loadDevices()
 
-        #expect(sut.selectedDisplayID == nil)
+            #expect(sut.selectedDisplayID == nil)
+        }
     }
 
     // MARK: - Camera auto-select on load
 
     @Test("Camera available → first camera auto-selected after loadDevices")
     func cameraAvailable_firstAutoSelected() async {
-        let cam = Self.makeCamera(id: "cam-abc")
-        let (sut, _) = self.makeSUT(cameras: [cam])
+        await withScopedDefaults { defaults in
+            let cam = Self.makeCamera(id: "cam-abc")
+            let (sut, _) = self.makeSUT(cameras: [cam], defaults: defaults)
 
-        await sut.loadDevices()
+            await sut.loadDevices()
 
-        #expect(sut.selectedCameraID == "cam-abc")
+            #expect(sut.selectedCameraID == "cam-abc")
+        }
     }
 
     @Test("No cameras → selectedCameraID stays nil")
     func noCameras_noAutoSelect() async {
-        let (sut, _) = self.makeSUT(cameras: [])
+        await withScopedDefaults { defaults in
+            let (sut, _) = self.makeSUT(cameras: [], defaults: defaults)
 
-        await sut.loadDevices()
+            await sut.loadDevices()
 
-        #expect(sut.selectedCameraID == nil)
+            #expect(sut.selectedCameraID == nil)
+        }
     }
 
     // MARK: - Mic: NO auto-select
 
     @Test("Microphone available → selectedMicID NOT auto-selected (spec: no mic auto-select)")
     func micAvailable_noAutoSelect() async {
-        let mic = Self.makeMic(id: "mic-xyz")
-        let (sut, _) = self.makeSUT(microphones: [mic])
+        await withScopedDefaults { defaults in
+            let mic = Self.makeMic(id: "mic-xyz")
+            let (sut, _) = self.makeSUT(microphones: [mic], defaults: defaults)
 
-        await sut.loadDevices()
+            await sut.loadDevices()
 
-        #expect(sut.selectedMicID == nil)
+            #expect(sut.selectedMicID == nil)
+        }
     }
 
     // MARK: - AC-2(a): Has video source → canRecord true
 
     @Test("Screen authorized + display selected → canRecord true (AC-2a)")
     func screenAndDisplaySelected_canRecord() async {
-        let display = Self.makeDisplay()
-        let (sut, _) = self.makeSUT(microphone: .notDetermined, displays: [display])
-        await sut.loadDevices()
-        // screen authorized, selectedDisplayID auto-set (1 display), no mic
+        await withScopedDefaults { defaults in
+            let display = Self.makeDisplay()
+            let (sut, _) = self.makeSUT(microphone: .notDetermined, displays: [display], defaults: defaults)
+            await sut.loadDevices()
+            // screen authorized, selectedDisplayID auto-set (1 display), no mic
 
-        #expect(sut.selectedDisplayID != nil)
-        #expect(sut.hasVideoSource)
-        #expect(sut.canRecord) // no mic available, so AC-2c applies — can record
+            #expect(sut.selectedDisplayID != nil)
+            #expect(sut.hasVideoSource)
+            #expect(sut.canRecord) // no mic available, so AC-2c applies — can record
+        }
     }
 
     @Test("Camera selected, screen denied — hasVideoSource false (MVP: screen mandatory)")
     func cameraOnly_noVideoSource() async {
-        let cam = Self.makeCamera()
-        // screen not authorized → camera auto-selected but no video source (MVP: screen mandatory)
-        let (sut, _) = self.makeSUT(screen: .notDetermined, microphone: .notDetermined, cameras: [cam])
-        await sut.loadDevices()
+        await withScopedDefaults { defaults in
+            let cam = Self.makeCamera()
+            // screen not authorized → camera auto-selected but no video source (MVP: screen mandatory)
+            let (sut, _) = self.makeSUT(
+                screen: .notDetermined,
+                microphone: .notDetermined,
+                cameras: [cam],
+                defaults: defaults
+            )
+            await sut.loadDevices()
 
-        // MVP: screen is mandatory; camera-only deferred post-MVP (decision B, issue #61).
-        // hasVideoSource requires screen permission + selectedDisplayID != nil.
-        #expect(sut.selectedCameraID != nil)
-        #expect(!sut.hasVideoSource)
-        #expect(!sut.canRecord)
+            // MVP: screen is mandatory; camera-only deferred post-MVP (decision B, issue #61).
+            // hasVideoSource requires screen permission + selectedDisplayID != nil.
+            #expect(sut.selectedCameraID != nil)
+            #expect(!sut.hasVideoSource)
+            #expect(!sut.canRecord)
+        }
     }
 
     // MARK: - AC-2(b): Mic available but not selected → disabled
 
     @Test("Mic available but not selected → canRecord false, reason provided (AC-2b)")
     func micAvailableNotSelected_cannotRecord() async {
-        let display = Self.makeDisplay()
-        let mic = Self.makeMic()
-        let (sut, _) = self.makeSUT(microphone: .authorized, displays: [display], microphones: [mic])
-        await sut.loadDevices()
+        await withScopedDefaults { defaults in
+            let display = Self.makeDisplay()
+            let mic = Self.makeMic()
+            let (sut, _) = self.makeSUT(
+                microphone: .authorized,
+                displays: [display],
+                microphones: [mic],
+                defaults: defaults
+            )
+            await sut.loadDevices()
 
-        // selectedMicID is nil (no auto-select)
-        #expect(sut.selectedMicID == nil)
-        #expect(sut.isMicAvailableButUnselected)
-        #expect(!sut.canRecord)
-        #expect(sut.recordDisabledReason != nil)
+            // selectedMicID is nil (no auto-select)
+            #expect(sut.selectedMicID == nil)
+            #expect(sut.isMicAvailableButUnselected)
+            #expect(!sut.canRecord)
+            #expect(sut.recordDisabledReason != nil)
+        }
     }
 
     @Test("Mic available and selected → canRecord true (AC-2b resolved)")
     func micAvailableAndSelected_canRecord() async {
-        let display = Self.makeDisplay()
-        let mic = Self.makeMic(id: "mic-1")
-        let (sut, _) = self.makeSUT(microphone: .authorized, displays: [display], microphones: [mic])
-        await sut.loadDevices()
+        await withScopedDefaults { defaults in
+            let display = Self.makeDisplay()
+            let mic = Self.makeMic(id: "mic-1")
+            let (sut, _) = self.makeSUT(
+                microphone: .authorized,
+                displays: [display],
+                microphones: [mic],
+                defaults: defaults
+            )
+            await sut.loadDevices()
 
-        // Manually select mic
-        sut.selectedMicID = "mic-1"
+            // Manually select mic
+            sut.selectedMicID = "mic-1"
 
-        #expect(!sut.isMicAvailableButUnselected)
-        #expect(sut.canRecord)
-        #expect(sut.recordDisabledReason == nil)
+            #expect(!sut.isMicAvailableButUnselected)
+            #expect(sut.canRecord)
+            #expect(sut.recordDisabledReason == nil)
+        }
     }
 
     // MARK: - AC-2(c): Mic unavailable → record without audio
 
     @Test("Mic unavailable with screen selected → isRecordingWithoutAudio true, canRecord true (AC-2c)")
     func micUnavailable_isRecordingWithoutAudio() async {
-        let display = Self.makeDisplay()
-        let (sut, _) = self.makeSUT(microphone: .denied, displays: [display])
-        await sut.loadDevices()
+        await withScopedDefaults { defaults in
+            let display = Self.makeDisplay()
+            let (sut, _) = self.makeSUT(microphone: .denied, displays: [display], defaults: defaults)
+            await sut.loadDevices()
 
-        #expect(sut.isRecordingWithoutAudio)
-        #expect(sut.canRecord)
-        #expect(sut.recordDisabledReason == nil)
+            #expect(sut.isRecordingWithoutAudio)
+            #expect(sut.canRecord)
+            #expect(sut.recordDisabledReason == nil)
+        }
     }
 
     // MARK: - AC-2(d): No video permission → empty state
 
     @Test("No video permissions → showNoPermissionsState true, canRecord false (AC-2d)")
     func noVideoPermissions_emptyState() {
-        let (sut, _) = self.makeSUT(
-            screen: .notDetermined,
-            camera: .notDetermined,
-            microphone: .authorized
-        )
+        withScopedDefaults { defaults in
+            let (sut, _) = self.makeSUT(
+                screen: .notDetermined,
+                camera: .notDetermined,
+                microphone: .authorized,
+                defaults: defaults
+            )
 
-        #expect(sut.showNoPermissionsState)
+            #expect(sut.showNoPermissionsState)
+        }
     }
 
     @Test("Screen authorized → showNoPermissionsState false")
     func screenAuthorized_noEmptyState() {
-        let (sut, _) = self.makeSUT(screen: .authorized, camera: .notDetermined)
+        withScopedDefaults { defaults in
+            let (sut, _) = self.makeSUT(screen: .authorized, camera: .notDetermined, defaults: defaults)
 
-        #expect(!sut.showNoPermissionsState)
+            #expect(!sut.showNoPermissionsState)
+        }
     }
 
     @Test("Camera authorized but screen denied → showNoPermissionsState true (MVP: screen mandatory)")
     func cameraAuthorized_screenDenied_emptyState() {
-        // MVP: showNoPermissionsState is screen-anchored (decision B, issue #61).
-        // Camera-only does not unlock the main config screen.
-        let (sut, _) = self.makeSUT(screen: .notDetermined, camera: .authorized)
+        withScopedDefaults { defaults in
+            // MVP: showNoPermissionsState is screen-anchored (decision B, issue #61).
+            // Camera-only does not unlock the main config screen.
+            let (sut, _) = self.makeSUT(screen: .notDetermined, camera: .authorized, defaults: defaults)
 
-        #expect(sut.showNoPermissionsState)
+            #expect(sut.showNoPermissionsState)
+        }
     }
 
     // MARK: - Screen denied state
 
     @Test("Screen not authorized → isScreenDenied true")
     func screenNotAuthorized_isScreenDenied() {
-        let (sut, _) = self.makeSUT(screen: .notDetermined)
-        #expect(sut.isScreenDenied)
+        withScopedDefaults { defaults in
+            let (sut, _) = self.makeSUT(screen: .notDetermined, defaults: defaults)
+            #expect(sut.isScreenDenied)
+        }
     }
 
     @Test("Screen authorized → isScreenDenied false")
     func screenAuthorized_notScreenDenied() {
-        let (sut, _) = self.makeSUT(screen: .authorized)
-        #expect(!sut.isScreenDenied)
+        withScopedDefaults { defaults in
+            let (sut, _) = self.makeSUT(screen: .authorized, defaults: defaults)
+            #expect(!sut.isScreenDenied)
+        }
     }
 
     // MARK: - No video source → canRecord false
 
     @Test("No display selected (screen authorized) → hasVideoSource false, canRecord false")
     func noDisplaySelected_cannotRecord() {
-        let (sut, _) = self.makeSUT(
-            screen: .authorized,
-            camera: .notDetermined,
-            microphone: .notDetermined
-        )
-        // selectedDisplayID is nil (no loadDevices called, no displays provided)
-        #expect(sut.selectedDisplayID == nil)
-        #expect(!sut.hasVideoSource)
-        #expect(!sut.canRecord)
+        withScopedDefaults { defaults in
+            let (sut, _) = self.makeSUT(
+                screen: .authorized,
+                camera: .notDetermined,
+                microphone: .notDetermined,
+                defaults: defaults
+            )
+            // selectedDisplayID is nil (no loadDevices called, no displays provided)
+            #expect(sut.selectedDisplayID == nil)
+            #expect(!sut.hasVideoSource)
+            #expect(!sut.canRecord)
+        }
     }
 
     // MARK: - Preview handle nil without camera selection
 
     @Test("No camera selected → previewHandle is nil initially")
     func noCameraSelected_previewHandleNil() {
-        let (sut, _) = self.makeSUT()
-        // No loadDevices called — clean initial state
-        #expect(sut.previewHandle == nil)
-        #expect(sut.selectedCameraID == nil)
+        withScopedDefaults { defaults in
+            let (sut, _) = self.makeSUT(defaults: defaults)
+            // No loadDevices called — clean initial state
+            #expect(sut.previewHandle == nil)
+            #expect(sut.selectedCameraID == nil)
+        }
     }
 
     // MARK: - cameraPlaceholderPending
@@ -286,70 +337,76 @@ struct MainViewModelTests {
     /// handle has not arrived.
     @Test("cameraPlaceholderPending is true while active, handle nil — regardless of previewFailed")
     func cameraPlaceholderPending_trueForBothConnectingAndFailed() {
-        let (sut, _) = self.makeSUT()
-        let format = CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30.0, maxFps: 30.0)
-        let device = CameraDevice(uniqueID: "cam-1", formats: [format])
-        sut.cameras = [device]
-        sut.selectedCameraID = device.uniqueID
+        withScopedDefaults { defaults in
+            let (sut, _) = self.makeSUT(defaults: defaults)
+            let format = CameraFormat(pixelWidth: 1920, pixelHeight: 1080, minFps: 30.0, maxFps: 30.0)
+            let device = CameraDevice(uniqueID: "cam-1", formats: [format])
+            sut.cameras = [device]
+            sut.selectedCameraID = device.uniqueID
 
-        // Baseline: active camera, no handle, not failed → pending
-        #expect(sut.cameraPlaceholderPending)
+            // Baseline: active camera, no handle, not failed → pending
+            #expect(sut.cameraPlaceholderPending)
 
-        // Failed state: still pending (handle still nil)
-        sut.previewState = .failed
-        #expect(sut.cameraPlaceholderPending)
+            // Failed state: still pending (handle still nil)
+            sut.previewState = .failed
+            #expect(sut.cameraPlaceholderPending)
+        }
     }
 
     // MARK: - Preview state bridges (#254)
 
     @Test("previewState computed bridges map each case to handle/failed/slow correctly")
     func previewState_bridges() {
-        let (sut, _) = self.makeSUT()
+        withScopedDefaults { defaults in
+            let (sut, _) = self.makeSUT(defaults: defaults)
 
-        // live → handle non-nil, not failed, not slow
-        let session = AVCaptureSession()
-        sut.previewState = .live(SessionHandle(session: session))
-        #expect(sut.previewHandle != nil)
-        #expect(sut.previewHandle?.session === session)
-        #expect(!sut.previewFailed)
-        #expect(!sut.previewIsConnectingSlow)
+            // live → handle non-nil, not failed, not slow
+            let session = AVCaptureSession()
+            sut.previewState = .live(SessionHandle(session: session))
+            #expect(sut.previewHandle != nil)
+            #expect(sut.previewHandle?.session === session)
+            #expect(!sut.previewFailed)
+            #expect(!sut.previewIsConnectingSlow)
 
-        // failed → previewFailed true, handle nil, not slow
-        sut.previewState = .failed
-        #expect(sut.previewFailed)
-        #expect(sut.previewHandle == nil)
-        #expect(!sut.previewIsConnectingSlow)
+            // failed → previewFailed true, handle nil, not slow
+            sut.previewState = .failed
+            #expect(sut.previewFailed)
+            #expect(sut.previewHandle == nil)
+            #expect(!sut.previewIsConnectingSlow)
 
-        // idle → handle nil, not failed, not slow
-        sut.previewState = .idle
-        #expect(sut.previewHandle == nil)
-        #expect(!sut.previewFailed)
-        #expect(!sut.previewIsConnectingSlow)
+            // idle → handle nil, not failed, not slow
+            sut.previewState = .idle
+            #expect(sut.previewHandle == nil)
+            #expect(!sut.previewFailed)
+            #expect(!sut.previewIsConnectingSlow)
 
-        // connecting → handle nil, not failed, not slow
-        sut.previewState = .connecting
-        #expect(sut.previewHandle == nil)
-        #expect(!sut.previewFailed)
-        #expect(!sut.previewIsConnectingSlow)
+            // connecting → handle nil, not failed, not slow
+            sut.previewState = .connecting
+            #expect(sut.previewHandle == nil)
+            #expect(!sut.previewFailed)
+            #expect(!sut.previewIsConnectingSlow)
 
-        // connectingSlow → previewIsConnectingSlow true, handle nil, not failed
-        sut.previewState = .connectingSlow
-        #expect(sut.previewIsConnectingSlow)
-        #expect(sut.previewHandle == nil)
-        #expect(!sut.previewFailed)
+            // connectingSlow → previewIsConnectingSlow true, handle nil, not failed
+            sut.previewState = .connectingSlow
+            #expect(sut.previewIsConnectingSlow)
+            #expect(sut.previewHandle == nil)
+            #expect(!sut.previewFailed)
+        }
     }
 
     @Test("managePreview(nil) after a failed attempt clears the failure (1:1 with old unconditional reset)")
     func managePreviewNil_afterFailure_clearsFailed() async {
-        let (sut, _) = self.makeSUT()
-        // Simulate a prior terminal failure recorded with no live preview source.
-        sut.previewState = .failed
+        await withScopedDefaults { defaults in
+            let (sut, _) = self.makeSUT(defaults: defaults)
+            // Simulate a prior terminal failure recorded with no live preview source.
+            sut.previewState = .failed
 
-        // Deselecting the camera must clear the sticky failure, mirroring the old
-        // unconditional `previewFailed = false` at the top of managePreview.
-        await sut.managePreview(for: nil)
+            // Deselecting the camera must clear the sticky failure, mirroring the old
+            // unconditional `previewFailed = false` at the top of managePreview.
+            await sut.managePreview(for: nil)
 
-        #expect(!sut.previewFailed)
+            #expect(!sut.previewFailed)
+        }
     }
 
     // MARK: - VoiceOver announcement policy (#256)
@@ -443,68 +500,78 @@ struct MainViewModelTests {
     /// only once a present camera is resolved (restore or auto-select).
     @Test("hasObservedPresentCamera armed after a present camera is loaded (#256)")
     func hasObservedPresentCamera_armedAfterPresentLoad() {
-        let (sut, _) = self.makeSUT(cameras: [Self.makeCamera()])
-        #expect(!sut.hasObservedPresentCamera)
-        sut.loadCamerasAndMicrophones()
-        #expect(sut.hasObservedPresentCamera)
+        withScopedDefaults { defaults in
+            let (sut, _) = self.makeSUT(cameras: [Self.makeCamera()], defaults: defaults)
+            #expect(!sut.hasObservedPresentCamera)
+            sut.loadCamerasAndMicrophones()
+            #expect(sut.hasObservedPresentCamera)
+        }
     }
 
     /// No camera present at load → flag stays `false` (no spurious disconnect announce later).
     @Test("hasObservedPresentCamera stays false when no camera is present at load (#256)")
     func hasObservedPresentCamera_falseWhenNoCamera() {
-        let (sut, _) = self.makeSUT(cameras: [])
-        sut.loadCamerasAndMicrophones()
-        #expect(!sut.hasObservedPresentCamera)
+        withScopedDefaults { defaults in
+            let (sut, _) = self.makeSUT(cameras: [], defaults: defaults)
+            sut.loadCamerasAndMicrophones()
+            #expect(!sut.hasObservedPresentCamera)
+        }
     }
 
     // MARK: - Display label
 
     @Test("Display with refreshHz 0 → label shows name — resolution (no Hz segment)")
     func displayLabel_builtIn() {
-        let display = Display(
-            displayID: 1,
-            name: "Встроенный дисплей",
-            pixelWidth: 2560,
-            pixelHeight: 1600,
-            refreshHz: 0.0
-        )
-        let (sut, _) = self.makeSUT()
+        withScopedDefaults { defaults in
+            let display = Display(
+                displayID: 1,
+                name: "Встроенный дисплей",
+                pixelWidth: 2560,
+                pixelHeight: 1600,
+                refreshHz: 0.0
+            )
+            let (sut, _) = self.makeSUT(defaults: defaults)
 
-        let label = sut.displayLabel(for: display)
+            let label = sut.displayLabel(for: display)
 
-        #expect(label == "Встроенный дисплей — 2560×1600")
+            #expect(label == "Встроенный дисплей — 2560×1600")
+        }
     }
 
     @Test("Display with refreshHz 60 → label shows name — resolution @ 60")
     func displayLabel_externalMonitor() {
-        let display = Display(
-            displayID: 1,
-            name: "Внешний дисплей",
-            pixelWidth: 1920,
-            pixelHeight: 1080,
-            refreshHz: 60.0
-        )
-        let (sut, _) = self.makeSUT()
+        withScopedDefaults { defaults in
+            let display = Display(
+                displayID: 1,
+                name: "Внешний дисплей",
+                pixelWidth: 1920,
+                pixelHeight: 1080,
+                refreshHz: 60.0
+            )
+            let (sut, _) = self.makeSUT(defaults: defaults)
 
-        let label = sut.displayLabel(for: display)
+            let label = sut.displayLabel(for: display)
 
-        #expect(label == "Внешний дисплей — 1920×1080 @ 60")
+            #expect(label == "Внешний дисплей — 1920×1080 @ 60")
+        }
     }
 
     @Test("Display with refreshHz 59.94 → label rounds Hz to 60")
     func displayLabel_fractionalRefreshHz() {
-        let display = Display(
-            displayID: 1,
-            name: "Внешний дисплей",
-            pixelWidth: 1920,
-            pixelHeight: 1080,
-            refreshHz: 59.94
-        )
-        let (sut, _) = self.makeSUT()
+        withScopedDefaults { defaults in
+            let display = Display(
+                displayID: 1,
+                name: "Внешний дисплей",
+                pixelWidth: 1920,
+                pixelHeight: 1080,
+                refreshHz: 59.94
+            )
+            let (sut, _) = self.makeSUT(defaults: defaults)
 
-        let label = sut.displayLabel(for: display)
+            let label = sut.displayLabel(for: display)
 
-        #expect(label == "Внешний дисплей — 1920×1080 @ 60")
+            #expect(label == "Внешний дисплей — 1920×1080 @ 60")
+        }
     }
 
     // MARK: - Production preview wiring
@@ -518,13 +585,15 @@ struct MainViewModelTests {
     /// a `CameraSource` actor does not start a capture session.
     @Test("Default makeCameraSource closure produces a .preview-role CameraSource (production wiring)")
     func defaultMakeCameraSource_producesPreviewRole() async {
-        let (sut, _) = self.makeSUT()
-        let format = CameraFormat(pixelWidth: 1280, pixelHeight: 720, minFps: 30.0, maxFps: 60.0)
-        let device = CameraDevice(uniqueID: "test-camera", formats: [format])
+        await withScopedDefaults { defaults in
+            let (sut, _) = self.makeSUT(defaults: defaults)
+            let format = CameraFormat(pixelWidth: 1280, pixelHeight: 720, minFps: 30.0, maxFps: 60.0)
+            let device = CameraDevice(uniqueID: "test-camera", formats: [format])
 
-        let source = sut.makeCameraSource(device, format, nil, .mvpDefault)
+            let source = sut.makeCameraSource(device, format, nil, .mvpDefault)
 
-        #expect(await source.role == .preview)
+            #expect(await source.role == .preview)
+        }
     }
 }
 
@@ -537,12 +606,11 @@ struct MainViewModelTests {
 @Suite("MainViewModel — buildChecklist")
 @MainActor
 struct MainViewModelBuildChecklistTests {
-    private func makeSUT() -> MainViewModel {
+    private func makeSUT(defaults: InMemoryUserDefaults) -> MainViewModel {
         let perms = FakePermissionsService()
         let coordinator = RecordingCoordinator {
-            UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults())
+            UserDefaultsBackendSelectionStore(defaults: defaults)
         }
-        let store = InMemoryUserDefaults()
         return MainViewModel(
             permissions: perms,
             appSettings: AppSettings(store: InMemorySettingsStore()),
@@ -550,41 +618,45 @@ struct MainViewModelBuildChecklistTests {
             discoverDisplays: { _ in [] },
             discoverCameras: { _ in [] },
             discoverMicrophones: { _ in [] },
-            makeStore: { UserDefaultsDeviceSelectionStore(defaults: store) },
-            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: store) }
+            makeStore: { UserDefaultsDeviceSelectionStore(defaults: defaults) },
+            makeOutputFolderStore: { UserDefaultsOutputFolderStore(defaults: defaults) }
         )
     }
 
     @Test("screenDescription is HUD format — resolution @ hz Гц (no name) when refreshHz is non-zero")
     func screenDescription_withHz() {
-        let display = Display(
-            displayID: 1,
-            name: "Внешний дисплей",
-            pixelWidth: 3840,
-            pixelHeight: 2160,
-            refreshHz: 60.0
-        )
-        let sut = self.makeSUT()
+        withScopedDefaults { defaults in
+            let display = Display(
+                displayID: 1,
+                name: "Внешний дисплей",
+                pixelWidth: 3840,
+                pixelHeight: 2160,
+                refreshHz: 60.0
+            )
+            let sut = self.makeSUT(defaults: defaults)
 
-        let checklist = sut.buildChecklist(display: display)
+            let checklist = sut.buildChecklist(display: display)
 
-        #expect(checklist.screenDescription == "3840×2160 @ 60 Гц")
+            #expect(checklist.screenDescription == "3840×2160 @ 60 Гц")
+        }
     }
 
     @Test("screenDescription is HUD format — resolution only (no name, no hz) when refreshHz is zero")
     func screenDescription_withoutHz() {
-        let display = Display(
-            displayID: 1,
-            name: "Встроенный дисплей",
-            pixelWidth: 2560,
-            pixelHeight: 1600,
-            refreshHz: 0.0
-        )
-        let sut = self.makeSUT()
+        withScopedDefaults { defaults in
+            let display = Display(
+                displayID: 1,
+                name: "Встроенный дисплей",
+                pixelWidth: 2560,
+                pixelHeight: 1600,
+                refreshHz: 0.0
+            )
+            let sut = self.makeSUT(defaults: defaults)
 
-        let checklist = sut.buildChecklist(display: display)
+            let checklist = sut.buildChecklist(display: display)
 
-        #expect(checklist.screenDescription == "2560×1600")
+            #expect(checklist.screenDescription == "2560×1600")
+        }
     }
 }
 

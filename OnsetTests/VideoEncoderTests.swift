@@ -1081,6 +1081,46 @@ struct VideoEncoderTests {
         #expect(await encoder.aggregatorHoldsCount >= 2)
     }
 
+    // MARK: - #151: pendingFrameCount() query count tracks submit count
+
+    /// Demonstrates the #151 root cause in L2: on a static screen the clock-driver emits
+    /// synthetic holds, and each hold's `submit()` drives exactly one `pendingFrameCount()`
+    /// VT query. With the gate open (pending below the limit) every submit reaches a VT query
+    /// and a successful encode, so the pending-query count equals the submit count — this is
+    /// the frequency that `pend_qps` surfaces for the L5 go/no-go decision on caching.
+    @Test("static-screen holds: each submit drives exactly one pendingFrameCount query (#151)")
+    func staticScreenHolds_oneQueryPerSubmit() async throws {
+        let anchor = makeFixedAnchor()
+        let mock = MockCompressionSession()
+        // Gate stays open: pending (0) never reaches maxPendingFrames (4), so no submit is dropped.
+        let encoder = await makeEncoder(mock: mock, anchor: anchor, grace: 0.005)
+        try await encoder.start()
+
+        // Ingest slot 0: one real submit, no leading holds on the first frame. This arms
+        // lastPixelBuffer so subsequent clock ticks emit synthetic holds of a static screen.
+        await encoder.ingest(makeFrame(slotIndex: 0, anchor: anchor))
+        let queriesAfterReal = await encoder.aggregatorPendingQueryCount
+        #expect(queriesAfterReal == 1)
+        #expect(mock.encodedBuffers.count == 1)
+
+        // Tick several slots ahead with no new content: the clock-driver fills slots 1..3 with
+        // holds (the static-screen scenario). Each hold is a submit → one VT query.
+        let anchorSeconds = CMTimeGetSeconds(anchor.anchorTime)
+        let grace = 0.005
+        let nowAfterSlot3 = anchorSeconds + 3.5 / Double(testFps) + grace + 0.001
+        await encoder.clockTick(nowSeconds: nowAfterSlot3)
+
+        let holds = await encoder.aggregatorHoldsCount
+        let totalQueries = await encoder.aggregatorPendingQueryCount
+        // The static screen actually generated holds — the #151 cost source exists.
+        #expect(holds >= 1)
+        // Every hold submit drove exactly one additional pending query.
+        #expect(totalQueries == queriesAfterReal + holds)
+        // Gate open → every submit reached a VT query and a successful encode; the query count
+        // equals the encode count (no submit skipped, none dropped).
+        #expect(totalQueries == mock.encodedBuffers.count)
+    }
+
     // MARK: - #200: dropped catch-up holds are encoderHoldDrops, not backpressure
 
     /// Regression for #200: after a stall, the catch-up batch drops synthetic HOLD frames at the

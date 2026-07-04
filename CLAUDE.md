@@ -43,12 +43,11 @@ merge-ready PR. Never pause mid-task to ask "should I continue?".
   remains, open the PR, state in its body which gates remain and where they run, and
   leave it unmerged and the issue out of Done until a session on the target hardware
   verifies.
-- When gates pass: mark PR ready + `gh pr merge --auto --squash`, no per-PR
-  confirmation (personal repo). EXCEPTION — meta changes that shape agent behavior
-  and the owner's expectations/costs (CLAUDE.md, `.claude/`, `.github/workflows/`,
-  lint/build configs, `docs/specs/`) are NEVER auto-merged: open the PR, explicitly
-  call the owner to review, merge only after approval. Evidence over assertions in
-  the PR body: Swift Testing summary, lint result, screenshot for UI changes.
+- When gates pass: mark PR ready + `gh pr merge --auto --squash`, no per-PR confirmation (personal repo).
+  EXCEPTION — meta changes that shape agent behavior and the owner's expectations/costs (CLAUDE.md, `.claude/`,
+  `.github/workflows/`, lint/build configs, `docs/specs/`) are NEVER auto-merged: open the PR, explicitly call
+  the owner to review, merge only after approval. Evidence over assertions in the PR body: Swift Testing
+  summary, lint result, screenshot for UI changes.
 
 ## Language
 
@@ -92,15 +91,18 @@ Artifact checks (CI `artifact-checks` job):
   `-only-testing` matches suites, not functions. See `docs/quality/production-quality-bar.md` §4.3.
 - L5 requires a SIGNED build — drop `CODE_SIGNING_ALLOWED=NO` for build-for-testing; an unsigned test host
   writes a sticky TCC deny for screen capture (recovery: `tccutil reset ScreenCapture` + manual re-grant).
-- BEFORE any L5 run: check stale test hosts with `pgrep -la Onset`; kill them with `pkill -9 Onset` (exactly
-  this name, never broader). One `xcodebuild test` at a time — hardware tests fight over the camera and hang, spawning extra instances.
+- BEFORE any L5 run: `pgrep -la Onset`. `pkill -9 Onset` (exactly this name, never broader) is fine for a stale
+  or hung host — no live lock held, a dead lock PID, or the owner's OK — but never kill a live run (another
+  session's test or the owner's app). One `xcodebuild test` at a time — hardware tests fight over the camera and hang.
+- **Shared target Mac** — concurrent agent sessions and the owner share one machine's camera/screen. Before any
+  hardware or `.app` grab (L5, the UI loop, launching `.app`, `screencapture`) hold the machine-global lock via
+  `scripts/hw-lock.sh` (`run [--wait] -- CMD` auto-releases a single grab; `acquire`/`release` wraps a multi-step
+  UI-loop hold). It reclaims a crashed session's stale lock by dead PID — no panacea; `--wait` serializes, `status` shows the holder.
 - Reference hardware for L5: Logitech MX Brio (`docs/quality/production-quality-bar.md`).
-- Perf L5 must include a representative-load scenario (other apps active), not only
-  a quiet machine — see the runtime-is-loaded principle above.
+- Perf L5 must include a representative-load scenario (other apps active), not only a quiet machine — see the runtime-is-loaded principle above.
 - Recordings land in session subfolders `Onset <timestamp>/` inside the user-selected base directory (default `~/Movies/Onset/`) — L5 outputs for verify-cfr/ffprobe live there.
 - Test-writing conventions (fakes, naming, suites): `OnsetTests/CLAUDE.md`.
-- Coverage on by default in `Onset.xctestplan` (target `Onset`, not test bundle); L5 plan gathers none. Inspect
-  via `-resultBundlePath` + `scripts/coverage-summary.sh` (CI posts to job summary). Report-only — gate via `ONSET_COVERAGE_MIN` (off).
+- Coverage on by default in `Onset.xctestplan` (target `Onset`, not test bundle); L5 plan gathers none. Inspect via `-resultBundlePath` + `scripts/coverage-summary.sh` (CI posts to job summary). Report-only — gate via `ONSET_COVERAGE_MIN` (off).
 
 ## Project structure
 
@@ -126,15 +128,12 @@ Full type-level map (Russian): `docs/architecture.md`.
 
 ## Key approaches
 
-- **Pure logic + impure actor pairing**: branching logic lives in nonisolated pure
-  types (`CFRNormalizer`, `CapabilityResolver`, `EffectivePermissions`, `AppRouter`,
-  `MenuBarLabelMapper`); framework/C interop stays inside actors. New logic follows
-  this split.
-- **Default MainActor isolation**: value types declare `Equatable`/`Hashable`
-  conformances on the `nonisolated` type declaration itself. For structs this is
-  sufficient — the compiler synthesizes nonisolated witnesses. For enums,
-  `InferIsolatedConformances` still infers the synthesized conformance as
-  `@MainActor` even on a `nonisolated` decl, so enums require an explicit
+- **Pure logic + impure actor pairing**: branching logic lives in nonisolated pure types (`CFRNormalizer`,
+  `CapabilityResolver`, `EffectivePermissions`, `AppRouter`, `MenuBarLabelMapper`); framework/C interop stays
+  inside actors. New logic follows this split.
+- **Default MainActor isolation**: value types declare `Equatable`/`Hashable` on the `nonisolated` type decl
+  itself. Structs suffice — the compiler synthesizes nonisolated witnesses. Enums don't: `InferIsolatedConformances`
+  infers the synthesized conformance as `@MainActor` even on a `nonisolated` decl, so an enum needs an explicit
   `nonisolated static func ==` witness to be usable off the main actor.
 - **Single T0 epoch** (`HostTimeAnchor`) per session; all PTS are host-time offsets
   from T0, converted once at ingest.
