@@ -482,17 +482,17 @@ platform: [desktop]
 | Platform | Apple Silicon, macOS 26.x |
 | Source | `MainViewModel.swift` — `activeCamera`, `cameraPickerSelection` (#224), `selectFirstCameraIfNeeded`; `MainView+Sections.swift` — превью гейтится на `model.isCameraActive` |
 
-#### REC-TC-36 — Превью камеры: соотношение 16:9, ограничение высоты 140pt, кнопка «Записать» видна (AC-1) [P2-edge]
+#### REC-TC-36 — Превью камеры: соотношение 16:9, ограничение высоты 180pt, кнопка «Записать» видна (AC-1) [P2-edge]
 | | |
 |---|---|
 | Priority | P2 |
 | Type | ui-scenario |
 | AC ref | AC-1 |
 | Preconditions | Камера включена и разрешение выдано; подписанный build |
-| Steps | 1. Запустить Onset.app с камерой (встроенная или внешняя). 2. Наблюдать превью камеры в главном окне. 3. Визуально проверить: превью не искажено (изображение не сжато и не растянуто); соотношение сторон видимо ≈16:9 (не квадратное, не 4:3). 4. Измерить высоту превью: ≤140pt (не выходит за секцию). 5. Убедиться: кнопка «Записать» видна без прокрутки при стандартном размере окна 460×560pt. 6. (Опционально) Подключить вторую камеру с иным native AR → превью адаптируется к 16:9 без деформации (letterbox/pillarbox). |
-| Expected Result | Превью: 16:9, maxHeight≤140pt, без дисторсии; кнопка «Записать» доступна без скролла |
+| Steps | 1. Запустить Onset.app с камерой (встроенная или внешняя). 2. Наблюдать превью камеры в главном окне. 3. Визуально проверить: превью не искажено (изображение не сжато и не растянуто); соотношение сторон видимо ≈16:9 (не квадратное, не 4:3). 4. Измерить высоту превью: ≤180pt (не выходит за секцию). 5. Убедиться: кнопка «Записать» видна без прокрутки при стандартном размере окна 460×560pt. 6. (Опционально) Подключить вторую камеру с иным native AR → превью адаптируется к 16:9 без деформации (letterbox/pillarbox). |
+| Expected Result | Превью: 16:9, maxHeight≤180pt, без дисторсии; кнопка «Записать» доступна без скролла |
 | Platform | Apple Silicon, macOS 26.x |
-| Source | `MainView.swift` — `Metrics.previewAspectRatio = 16/9`, `Metrics.previewMaxHeight = 140`; `MainView+Sections.swift` — `.aspectRatio(Metrics.previewAspectRatio, contentMode: .fit).frame(maxWidth: 140*(16/9), maxHeight: 140)` |
+| Source | `MainView.swift` — `Metrics.previewAspectRatio = 16/9`, `Metrics.previewMaxHeight = 180`; `MainView+Sections.swift` — `.aspectRatio(Metrics.previewAspectRatio, contentMode: .fit).frame(maxWidth: 180*(16/9), maxHeight: 180)` |
 
 #### REC-TC-37 — Пикер дисплея: формат метки «{Имя} — {W}×{H} @ {Hz}» (AC-1)
 | | |
@@ -624,7 +624,7 @@ platform: [desktop]
 | REC-TC-33 | L2 unit | ✅ реализован | `MainViewModelCameraToggleTests.swift` |
 | REC-TC-34 | L2 unit | ✅ реализован | `DisplayLabelMapperTests.swift` |
 | REC-TC-35 | L5 manual | ⬜ acceptance #42 | Камера OFF/ON, оба файла |
-| REC-TC-36 | L5 manual | ⬜ acceptance #42 | Визуально 16:9, ≤140pt |
+| REC-TC-36 | L5 manual | ⬜ acceptance #42 | Визуально 16:9, ≤180pt |
 | REC-TC-37 | L5 manual | ⬜ acceptance #42 | Пикер: имя + разрешение без «Гц» |
 | REC-TC-38 | L5 manual | ⬜ acceptance #42 | HUD: разрешение + «Гц» без имени |
 | REC-TC-39 | L2 unit | ⬜ via #146 | `CameraFormatSelectorTests.swift` (PR #146) |
