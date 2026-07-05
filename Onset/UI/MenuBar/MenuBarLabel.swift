@@ -43,14 +43,15 @@ struct MenuBarLabel: View {
             phase: self.coordinator.phase,
             recordingState: self.coordinator.recordingState,
             elapsed: self.coordinator.elapsed,
-            showTimer: self.appSettings.showMenuBarTimer
+            showTimer: self.appSettings.showMenuBarTimer,
+            sourceLiveness: self.coordinator.sourceLiveness
         )
 
         HStack(spacing: Metrics.elementSpacing) {
             Image(systemName: desc.dot.systemName)
                 .foregroundStyle(self.color(for: desc.dot))
 
-            if desc.dot.showsWarning {
+            if desc.dot.showsWarning || desc.deviceLostWarning {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(Color.yellow)
             }

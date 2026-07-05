@@ -38,6 +38,13 @@ struct MenuBarLabelDescriptor: Equatable {
     let dot: DotStyle
     /// Non-nil when an elapsed timer should appear; `nil` in idle state.
     let elapsed: Int?
+    /// `true` when an active capture device was lost mid-recording (#261) — camera unplugged,
+    /// lid closed, microphone revoked. Independent of `dot`/`DotStyle.showsWarning`: a source
+    /// can vanish while the encoder is still keeping up (`recordingState == .normal`), in which
+    /// case `dot` stays `.red` and this flag is the ONLY visible signal in menu-bar-only mode
+    /// (recording window not open). The view shows the same warning triangle as backpressure
+    /// degradation when either this or `dot.showsWarning` is `true`.
+    let deviceLostWarning: Bool
     /// VoiceOver label for the status-item button (#242). Describes the current recording state
     /// and elapsed time so screen-reader users receive the same information as sighted users.
     let accessibilityLabel: String
@@ -62,40 +69,56 @@ nonisolated enum MenuBarLabelMapper {
     /// reveal). Treating it as idle here is intentional — the hollow circle is shown for one
     /// tick at most, which is acceptable and avoids a stale-timer artifact.
     ///
-    /// - Parameter showTimer: When `false`, the descriptor's `elapsed` is `nil` so the visible
-    ///   time string is suppressed (the «Показывать таймер» setting). The status dot is
-    ///   independent of this flag — recording is still signalled, only the time is hidden. The
-    ///   `accessibilityLabel` keeps the spoken elapsed time so VoiceOver users still hear the
-    ///   recording duration regardless of the visible-timer preference.
+    /// - Parameters:
+    ///   - showTimer: When `false`, the descriptor's `elapsed` is `nil` so the visible
+    ///     time string is suppressed (the «Показывать таймер» setting). The status dot is
+    ///     independent of this flag — recording is still signalled, only the time is hidden. The
+    ///     `accessibilityLabel` keeps the spoken elapsed time so VoiceOver users still hear the
+    ///     recording duration regardless of the visible-timer preference.
+    ///   - sourceLiveness: Per-source liveness from `RecordingCoordinator` (#261). Any `false`
+    ///     field while `phase == .recording` means a capture device dropped mid-recording — this
+    ///     drives `deviceLostWarning` regardless of `recordingState`, since a device loss does not
+    ///     necessarily produce encoder backpressure. Defaults to `.allLive` so idle/main/finished
+    ///     callers and existing call sites need not pass it explicitly.
     static func descriptor(
         phase: AppPhase,
         recordingState: RecordingState,
         elapsed: Int,
-        showTimer: Bool
+        showTimer: Bool,
+        sourceLiveness: SourceLiveness = .allLive
     )
     -> MenuBarLabelDescriptor {
         switch phase {
         case .recording:
             let elapsedString = ElapsedFormatter.string(from: elapsed)
             let elapsedField = showTimer ? elapsed : nil
+            let deviceLost = !sourceLiveness.screen || !sourceLiveness.camera || !sourceLiveness.microphone
+            let deviceLostSuffix = deviceLost ? ", устройство отключено" : ""
             switch recordingState {
             case .normal:
                 return MenuBarLabelDescriptor(
                     dot: .red,
                     elapsed: elapsedField,
-                    accessibilityLabel: "Onset, идёт запись, \(elapsedString)"
+                    deviceLostWarning: deviceLost,
+                    accessibilityLabel: "Onset, идёт запись\(deviceLostSuffix), \(elapsedString)"
                 )
 
             case .degraded:
                 return MenuBarLabelDescriptor(
                     dot: .yellow,
                     elapsed: elapsedField,
-                    accessibilityLabel: "Onset, запись деградирована, \(elapsedString)"
+                    deviceLostWarning: deviceLost,
+                    accessibilityLabel: "Onset, запись деградирована\(deviceLostSuffix), \(elapsedString)"
                 )
             }
 
         case .idle, .main, .finished:
-            return MenuBarLabelDescriptor(dot: .hollow, elapsed: nil, accessibilityLabel: "Onset")
+            return MenuBarLabelDescriptor(
+                dot: .hollow,
+                elapsed: nil,
+                deviceLostWarning: false,
+                accessibilityLabel: "Onset"
+            )
         }
     }
 }

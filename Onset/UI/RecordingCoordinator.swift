@@ -65,9 +65,11 @@ struct RecordingChecklist: Equatable {
 /// while the surviving source keeps recording. The microphone rides the camera AVCaptureSession, so
 /// a camera revoke flips BOTH `camera` and `microphone` (AC-12).
 ///
-/// A plain `@MainActor` value type — it never leaves the coordinator (unlike `RecordingRevocation`,
-/// which crosses the actor boundary and therefore hand-rolls its `nonisolated` conformance).
-struct SourceLiveness: Equatable {
+/// `nonisolated` (structs synthesize nonisolated witnesses — CLAUDE.md gotcha) so pure mappers
+/// consuming it (`MenuBarLabelMapper`, #261) can reference `.allLive` as a default parameter
+/// value without a MainActor hop; the coordinator itself still only ever mutates it on the
+/// main actor.
+nonisolated struct SourceLiveness: Equatable {
     /// `true` while the screen source is recording; `false` after a display-disconnect revoke.
     var screen: Bool
     /// `true` while the camera source is recording; `false` after a camera-disconnect revoke.

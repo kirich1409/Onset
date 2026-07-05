@@ -191,30 +191,54 @@ extension MainView {
 
     var microphoneSection: some View {
         SectionCard(title: "МИКРОФОН") {
-            if !self.model.isMicAvailable {
-                MicrophoneUnavailableRow()
-            } else if self.model.microphones.isEmpty {
-                Text("Микрофоны не найдены")
+            self.microphonePickerOrDenied
+        }
+    }
+
+    /// Shows either the TCC-denied row, the device picker, or the disconnected notice.
+    ///
+    /// Mirrors `cameraPickerOrDenied`'s branch structure (#261): a saved-but-vanished
+    /// microphone must be surfaced explicitly, not silently read as "Без микрофона" — that
+    /// would look like an intentional choice rather than an involuntary disconnect.
+    ///
+    /// Branch priority (top-to-bottom wins):
+    /// 1. TCC denied → `MicrophoneUnavailableRow`.
+    /// 2. Microphones available → device picker. When a disconnected notice is also present
+    ///    (`disconnectedMicName != nil`), `MicrophoneDisconnectedRow(hasAlternatives: true)` is
+    ///    appended below the picker.
+    /// 3. No microphones AND disconnected notice → `MicrophoneDisconnectedRow(hasAlternatives: false)`
+    ///    (no picker because there is nothing to pick from).
+    /// 4. No microphones AND no disconnected notice → non-interactive "Микрофоны не найдены" text.
+    @ViewBuilder
+    private var microphonePickerOrDenied: some View {
+        if !self.model.isMicAvailable {
+            MicrophoneUnavailableRow()
+        } else if !self.model.microphones.isEmpty {
+            HStack {
+                Text("Устройство")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-            } else {
-                HStack {
-                    Text("Устройство")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
-                    Picker("Устройство", selection: self.$model.selectedMicID) {
-                        Text("Без микрофона").tag(String?.none)
-                        ForEach(self.model.microphones, id: \.uniqueID) { mic in
-                            Text(self.model.microphoneLabel(for: mic))
-                                .tag(Optional(mic.uniqueID))
-                        }
+                Spacer(minLength: 0)
+                Picker("Устройство", selection: self.$model.selectedMicID) {
+                    Text("Без микрофона").tag(String?.none)
+                    ForEach(self.model.microphones, id: \.uniqueID) { mic in
+                        Text(self.model.microphoneLabel(for: mic))
+                            .tag(Optional(mic.uniqueID))
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .accessibilityLabel("Устройство микрофона")
                 }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .accessibilityLabel("Устройство микрофона")
             }
+            if let name = self.model.disconnectedMicName {
+                MicrophoneDisconnectedRow(microphoneName: name, hasAlternatives: true)
+            }
+        } else if let name = self.model.disconnectedMicName {
+            MicrophoneDisconnectedRow(microphoneName: name, hasAlternatives: false)
+        } else {
+            Text("Микрофоны не найдены")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -412,6 +436,52 @@ private struct MicrophoneUnavailableRow: View {
                 .foregroundStyle(.secondary)
         }
         .accessibilityLabel("Микрофон недоступен. Запись будет вестись без звука.")
+    }
+}
+
+// MARK: - MicrophoneDisconnectedRow
+
+/// Shown when `disconnectedMicName != nil`: the previously selected microphone has disappeared
+/// (e.g. unplugged) while a microphone was selected. Mirrors `CameraUnavailableRow` — distinguishes
+/// an involuntary disconnection from an explicit "Без микрофона" selection so the user is not
+/// confused into thinking they turned the microphone off themselves (#261).
+///
+/// Text is delegated to `DeviceDisconnectedNoticeMapper` — the single, testable source of the copy
+/// shared with the camera notice.
+private struct MicrophoneDisconnectedRow: View {
+    /// Display name of the missing microphone device — shown in UI only, never logged.
+    let microphoneName: String
+    /// When `true`, the hint "выберите другой микрофон" is appended to the row label.
+    let hasAlternatives: Bool
+
+    var body: some View {
+        HStack(spacing: MainView.Metrics.accessorySpacing) {
+            Image(systemName: "mic.slash.circle")
+                .foregroundStyle(.secondary)
+                .frame(width: MainView.Metrics.iconColumnWidth)
+                .accessibilityHidden(true)
+            Text(self.rowText)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(self.accessibilityLabelText)
+    }
+
+    private var rowText: String {
+        DeviceDisconnectedNoticeMapper.rowText(
+            kind: .microphone,
+            name: self.microphoneName,
+            hasAlternatives: self.hasAlternatives
+        )
+    }
+
+    private var accessibilityLabelText: String {
+        DeviceDisconnectedNoticeMapper.accessibilityLabel(
+            kind: .microphone,
+            name: self.microphoneName,
+            hasAlternatives: self.hasAlternatives
+        )
     }
 }
 

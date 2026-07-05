@@ -184,6 +184,98 @@ struct MenuBarLabelMapperTimerToggleTests {
     }
 }
 
+// MARK: - Device lost mid-recording (#261)
+
+@Suite("MenuBarLabelMapper — device lost mid-recording")
+@MainActor
+struct MenuBarLabelMapperDeviceLostTests {
+    @Test("Recording+normal with all sources live shows no device-lost warning")
+    func allLiveShowsNoWarning() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .normal,
+            elapsed: 60,
+            showTimer: true,
+            sourceLiveness: .allLive
+        )
+        #expect(desc.deviceLostWarning == false)
+        #expect(desc.dot == .red)
+    }
+
+    @Test("Recording+normal with camera lost shows device-lost warning, dot stays red")
+    func cameraLostShowsWarningDotStaysRed() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .normal,
+            elapsed: 60,
+            showTimer: true,
+            sourceLiveness: SourceLiveness(screen: true, camera: false, microphone: false)
+        )
+        #expect(desc.deviceLostWarning == true)
+        #expect(desc.dot == .red)
+    }
+
+    @Test("Recording+normal with screen lost shows device-lost warning")
+    func screenLostShowsWarning() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .normal,
+            elapsed: 60,
+            showTimer: true,
+            sourceLiveness: SourceLiveness(screen: false, camera: true, microphone: true)
+        )
+        #expect(desc.deviceLostWarning == true)
+    }
+
+    @Test("Device-lost warning composes with degraded recordingState")
+    func deviceLostAndDegradedCompose() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .degraded,
+            elapsed: 60,
+            showTimer: true,
+            sourceLiveness: SourceLiveness(screen: true, camera: false, microphone: false)
+        )
+        #expect(desc.deviceLostWarning == true)
+        #expect(desc.dot == .yellow)
+    }
+
+    @Test("Device-lost warning appends a note to the accessibility label")
+    func deviceLostAppendsAccessibilityNote() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .normal,
+            elapsed: 5,
+            showTimer: true,
+            sourceLiveness: SourceLiveness(screen: true, camera: false, microphone: false)
+        )
+        #expect(desc.accessibilityLabel.contains("устройство отключено"))
+    }
+
+    @Test("Idle phase ignores sourceLiveness — no device-lost warning")
+    func idlePhaseIgnoresSourceLiveness() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .idle,
+            recordingState: .normal,
+            elapsed: 0,
+            showTimer: true,
+            sourceLiveness: SourceLiveness(screen: false, camera: false, microphone: false)
+        )
+        #expect(desc.deviceLostWarning == false)
+    }
+
+    @Test("Default sourceLiveness parameter is allLive — existing call sites unaffected")
+    func defaultParameterIsAllLive() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .normal,
+            elapsed: 60,
+            showTimer: true
+        )
+        #expect(desc.deviceLostWarning == false)
+    }
+}
+
 // MARK: - Phase transitions
 
 @Suite("MenuBarLabelMapper — phase transitions")
