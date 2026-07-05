@@ -153,10 +153,15 @@ nonisolated enum CapabilityResolver {
         let cameraPlan: ResolvedCameraPlan? = cameraFormat.map { format in
             let evenCamW: Int = max(Int(format.pixelWidth) & ~1, Self.minEvenDimension)
             let evenCamH: Int = max(Int(format.pixelHeight) & ~1, Self.minEvenDimension)
+            // Grid+bitrate must run at the real activated cadence — `CameraSource` pins the
+            // device to `config.minCameraFps` (activateFormat / nominalFps), regardless of
+            // the format's announced maxFps. Binding to `minCameraFps` never raises the grid
+            // (selected formats always have maxFps ≥ minCameraFps); the budget reservation in
+            // `cameraRateInfo` intentionally stays conservative at maxFps.
             return ResolvedCameraPlan(
                 width: evenCamW,
                 height: evenCamH,
-                fps: cameraFps
+                fps: min(cameraFps, config.minCameraFps)
             )
         }
 
