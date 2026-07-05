@@ -418,8 +418,10 @@ nonisolated enum RecordingDisplayMapper {
     /// every source in `sourceLiveness` is still live (banner hidden).
     ///
     /// - One lost source: «<Источник> отключён(а) — запись продолжается без <него/неё>».
-    /// - Multiple lost sources: «<A> и <b> отключены — запись продолжается без них» (first label
-    ///   capitalized, the rest lowercased to read as one Russian sentence).
+    /// - Multiple lost sources: «<A>, <b> и <c> отключены — запись продолжается без них» — an
+    ///   idiomatic Russian list join (comma between all items but the last, «и» before the last;
+    ///   two items get no comma: «A и b»). First label capitalized, the rest lowercased so the
+    ///   whole clause reads as one sentence.
     static func deviceLostBannerText(sourceLiveness: SourceLiveness) -> String? {
         let sources = [
             LostSourceWording(
@@ -452,9 +454,17 @@ nonisolated enum RecordingDisplayMapper {
             return "\(first.label) \(first.participle) — запись продолжается без \(first.pronoun)"
         }
 
-        let joinedLabel = ([first.label] + candidates.dropFirst().map(\.lowercaseLabel))
-            .joined(separator: " и ")
-        return "\(joinedLabel) отключены — запись продолжается без них"
+        let labels = [first.label] + candidates.dropFirst().map(\.lowercaseLabel)
+        return "\(self.joinedRussianList(labels)) отключены — запись продолжается без них"
+    }
+
+    /// Joins items into an idiomatic Russian list: a comma between every item but the last, and
+    /// «и» before the last item. Two items get no comma («A и b»); three or more get commas
+    /// between all but the final pair («A, b и c»).
+    private static func joinedRussianList(_ items: [String]) -> String {
+        guard let last = items.last else { return "" }
+        guard items.count > 1 else { return last }
+        return "\(items.dropLast().joined(separator: ", ")) и \(last)"
     }
 
     /// Per-source Russian wording used to build `deviceLostBannerText`. A struct (not a tuple)

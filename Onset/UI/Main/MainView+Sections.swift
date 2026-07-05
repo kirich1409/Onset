@@ -410,15 +410,25 @@ private struct CameraUnavailableRow: View {
                 .foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(self.rowText)
+        .accessibilityLabel(self.accessibilityLabelText)
     }
 
+    /// Text delegated to `DeviceDisconnectedNoticeMapper` — the single, testable source of the
+    /// copy shared with `MicrophoneDisconnectedRow` (#261).
     private var rowText: String {
-        if self.hasAlternatives {
-            "Камера «\(self.cameraName)» недоступна — выберите другую камеру"
-        } else {
-            "Камера «\(self.cameraName)» недоступна"
-        }
+        DeviceDisconnectedNoticeMapper.rowText(
+            kind: .camera,
+            name: self.cameraName,
+            hasAlternatives: self.hasAlternatives
+        )
+    }
+
+    private var accessibilityLabelText: String {
+        DeviceDisconnectedNoticeMapper.accessibilityLabel(
+            kind: .camera,
+            name: self.cameraName,
+            hasAlternatives: self.hasAlternatives
+        )
     }
 }
 

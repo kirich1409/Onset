@@ -281,11 +281,19 @@ struct DeviceLostBannerMapperTests {
         #expect(result == "Камера и микрофон отключены — запись продолжается без них")
     }
 
-    @Test("All three sources lost joins all with и")
+    @Test("All three sources lost uses a comma list with и before the last item")
     func allThreeLost() {
         let result = RecordingDisplayMapper.deviceLostBannerText(
             sourceLiveness: .init(screen: false, camera: false, microphone: false)
         )
-        #expect(result == "Экран и камера и микрофон отключены — запись продолжается без них")
+        #expect(result == "Экран, камера и микрофон отключены — запись продолжается без них")
+    }
+
+    @Test("Two lost sources use no comma — just и between them")
+    func twoLostSourcesUseNoComma() {
+        let result = RecordingDisplayMapper.deviceLostBannerText(
+            sourceLiveness: .init(screen: false, camera: true, microphone: false)
+        )
+        #expect(result == "Экран и микрофон отключены — запись продолжается без них")
     }
 }
