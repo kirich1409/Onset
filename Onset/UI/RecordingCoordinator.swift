@@ -115,10 +115,13 @@ struct RecordingRequest {
 /// re-publishes `recordingState` / `drops` / `elapsed` as observable properties. The menu bar and
 /// recording window NEVER subscribe to the stream or run their own timer — they read the coordinator.
 ///
-/// ### Three stop paths funnel through `stop()`
-/// Stop button (#37), global hotkey (PR2), and menu bar action (#38) all call `stop()`, which is
-/// guarded against re-entrancy (synchronous `isStopping` flip before the first `await`) so the
-/// teardown — reveal, warning, phase transition — runs exactly once even under concurrent calls.
+/// ### All stop paths funnel through one shared teardown handle
+/// Stop button (#37), global hotkey (PR2), menu bar action (#38), the `.allVideoSourcesLost`
+/// auto-stop, and app termination (#243) all call `stop()`, which memoizes a single teardown Task
+/// (`stopTask`, flipped in lockstep with `isStopping` synchronously before the first `await`). Every
+/// caller awaits the SAME handle, so the teardown — reveal, warning, phase transition — runs exactly
+/// once even under concurrent calls, and app termination waits for whatever teardown is already in
+/// flight rather than starting a fresh guarded call that would no-op (#243 defect 1).
 ///
 /// Injected at the `OnsetApp` root via `@State` and passed to views by parameter (matches the
 /// Onboarding pattern — no `@EnvironmentObject`).
@@ -306,8 +309,21 @@ final class RecordingCoordinator {
     /// Re-entrancy guard for `stop()`. Flipped synchronously before the first `await` so a second
     /// stop path entering during the `await session.stop()` suspension is a no-op (the three stop
     /// paths all call `stop()`).
+    ///
+    /// Set and cleared IN LOCKSTEP with `stopTask` (both flip synchronously on the MainActor inside
+    /// `sharedStopTask()` / at the end of `performStopTeardown()`), so the pair is a single logical
+    /// state — never a second source of truth that can desync.
     @ObservationIgnored
     private var isStopping = false
+
+    /// The single in-flight teardown handle, shared by ALL stop entry points (button / hotkey /
+    /// menu, `.allVideoSourcesLost` auto-stop, and `finalizeForTermination`). Memoized so every
+    /// caller awaits the SAME teardown rather than starting a fresh guarded `stop()` that would
+    /// no-op against `isStopping` and return before the real teardown finished (#243 defect 1).
+    /// Non-nil only while a teardown is running; nil'd at the end of `performStopTeardown()` and
+    /// reset in `activateRecording()` so a fresh recording never inherits a stale handle.
+    @ObservationIgnored
+    private var stopTask: Task<Void, Never>?
 
     /// The task running `awaitCaptureActivation`. Stored so `stop()` / `handleHotKey()` can
     /// cancel the activation wait when the user aborts during the consent wait (#3 fix).
@@ -566,6 +582,9 @@ final class RecordingCoordinator {
         // Every source starts live; a graceful revoke (AC-12) flips the affected one(s) during the session.
         self.sourceLiveness = .allLive
         self.isStopping = false
+        // Clear any stale teardown handle in lockstep with isStopping so a fresh recording never
+        // inherits a completed stop() task from a prior session (keeps the isStopping/stopTask pair coherent).
+        self.stopTask = nil
         // Reset per-session degradation state — structural invariant: clean start.
         self.lastSessionEverDegraded = false
         self.lastDroppedFrames = 0
@@ -689,22 +708,42 @@ final class RecordingCoordinator {
 
     // MARK: - Stop (AC-9) — funnel for all three stop paths
 
-    /// Stops the active recording. Funnel for the three stop paths (button / hotkey / menu —
-    /// AC-9). Re-entrancy-guarded so the teardown (reveal, warning, phase transition) runs exactly
-    /// once even under concurrent calls: `isStopping` is flipped synchronously before the first
-    /// `await`, so a second path entering during `await session.stop()` returns immediately. The
-    /// underlying `RecordingSession.stop()` is itself memoized, so the double-await is harmless —
-    /// the guard protects this coordinator's own teardown.
-    func stop() async { // swiftlint:disable:this function_body_length
+    /// Stops the active recording. Funnel for ALL stop paths — button / hotkey / menu (AC-9),
+    /// `.allVideoSourcesLost` auto-stop, and `finalizeForTermination` (#243). Every path awaits the
+    /// SAME memoized teardown handle (`stopTask`), so the teardown (reveal, warning, phase
+    /// transition) runs exactly once even under concurrent calls, and a later caller — including
+    /// app termination — waits for whatever teardown is ALREADY in flight rather than starting a
+    /// fresh guarded call that would no-op and return early (#243 defect 1). The underlying
+    /// `RecordingSession.stop()` is itself memoized, so `session.stop()` is invoked exactly once.
+    func stop() async {
         // Fix #3: if the user presses stop/hotkey during the consent wait, cancel activation so
         // start() reverts promptly and silently (no error alert).
         if self.isStarting {
             self.cancelActivation()
             return
         }
-        guard self.phase == .recording, !self.isStopping, let session = self.session else { return }
-        self.isStopping = true
+        await self.sharedStopTask()?.value
+    }
 
+    /// Returns the single in-flight teardown handle, starting it on first entry.
+    ///
+    /// Memoization is the funnel: the first caller flips `isStopping`/`stopTask` synchronously on
+    /// the MainActor (before any `await`) and spawns the teardown; every concurrent caller sees the
+    /// non-nil `stopTask` and awaits the SAME handle. Returns `nil` when there is nothing to stop
+    /// (not recording, or already fully stopped) so callers await nothing.
+    private func sharedStopTask() -> Task<Void, Never>? {
+        if let stopTask { return stopTask }
+        guard self.phase == .recording, !self.isStopping, let session = self.session else { return nil }
+        self.isStopping = true
+        let task = Task { await self.performStopTeardown(session) }
+        self.stopTask = task
+        return task
+    }
+
+    // swiftlint:disable function_body_length
+    /// The one teardown body, run exactly once via the memoized `stopTask`. Clears the
+    /// `isStopping`/`stopTask` pair at the end so a subsequent recording starts clean.
+    private func performStopTeardown(_ session: any RecordingControlling) async {
         // Stop the live readouts BEFORE awaiting teardown so they don't tick against a stopping
         // session. The final drops/degraded come from the result, not a post-stop poll (the
         // session nils its monitor in stop()). Await the tick task fully (mirrors DropMonitor.stop())
@@ -772,7 +811,12 @@ final class RecordingCoordinator {
             }
         }
 
+        // Clear the isStopping/stopTask pair in lockstep now that teardown is complete: the next
+        // recording starts with a clean handle, and any late duplicate stop() call finds phase !=
+        // .recording and no-ops. Cleared AFTER the terminal phase is set so a concurrent caller
+        // awaiting this same handle observes the fully-torn-down state on resume.
         self.isStopping = false
+        self.stopTask = nil
         // Recording-active gate OFF only now — after the terminal phase is set above — so the
         // gate stays true across the entire stop window, false only once fully stopped.
         self.isRecordingActive = false
@@ -782,6 +826,96 @@ final class RecordingCoordinator {
         coordinatorLogger.info(
             "Recording stopped — files=\(fileCount) dir=\(sessionDir.lastPathComponent) origin=\(originDescription)"
         )
+    }
+
+    // swiftlint:enable function_body_length
+
+    // MARK: - Termination (#243)
+
+    // swiftlint:disable no_magic_numbers
+    // The literal below is the definition site (mirrors CameraPreviewTimeout's threshold constants).
+    /// Default bound for `finalizeForTermination`'s wait.
+    ///
+    /// A few seconds above the ~4s `RecordingConfiguration.mvpDefault.movieFragmentInterval` —
+    /// enough slack for the teardown's own awaited work (drop-poll tick, session finish) to finish
+    /// first in the common case, while still bounding the worst case: `finalizeForTermination`
+    /// ABANDONS the wait at this deadline (it does not await the teardown after timeout), so app
+    /// termination returns within ~this bound even when the teardown is genuinely stuck.
+    static let defaultTerminationFinalizationTimeout: Duration = .seconds(5)
+    // swiftlint:enable no_magic_numbers
+
+    /// Best-effort finalization for graceful app termination (Cmd-Q / Dock Quit / `NSApp.terminate`).
+    ///
+    /// Before #242 (menu-bar-first recording) the recording window's `.onDisappear` called
+    /// `stop()`, so quitting mid-recording always ran the normal teardown. That path was removed
+    /// when the window stopped being the only way to see a recording, leaving a regression:
+    /// terminating the app during an active recording fell straight through to
+    /// `movieFragmentInterval` fragment-recovery (AC-10) — the files are only *recoverable* from
+    /// fragment headers, never cleanly finalized. This awaits the shared teardown handle so
+    /// termination gets the same finalize/reveal teardown as the button/hotkey/menu paths — and,
+    /// crucially, awaits whatever teardown is ALREADY in flight (a stop already triggered by the
+    /// user, the hotkey, or `.allVideoSourcesLost`) rather than a fresh guarded call that would
+    /// no-op and let the process terminate mid-teardown (#243 defect 1).
+    ///
+    /// No-op when idle — `applicationShouldTerminate` calls this unconditionally, and only the
+    /// active-recording case has anything to await. During the consent-wait window it cancels
+    /// activation (like `stop()`) and returns: no committed recording exists yet to finalize.
+    ///
+    /// ### Real abandon-at-deadline (#243 defect 2)
+    /// The teardown eventually calls `RecordingSession.stop()`, whose `performStop()` runs in an
+    /// unstructured, non-cancellable `Task` (VideoToolbox flush / `AVAssetWriter.finishWriting()`
+    /// can block). A `withTaskGroup` + `cancelAll()` would NOT bound this: the group drains all
+    /// children on scope exit and the teardown child never observes cancellation, so termination
+    /// would hang exactly when the bound is needed. Instead this races the teardown handle's
+    /// completion against `Task.sleep(timeout)` via a `CheckedContinuation` resumed EXACTLY ONCE by
+    /// whichever finishes first (`TerminationGate`). On timeout it returns WITHOUT awaiting the
+    /// teardown Task — the teardown keeps running best-effort (it may still finish cleanly before
+    /// the process dies), and the on-disk floor is the ~4s `movieFragmentInterval` fragment
+    /// recovery (AC-10), which is playable, not truncated. `finalizeForTermination` therefore always
+    /// returns within ~`timeout`, so the caller's `NSApp.reply(toApplicationShouldTerminate: true)`
+    /// fires exactly once and quit proceeds bounded.
+    func finalizeForTermination(timeout: Duration = defaultTerminationFinalizationTimeout) async {
+        // Consent-wait window: cancel activation so start() reverts promptly. No committed recording
+        // to finalize (files never began) — mirrors stop()'s isStarting handling.
+        if self.isStarting {
+            self.cancelActivation()
+            return
+        }
+        guard self.isRecordingActive, let teardown = self.sharedStopTask() else { return }
+        coordinatorLogger.notice("App termination requested during an active recording — finalizing")
+        await Self.awaitOrAbandon(teardown, timeout: timeout)
+    }
+
+    /// Returns when EITHER `teardown` completes OR `timeout` elapses — whichever is first — without
+    /// draining the loser. On the timeout path the teardown Task is left running (best-effort); we
+    /// never `await teardown.value` after the deadline, which is what would re-couple to a stuck,
+    /// non-cancellable teardown and hang (#243 defect 2).
+    ///
+    /// The `CheckedContinuation` is resumed exactly once, guarded by `TerminationGate`. Both waiter
+    /// tasks inherit `@MainActor`, so the gate's check-and-set is serialized — no data race, no
+    /// double-resume. The completion waiter, if it loses, resolves harmlessly later (its `resume`
+    /// is a no-op) or dies with the process; the deadline task is cancelled when completion wins so
+    /// no orphaned sleep lingers.
+    private static func awaitOrAbandon(_ teardown: Task<Void, Never>, timeout: Duration) async {
+        let gate = TerminationGate()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let deadlineTask = Task {
+                try? await Task.sleep(for: timeout)
+                if gate.resume(continuation) {
+                    coordinatorLogger.error(
+                        // swiftlint:disable:next line_length
+                        "Termination finalization timed out — abandoning teardown; quit proceeds (fragment-recovery floor)"
+                    )
+                }
+            }
+            // Completion waiter — leaks harmlessly if the deadline wins (its resume no-ops).
+            Task {
+                await teardown.value
+                if gate.resume(continuation) {
+                    deadlineTask.cancel()
+                }
+            }
+        }
     }
 
     // MARK: - Global hotkey (#67 / AC-9 third stop path)
@@ -811,5 +945,27 @@ final class RecordingCoordinator {
             self.openMainWindow()
             coordinatorLogger.info("Hotkey ⌘⌥⌃R — no intent installed, opening main window")
         }
+    }
+}
+
+// MARK: - TerminationGate
+
+/// One-shot resume guard for `finalizeForTermination`'s abandon-at-deadline race.
+///
+/// The teardown-completion waiter and the deadline waiter both try to resume the SAME
+/// `CheckedContinuation`; exactly one must win. `@MainActor` isolation serializes the check-and-set
+/// (both waiters inherit MainActor from the enclosing method), so the plain `Bool` needs no locking
+/// and a double-resume — which would trap — cannot happen.
+@MainActor
+private final class TerminationGate {
+    private var resumed = false
+
+    /// Resumes the continuation iff it has not already been resumed. Returns `true` when THIS call
+    /// performed the resume (the caller "won" the race), `false` when the other waiter already did.
+    func resume(_ continuation: CheckedContinuation<Void, Never>) -> Bool {
+        guard !self.resumed else { return false }
+        self.resumed = true
+        continuation.resume()
+        return true
     }
 }
