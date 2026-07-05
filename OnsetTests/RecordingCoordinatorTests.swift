@@ -57,6 +57,11 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
     var gateStartEnabled = false
     private let (gateStream, gateContinuation) = AsyncStream.makeStream(of: Void.self)
 
+    /// When `true`, `stop()` suspends until `releaseStop()` is called — simulates an in-flight or
+    /// genuinely stuck teardown (VideoToolbox flush / `finishWriting()` blocked), the #243 scenario.
+    var gateStopEnabled = false
+    private let (stopGateStream, stopGateContinuation) = AsyncStream.makeStream(of: Void.self)
+
     /// The health snapshot returned by `currentDrops()` while recording.
     var liveDrops = DropHealthSnapshot(
         counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
@@ -114,12 +119,27 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
     func stop() async -> RecordingResult {
         self.stopCalled = true
         self.stopCount += 1
+        // When gateStopEnabled, suspend here until releaseStop() — simulates a teardown that is
+        // in flight (defect 1) or stuck (defect 2). stopCount is bumped BEFORE suspending so a test
+        // can prove entry; the coordinator's memoized stopTask ensures this runs exactly once even
+        // when a second stop path (termination) awaits the same handle.
+        if self.gateStopEnabled {
+            for await _ in self.stopGateStream {
+                break
+            }
+        }
         // The live session finishes all streams on stop; mirror that so the coordinator's
         // subscription loops end deterministically.
         self.stateContinuation.finish()
         self.revocationContinuation.finish()
         self.captureActiveContinuation.finish()
         return self.result
+    }
+
+    /// Test hook: unblock a `stop()` suspension gated by `gateStopEnabled`.
+    func releaseStop() {
+        self.stopGateContinuation.yield(())
+        self.stopGateContinuation.finish()
     }
 
     func currentDrops() async -> DropHealthSnapshot {
@@ -1466,6 +1486,163 @@ struct RecordingCoordinatorActiveGateTests {
         try await startTask.value
 
         #expect(!coordinator.isRecordingActive, "gate must reset to false after a user cancel during consent wait")
+    }
+}
+
+// MARK: - Termination finalization (#243)
+
+/// Regression coverage for #243: graceful app termination (Cmd-Q / Dock Quit) during an active
+/// recording must await the normal `stop()` teardown instead of falling straight through to
+/// `movieFragmentInterval` fragment-recovery. Exercises `RecordingCoordinator.finalizeForTermination`
+/// directly — the injectable seam `AppDelegate.applicationShouldTerminate(_:)` calls into — rather
+/// than driving `NSApplication` itself.
+@Suite("RecordingCoordinator — finalizeForTermination (#243)")
+@MainActor
+struct RecordingCoordinatorTerminationTests {
+    @Test("active recording — finalizeForTermination awaits stop() before returning")
+    func finalizeForTermination_activeRecording_awaitsStop() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+        try await coordinator.start(CoordinatorFixtures.request())
+        #expect(coordinator.phase == .recording, "prerequisite: must be recording")
+
+        await coordinator.finalizeForTermination()
+
+        // stop() was awaited to completion — not merely called and left in flight — the
+        // coordinator's own post-stop state (isRecordingActive gate, stopCount) proves it ran to
+        // the end rather than racing finalizeForTermination's return.
+        #expect(fake.stopCalled, "stop() must be called when a recording is active at termination")
+        #expect(fake.stopCount == 1, "stop() must be awaited exactly once, not left running unawaited")
+        #expect(
+            !coordinator.isRecordingActive,
+            "gate must be false — finalizeForTermination awaited stop() to completion"
+        )
+    }
+
+    @Test("no active recording — finalizeForTermination returns immediately without calling stop()")
+    func finalizeForTermination_noActiveRecording_doesNotCallStop() async {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+        coordinator.enterMain()
+        #expect(!coordinator.isRecordingActive, "prerequisite: idle, no recording started")
+
+        await coordinator.finalizeForTermination()
+
+        #expect(!fake.stopCalled, "stop() must not be called — the regression is an UNCONDITIONAL await, not a no-op")
+    }
+
+    /// #243 defect 1: a stop() is ALREADY in flight (user/hotkey/menu/.allVideoSourcesLost) when
+    /// termination fires. The old finalize started a FRESH guarded stop() that no-op'd against
+    /// isStopping and returned instantly, letting the process terminate mid-teardown. finalize must
+    /// instead await the SAME in-flight teardown handle.
+    @Test("in-flight teardown at termination — finalize awaits THAT teardown, not a fresh no-op stop()")
+    func finalizeForTermination_awaitsInFlightTeardown() async throws { // swiftlint:disable:this function_body_length
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        fake.gateStopEnabled = true
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+        try await coordinator.start(CoordinatorFixtures.request())
+        #expect(coordinator.phase == .recording, "prerequisite: must be recording")
+
+        // A user/hotkey/auto stop is already in flight, suspended on the fake's stop gate.
+        let inFlightStop = Task { await coordinator.stop() }
+        // Let the in-flight teardown reach the gate. The teardown Task first joins the cancelled
+        // tick loop before calling the gated session.stop(), so poll rather than assume one yield.
+        var spins = 0
+        while !fake.stopCalled, spins < 1000 {
+            await Task.yield()
+            spins += 1
+        }
+        #expect(fake.stopCalled, "prerequisite: an in-flight teardown entered and suspended on the gate")
+
+        // Termination fires while that teardown is still running.
+        var finalizeReturned = false
+        let finalizeTask = Task {
+            await coordinator.finalizeForTermination()
+            finalizeReturned = true
+        }
+
+        // finalize must NOT return while the in-flight teardown is still gated — it awaits the SAME
+        // handle. (A no-op fresh stop() would return here — the old-code regression.)
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        #expect(
+            !finalizeReturned,
+            "finalize returned before the in-flight teardown finished — it no-op'd instead of awaiting the real handle"
+        )
+
+        // Complete the in-flight teardown; finalize must now return.
+        fake.releaseStop()
+        await finalizeTask.value
+        await inFlightStop.value
+
+        #expect(finalizeReturned, "finalize must return once the awaited in-flight teardown completes")
+        #expect(
+            fake.stopCount == 1,
+            "session.stop() invoked exactly once — finalize awaited the shared handle, not a second stop"
+        )
+        #expect(!coordinator.isRecordingActive, "gate cleared — the teardown finalize awaited ran to completion")
+    }
+
+    /// #243 defect 2: a genuinely stuck teardown (VideoToolbox flush / finishWriting() blocked —
+    /// exactly what the bound exists for). finalize must ABANDON at the deadline and return, so
+    /// applicationShouldTerminate's reply(true) fires and quit proceeds bounded — never hangs.
+    @Test("stuck teardown — finalizeForTermination abandons at the deadline instead of hanging")
+    func finalizeForTermination_stuckTeardown_returnsWithinTimeout() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        fake.gateStopEnabled = true // teardown suspends and is never released before assertions
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+        try await coordinator.start(CoordinatorFixtures.request())
+        // Drain the orphaned (abandoned) teardown after the assertions so it does not linger blocked.
+        defer { fake.releaseStop() }
+
+        let timeout: Duration = .milliseconds(50)
+        let clock = ContinuousClock()
+        let start = clock.now
+
+        // Reply-exactly-once: finalize does not call NSApp.reply itself — AppDelegate does, once,
+        // after this single await returns. The internal CheckedContinuation is resumed exactly once
+        // (TerminationGate), so finalize returns exactly once on every path; a double-resume would
+        // trap the process, so reaching the assertion below proves resume-once held.
+        await coordinator.finalizeForTermination(timeout: timeout)
+        let elapsed = clock.now - start
+
+        // Returned bounded — abandoned the stuck teardown at the deadline rather than hanging on the
+        // non-cancellable finishWriting(). Generous slack absorbs scheduler jitter under parallel test load.
+        #expect(
+            elapsed < timeout + .milliseconds(500),
+            "finalize must return ~within the timeout, not hang on the stuck teardown"
+        )
     }
 }
 
