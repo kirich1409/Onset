@@ -246,3 +246,54 @@ struct ChecklistLivenessMapperTests {
         #expect(result == "Микрофон — MacBook Pro — остановлен")
     }
 }
+
+// MARK: - RecordingDisplayMapper — Device-lost banner (#261)
+
+@Suite("RecordingDisplayMapper device-lost banner")
+@MainActor
+struct DeviceLostBannerMapperTests {
+    @Test("All sources live returns no banner text")
+    func allLiveReturnsNil() {
+        #expect(RecordingDisplayMapper.deviceLostBannerText(sourceLiveness: .allLive) == nil)
+    }
+
+    @Test("Camera lost names the camera with feminine wording")
+    func cameraLost() {
+        let result = RecordingDisplayMapper.deviceLostBannerText(
+            sourceLiveness: .init(screen: true, camera: false, microphone: true)
+        )
+        #expect(result == "Камера отключена — запись продолжается без неё")
+    }
+
+    @Test("Screen lost names the screen with masculine wording")
+    func screenLost() {
+        let result = RecordingDisplayMapper.deviceLostBannerText(
+            sourceLiveness: .init(screen: false, camera: true, microphone: true)
+        )
+        #expect(result == "Экран отключён — запись продолжается без него")
+    }
+
+    @Test("Camera and microphone lost together joins with и and plural wording")
+    func cameraAndMicrophoneLost() {
+        let result = RecordingDisplayMapper.deviceLostBannerText(
+            sourceLiveness: .init(screen: true, camera: false, microphone: false)
+        )
+        #expect(result == "Камера и микрофон отключены — запись продолжается без них")
+    }
+
+    @Test("All three sources lost uses a comma list with и before the last item")
+    func allThreeLost() {
+        let result = RecordingDisplayMapper.deviceLostBannerText(
+            sourceLiveness: .init(screen: false, camera: false, microphone: false)
+        )
+        #expect(result == "Экран, камера и микрофон отключены — запись продолжается без них")
+    }
+
+    @Test("Two lost sources use no comma — just и between them")
+    func twoLostSourcesUseNoComma() {
+        let result = RecordingDisplayMapper.deviceLostBannerText(
+            sourceLiveness: .init(screen: false, camera: true, microphone: false)
+        )
+        #expect(result == "Экран и микрофон отключены — запись продолжается без них")
+    }
+}

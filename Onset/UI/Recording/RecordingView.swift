@@ -65,6 +65,11 @@ struct RecordingContentView: View {
         static let checklistTopDividerTopPadding: CGFloat = 12
         static let checklistRowHPadding: CGFloat = 16
         static let checklistRowVPadding: CGFloat = 10
+        static let deviceLostBannerSpacing: CGFloat = 8
+        static let deviceLostBannerPadding: CGFloat = 10
+        static let deviceLostBannerCornerRadius: CGFloat = 8
+        static let deviceLostBannerBottomPadding: CGFloat = 8
+        static let deviceLostBannerBackgroundOpacity: CGFloat = 0.15
         static let stopButtonTopPadding: CGFloat = 12
         static let stopButtonBottomPadding: CGFloat = 8
         static let stopButtonHeight: CGFloat = 44
@@ -93,6 +98,8 @@ struct RecordingContentView: View {
     private var stopButtonLabelFontSize: CGFloat = 14
     @ScaledMetric(relativeTo: .caption2)
     private var footerFontSize: CGFloat = 11
+    @ScaledMetric(relativeTo: .caption)
+    private var deviceLostBannerFontSize: CGFloat = 12
 
     let state: RecordingState
     let elapsed: Int
@@ -110,6 +117,7 @@ struct RecordingContentView: View {
                 VStack(spacing: Metrics.sectionSpacing) {
                     self.statusSection
                     self.timerSection
+                    self.deviceLostBanner
                     Divider()
                         .padding(.top, Metrics.checklistTopDividerTopPadding)
                     self.checklistSection
@@ -157,6 +165,35 @@ struct RecordingContentView: View {
             .padding(.bottom, Metrics.timerBottomPadding)
             .accessibilityLabel("Время записи \(elapsedText)")
             .accessibilityAddTraits(.updatesFrequently)
+    }
+
+    // MARK: Device-lost banner (#261)
+
+    /// Visible banner shown above the checklist when a capture device was lost mid-recording.
+    ///
+    /// The per-row checklist already shows liveness via a small icon + «· остановлена» suffix
+    /// (below), but that's easy to miss at a glance. This banner makes the same fact impossible to
+    /// miss without changing the stop/continue policy — recording keeps going on the surviving
+    /// sources exactly as before.
+    @ViewBuilder
+    private var deviceLostBanner: some View {
+        if let text = RecordingDisplayMapper.deviceLostBannerText(sourceLiveness: self.sourceLiveness) {
+            HStack(spacing: Metrics.deviceLostBannerSpacing) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text(text)
+                    .font(.system(size: self.deviceLostBannerFontSize, weight: .medium))
+                    .foregroundStyle(.primary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(Metrics.deviceLostBannerPadding)
+            .background(
+                RoundedRectangle(cornerRadius: Metrics.deviceLostBannerCornerRadius)
+                    .fill(Color.orange.opacity(Metrics.deviceLostBannerBackgroundOpacity))
+            )
+            .padding(.bottom, Metrics.deviceLostBannerBottomPadding)
+            .accessibilityElement(children: .combine)
+        }
     }
 
     // MARK: Checklist section
@@ -374,6 +411,75 @@ nonisolated enum RecordingDisplayMapper {
     -> String {
         "\(label) — \(value) — \(self.stateWord(isLive: isLive, gender: gender))"
     }
+
+    // MARK: Device-lost banner (#261)
+
+    /// Text for the in-window banner naming which source(s) dropped mid-recording, or `nil` when
+    /// every source in `sourceLiveness` is still live (banner hidden).
+    ///
+    /// - One lost source: «<Источник> отключён(а) — запись продолжается без <него/неё>».
+    /// - Multiple lost sources: «<A>, <b> и <c> отключены — запись продолжается без них» — an
+    ///   idiomatic Russian list join (comma between all items but the last, «и» before the last;
+    ///   two items get no comma: «A и b»). First label capitalized, the rest lowercased so the
+    ///   whole clause reads as one sentence.
+    static func deviceLostBannerText(sourceLiveness: SourceLiveness) -> String? {
+        let sources = [
+            LostSourceWording(
+                isLive: sourceLiveness.screen,
+                label: "Экран",
+                lowercaseLabel: "экран",
+                participle: "отключён",
+                pronoun: "него"
+            ),
+            LostSourceWording(
+                isLive: sourceLiveness.camera,
+                label: "Камера",
+                lowercaseLabel: "камера",
+                participle: "отключена",
+                pronoun: "неё"
+            ),
+            LostSourceWording(
+                isLive: sourceLiveness.microphone,
+                label: "Микрофон",
+                lowercaseLabel: "микрофон",
+                participle: "отключён",
+                pronoun: "него"
+            ),
+        ]
+        let candidates = sources.filter { !$0.isLive }
+
+        guard let first = candidates.first else { return nil }
+
+        if candidates.count == 1 {
+            return "\(first.label) \(first.participle) — запись продолжается без \(first.pronoun)"
+        }
+
+        let labels = [first.label] + candidates.dropFirst().map(\.lowercaseLabel)
+        return "\(self.joinedRussianList(labels)) отключены — запись продолжается без них"
+    }
+
+    /// Joins items into an idiomatic Russian list: a comma between every item but the last, and
+    /// «и» before the last item. Two items get no comma («A и b»); three or more get commas
+    /// between all but the final pair («A, b и c»).
+    private static func joinedRussianList(_ items: [String]) -> String {
+        guard let last = items.last else { return "" }
+        guard items.count > 1 else { return last }
+        return "\(items.dropLast().joined(separator: ", ")) и \(last)"
+    }
+
+    /// Per-source Russian wording used to build `deviceLostBannerText`. A struct (not a tuple)
+    /// to stay under SwiftLint's `large_tuple` member limit.
+    private struct LostSourceWording {
+        let isLive: Bool
+        /// Capitalized nominative label, e.g. «Камера».
+        let label: String
+        /// Lowercase label used when joined mid-sentence after another source name.
+        let lowercaseLabel: String
+        /// Singular past-participle form, gender-agreed with the source noun.
+        let participle: String
+        /// Singular instrumental-case pronoun for «без <pronoun>», gender-agreed.
+        let pronoun: String
+    }
 }
 
 // MARK: - Previews
@@ -442,7 +548,7 @@ nonisolated enum RecordingDisplayMapper {
     .preferredColorScheme(.light)
 }
 
-#Preview("Camera revoked — Dark") {
+#Preview("Camera + mic revoked — Dark (#261 banner)") {
     RecordingContentView(
         state: .normal,
         elapsed: 312,
@@ -456,6 +562,22 @@ nonisolated enum RecordingDisplayMapper {
     )
     .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
     .preferredColorScheme(.dark)
+}
+
+#Preview("Screen lost — Light (#261 banner, single source)") {
+    RecordingContentView(
+        state: .normal,
+        elapsed: 88,
+        checklist: .init(
+            screenDescription: "3840×2160 @ 60 Гц",
+            cameraDescription: "MX Brio · 1920×1080",
+            microphoneDescription: "MacBook Pro"
+        ),
+        sourceLiveness: .init(screen: false, camera: true, microphone: true),
+        onStop: {}
+    )
+    .frame(width: WindowDefaults.recordingWidth, height: WindowDefaults.recordingHeight)
+    .preferredColorScheme(.light)
 }
 
 #Preview("Large font — Dynamic Type accessibility5 (issue #136)") {

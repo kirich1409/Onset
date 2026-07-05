@@ -146,6 +146,31 @@ import SwiftUI
         return model
     }
 
+    /// Helper for the disconnected-microphone preview state (#261): authorized, one display, NO
+    /// microphones in the current list (simulates hot-unplug), with `disconnectedMicName` set.
+    @MainActor
+    private func makeDisconnectedMicPreviewModel(withAlternative: Bool = false) -> MainViewModel {
+        let display = Display(
+            displayID: 1,
+            name: "Встроенный дисплей",
+            pixelWidth: 1920,
+            pixelHeight: 1080,
+            refreshHz: 60
+        )
+        // When `withAlternative` is true, a second microphone remains in the list so the
+        // "выберите другой микрофон" hint appears.
+        let alternativeMic = MicrophoneDevice(uniqueID: "mic-alt")
+        let model = makePreviewModel(
+            camera: .authorized,
+            microphone: .authorized,
+            displays: [display],
+            cameras: [],
+            microphones: withAlternative ? [alternativeMic] : []
+        )
+        model.disconnectedMicName = "Blue Yeti"
+        return model
+    }
+
     // swiftlint:enable no_magic_numbers
 
     #Preview("No permissions — empty state") {
@@ -279,6 +304,18 @@ import SwiftUI
         // label ("…выберите другую камеру") alongside the picker row.
         MainView(model: makeDisconnectedCameraPreviewModel(withAlternative: true)) {}
             .dynamicTypeSize(.accessibility5)
+    }
+
+    #Preview("Microphone — disconnected, no alternatives (#261)") {
+        // microphones=[], disconnectedMicName set: only MicrophoneDisconnectedRow(hasAlternatives: false)
+        // is shown; no picker because there are no devices to pick from.
+        MainView(model: makeDisconnectedMicPreviewModel()) {}
+    }
+
+    #Preview("Microphone — disconnected, alternative available (#261)") {
+        // microphones=[alternativeMic], disconnectedMicName set: picker is shown first,
+        // MicrophoneDisconnectedRow(hasAlternatives: true) appears below.
+        MainView(model: makeDisconnectedMicPreviewModel(withAlternative: true)) {}
     }
 
     #Preview("Output folder — custom path") {
