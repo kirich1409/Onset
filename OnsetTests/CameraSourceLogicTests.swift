@@ -296,6 +296,55 @@ struct DisconnectFilterTests {
     }
 }
 
+// MARK: - Suspension filter tests (#222 regression)
+
+/// Locks the #222 fix: camera suspension (e.g. clamshell lid close with an external display,
+/// power, and keyboard attached — the system does NOT sleep, `wasDisconnectedNotification`
+/// never fires, `AVCaptureSession.isRunning` stays `true`, and `isSuspended` flips `true` via
+/// KVO only) must route into the SAME terminal path as a physical disconnect, and ONLY for the
+/// recording camera itself. Tests the `shouldHandleSuspension` pure helper extracted from the
+/// KVO closure registered by `makeSuspensionObservation`.
+///
+/// Pre-fix there was no suspension→terminal wiring at all: `CameraSource` only subscribed to
+/// `wasDisconnectedNotification`, so a suspended-but-still-`isRunning` session kept delivering
+/// no frames while the CFR encoder clock submitted hold-frames every slot — `camera.mp4` froze
+/// on the last real frame silently, for the rest of the recording. This suite locks the routing
+/// decision; the reused `.cameraDisconnected` event emission itself (terminal stop + finalize)
+/// is already covered by `handleCameraSessionFault`'s existing disconnect-path tests.
+@Suite("CameraSource — suspension filter")
+struct SuspensionFilterTests {
+    private let cameraID = "camera-unique-id"
+
+    @Test("matching device ID, suspended → triggers terminal path (AC-12: own device)")
+    func matchingID_suspended_triggersTerminalPath() {
+        #expect(
+            shouldHandleSuspension(isSuspended: true, notificationDeviceID: self.cameraID, cameraID: self.cameraID)
+                == true
+        )
+    }
+
+    @Test("non-matching device ID, suspended → does not trigger terminal path (AC-12: other device)")
+    func nonMatchingID_suspended_doesNotTriggerTerminalPath() {
+        #expect(
+            shouldHandleSuspension(isSuspended: true, notificationDeviceID: "other-device-id", cameraID: self.cameraID)
+                == false
+        )
+    }
+
+    @Test("matching device ID, un-suspended → does not trigger terminal path (no restart on lid reopen)")
+    func matchingID_unsuspended_doesNotTriggerTerminalPath() {
+        #expect(
+            shouldHandleSuspension(isSuspended: false, notificationDeviceID: self.cameraID, cameraID: self.cameraID)
+                == false
+        )
+    }
+
+    @Test("nil device ID does not trigger terminal path")
+    func nilID_doesNotTriggerTerminalPath() {
+        #expect(shouldHandleSuspension(isSuspended: true, notificationDeviceID: nil, cameraID: self.cameraID) == false)
+    }
+}
+
 // MARK: - Telemetry-start gating tests (#203 regression)
 
 /// Locks the #203 fix: the capture telemetry task must launch only for a `.record`-role
@@ -322,14 +371,21 @@ struct TelemetryStartGatingTests {
     /// Builds a `.running` state with synthetic shims. The shims' associated values are
     /// never inspected by `shouldStartCaptureTelemetry` (it matches the case only); they
     /// exist solely to construct a well-typed `.running` value without live hardware.
-    private static func runningState() -> CameraCaptureState {
-        let session = AVCaptureSession()
-        let sessionID = ObjectIdentifier(session)
+    /// Builds synthetic shims for `session`. Extracted from `runningState()` to keep that
+    /// function under the `function_body_length` limit.
+    ///
+    /// The synthetic `suspensionObservation` KVO token observes `session.isRunning` — only
+    /// `CameraCaptureShims`'s stored-field shape matters here, not a real `isSuspended`
+    /// observation (there is no live `AVCaptureDevice` in this test).
+    private static func makeSyntheticShims(
+        session: AVCaptureSession,
+        framesCont: AsyncStream<VideoFrame>.Continuation,
+        audioCont: AsyncStream<AudioSample>.Continuation,
+        dropsCont: AsyncStream<DropEvent>.Continuation
+    )
+    -> CameraCaptureShims {
         let syncClock = CMClockGetHostTimeClock()
         let sessionStart = CMTime.zero
-        let (_, framesCont) = AsyncStream<VideoFrame>.makeStream()
-        let (_, audioCont) = AsyncStream<AudioSample>.makeStream()
-        let (_, dropsCont) = AsyncStream<DropEvent>.makeStream()
         let rateLock = OSAllocatedUnfairLock(
             initialState: StageRateAggregator(lane: "camera", stage: .capture, nominalFps: 30)
         )
@@ -341,7 +397,7 @@ struct TelemetryStartGatingTests {
             onDisconnect: {},
             onSessionFault: { _ in },
             cameraUniqueID: "synthetic-camera-id",
-            captureSessionID: sessionID,
+            captureSessionID: ObjectIdentifier(session),
             rateLock: rateLock
         )
         let audio = AudioOutputShim(
@@ -350,10 +406,26 @@ struct TelemetryStartGatingTests {
             audioSamplesContinuation: audioCont,
             dropsContinuation: dropsCont
         )
-        let state = CameraCaptureState.running(
-            session: session,
-            shims: CameraCaptureShims(video: video, audio: audio, lockedDevice: nil)
+        return CameraCaptureShims(
+            video: video,
+            audio: audio,
+            lockedDevice: nil,
+            suspensionObservation: session.observe(\.isRunning, options: []) { _, _ in }
         )
+    }
+
+    private static func runningState() -> CameraCaptureState {
+        let session = AVCaptureSession()
+        let (_, framesCont) = AsyncStream<VideoFrame>.makeStream()
+        let (_, audioCont) = AsyncStream<AudioSample>.makeStream()
+        let (_, dropsCont) = AsyncStream<DropEvent>.makeStream()
+        let shims = Self.makeSyntheticShims(
+            session: session,
+            framesCont: framesCont,
+            audioCont: audioCont,
+            dropsCont: dropsCont
+        )
+        let state = CameraCaptureState.running(session: session, shims: shims)
         // Finish all three continuations immediately — only the case match matters, not the
         // associated values. The streams have no consumers; finishing avoids live-but-unread continuations.
         framesCont.finish()
