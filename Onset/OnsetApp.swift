@@ -27,7 +27,12 @@ enum WindowID {
 /// content size with no flexible range for the user to drag.
 enum WindowDefaults {
     static let width: CGFloat = 460
-    static let height: CGFloat = 560
+    /// Fits `MainView.mainContent` without internal scrolling in the worst realistic content
+    /// state: all sections, the camera live preview (#267), both device-loss notice rows
+    /// (#261), and a footer disabled-reason line (#316). Measured 648pt via
+    /// `NSHostingView.fittingSize` on that layout; `mainContent`'s `ScrollView` remains a
+    /// safety net for larger Dynamic Type, not the default state.
+    static let height: CGFloat = 660
     static let recordingWidth: CGFloat = 370
     static let recordingHeight: CGFloat = 420
 }
