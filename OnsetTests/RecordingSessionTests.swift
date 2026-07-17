@@ -52,7 +52,9 @@ private final class FakeEncoder: EncoderControlling, @unchecked Sendable {
 
     func start() throws {
         self.startCalled = true
-        if let startError { throw startError }
+        if let startError {
+            throw startError
+        }
     }
 
     func ingest(_ frame: VideoFrame) {
@@ -130,7 +132,9 @@ private final class FakeScreenSource: VideoFrameSource, @unchecked Sendable {
 
     func start(anchoredTo anchor: HostTimeAnchor) async throws {
         self.startCalled = true
-        if let startError { throw startError }
+        if let startError {
+            throw startError
+        }
     }
 
     func stop() async {
@@ -481,7 +485,9 @@ private func eventually(
 -> Bool {
     let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
     while Date() < deadline {
-        if await condition() { return true }
+        if await condition() {
+            return true
+        }
         try? await Task.sleep(nanoseconds: 5_000_000) // 5 ms
     }
     return await condition()
@@ -506,7 +512,9 @@ struct RecordingSessionProbeTests {
         do {
             try await session.start(permissions: SessionFixtures.fullPermissions())
         } catch let error as RecordingError {
-            if case .noHardwareEncoder = error { isNoHardwareEncoder = true }
+            if case .noHardwareEncoder = error {
+                isNoHardwareEncoder = true
+            }
         }
         #expect(isNoHardwareEncoder, "start() must throw .noHardwareEncoder")
 
@@ -1525,7 +1533,9 @@ struct RecordingSessionLiveTests {
         }
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer {
-            if !keepOutput { try? FileManager.default.removeItem(at: tempDir) }
+            if !keepOutput {
+                try? FileManager.default.removeItem(at: tempDir)
+            }
         }
 
         let writerFactory = LiveWriterFactory(configuration: config) { kind in

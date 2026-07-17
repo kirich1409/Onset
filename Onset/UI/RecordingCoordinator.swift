@@ -734,7 +734,9 @@ final class RecordingCoordinator {
     /// non-nil `stopTask` and awaits the SAME handle. Returns `nil` when there is nothing to stop
     /// (not recording, or already fully stopped) so callers await nothing.
     private func sharedStopTask() -> Task<Void, Never>? {
-        if let stopTask { return stopTask }
+        if let stopTask {
+            return stopTask
+        }
         guard self.phase == .recording, !self.isStopping, let session = self.session else { return nil }
         self.isStopping = true
         let task = Task { await self.performStopTeardown(session) }

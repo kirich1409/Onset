@@ -140,7 +140,11 @@ struct MainView: View {
             "Папка для записи недоступна",
             isPresented: Binding(
                 get: { self.model.outputDirectoryError != nil },
-                set: { if !$0 { self.model.outputDirectoryError = nil } }
+                set: {
+                    if !$0 {
+                        self.model.outputDirectoryError = nil
+                    }
+                }
             )
         ) {
             Button("ОК") { self.model.outputDirectoryError = nil }
