@@ -472,6 +472,57 @@ final class MainViewModel {
         self.permissions.effectivePermissions.microphoneAvailable
     }
 
+    // MARK: - No-permissions in-window grant flow (#277)
+
+    /// `true` while screen recording has been requested and the polling loop is in flight.
+    ///
+    /// Mirrors `OnboardingViewModel.isAwaitingScreen` (#61's screen-grant flow) so the
+    /// no-permissions empty state in the main window can show the same "Ожидание…" state
+    /// without leaving the window.
+    private(set) var isAwaitingScreen = false
+
+    /// Requests screen-recording access, opens System Settings, and enters the awaiting state.
+    ///
+    /// Mirrors `OnboardingViewModel.openScreenRecordingSettings()` exactly — same underlying
+    /// `PermissionsService` calls, so the granted edge auto-triggers `AppRelauncher` relaunch
+    /// (no new mechanics; see `PermissionsService.checkScreenStatusNow`/`startScreenPolling`).
+    func openScreenRecordingSettings() {
+        self.permissions.requestScreenRecording()
+        self.permissions.openScreenRecordingSettings()
+        mainViewModelLogger.info("Registered in TCC list; opened Screen Recording settings; awaiting state")
+        self.isAwaitingScreen = true
+    }
+
+    /// Triggers an immediate one-shot status check (the explicit "Проверить снова" button).
+    ///
+    /// Mirrors `OnboardingViewModel.checkNow()`.
+    func checkScreenStatusNow() {
+        self.permissions.checkScreenStatusNow()
+        mainViewModelLogger.info("Manual check triggered from no-permissions state")
+    }
+
+    /// Starts the background screen-status polling loop.
+    ///
+    /// Mirrors `OnboardingViewModel.startPolling()`. The caller must cancel the returned
+    /// `Task` when polling is no longer needed — use `.task { … }` for structured cancellation
+    /// so the loop stops when the no-permissions view disappears.
+    func startScreenPolling() -> Task<Void, Never> {
+        mainViewModelLogger.info("Starting screen polling from no-permissions state")
+        return self.permissions.startScreenPolling()
+    }
+
+    /// Clears the transient awaiting flag when the user leaves the no-permissions state
+    /// via the demoted "Вернуться к разрешениям" fallback.
+    ///
+    /// `MainViewModel` is app-lifetime (owned by the window scene, not re-created per
+    /// presentation), so `isAwaitingScreen` would otherwise stay latched `true` across a
+    /// round trip: open Settings → leave without granting → deny stays → re-enter this
+    /// state later still shows the stale "Ожидание…" spinner with no way back to
+    /// "Открыть настройки" via a fresh request. Call before navigating away.
+    func leaveNoPermissionsState() {
+        self.isAwaitingScreen = false
+    }
+
     // MARK: - Computed properties — selected devices (resolved from ID)
 
     /// The display object matching `selectedDisplayID`, or `nil`.

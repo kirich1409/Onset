@@ -18,10 +18,13 @@ nonisolated private let mainViewLogger = Logger(
 /// and a footer with a brief summary. Delegates all logic to `MainViewModel`.
 ///
 /// View states:
-/// - No permissions (AC-2d): empty state with return-to-onboarding button
+/// - No permissions (AC-2d): in-window screen-grant flow (#277), mirroring onboarding's
+///   request/open-settings/awaiting/auto-relaunch machinery, with a demoted
+///   return-to-onboarding fallback
 /// - Normal: section cards + Record button
 ///
 /// Section sub-views live in `MainView+Sections.swift`.
+/// No-permissions empty-state sub-views live in `MainView+NoPermissions.swift`.
 /// Preview doubles and `#Preview` blocks live in `MainView+Previews.swift`.
 @MainActor
 struct MainView: View {
@@ -153,33 +156,6 @@ struct MainView: View {
                 Text(message)
             }
         }
-    }
-
-    // MARK: - No permissions empty state (AC-2d)
-
-    private var noPermissionsView: some View {
-        VStack(spacing: Metrics.noPermissionsSpacing) {
-            Spacer()
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: Metrics.emptyIconSize))
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
-            Text("Запись недоступна")
-                .font(.title3)
-                .fontWeight(.semibold)
-            Text("Выдайте разрешения на запись экрана или камеру, чтобы начать.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, Metrics.noPermissionsTextPaddingH)
-            Button("Вернуться к разрешениям") {
-                self.onReturnToOnboarding()
-            }
-            .buttonStyle(.borderedProminent)
-            .accessibilityLabel("Вернуться к разрешениям")
-            Spacer()
-        }
-        .padding(.horizontal, Metrics.outerPaddingH)
     }
 
     // MARK: - Main content
