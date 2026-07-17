@@ -484,7 +484,9 @@ actor DropMonitor {
         self.tickTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: tickInterval)
-                if Task.isCancelled { return }
+                if Task.isCancelled {
+                    return
+                }
                 guard let self else { return }
                 await self.tick()
             }

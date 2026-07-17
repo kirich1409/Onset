@@ -465,7 +465,9 @@ struct DualFileOutputStageLazyTests {
                 originalFirstPTS: CMTime(value: Int64(index), timescale: 48000),
                 ptsHostTime: CMTime(value: Int64(200_000 + index), timescale: 600)
             )
-            if index == 0 { firstBuffer = audio.sampleBuffer }
+            if index == 0 {
+                firstBuffer = audio.sampleBuffer
+            }
             await stage.routeAudio(audio)
         }
 
@@ -601,8 +603,12 @@ struct DualFileOutputStageFinishTests {
 
         let screen = try #require(results[.screen])
         let camera = try #require(results[.camera])
-        if case .completed = screen {} else { Issue.record("screen should be .completed") }
-        if case .failed = camera {} else { Issue.record("camera should be .failed") }
+        if case .completed = screen {} else {
+            Issue.record("screen should be .completed")
+        }
+        if case .failed = camera {} else {
+            Issue.record("camera should be .failed")
+        }
     }
 
     @Test("early-finalised pipeline keeps its captured result; other keeps recording (AC-12)")
@@ -657,7 +663,9 @@ private func eventually(
 -> Bool {
     let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
     while Date() < deadline {
-        if await condition() { return true }
+        if await condition() {
+            return true
+        }
         try? await Task.sleep(nanoseconds: 5_000_000) // 5 ms
     }
     return await condition()

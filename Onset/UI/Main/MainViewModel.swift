@@ -389,7 +389,11 @@ final class MainViewModel {
     /// The `SessionHandle` for the live camera preview, or `nil` for placeholder.
     /// Get-only bridge over `previewState`; uses `if case` (the enum is not `Equatable`).
     var previewHandle: SessionHandle? {
-        if case let .live(handle) = self.previewState { handle } else { nil }
+        if case let .live(handle) = self.previewState {
+            handle
+        } else {
+            nil
+        }
     }
 
     /// True when the last camera preview startup attempt failed terminally (no suitable format
@@ -397,7 +401,11 @@ final class MainViewModel {
     /// is shown instead.
     /// Get-only bridge over `previewState`; uses `if case` (the enum is not `Equatable`).
     var previewFailed: Bool {
-        if case .failed = self.previewState { true } else { false }
+        if case .failed = self.previewState {
+            true
+        } else {
+            false
+        }
     }
 
     /// True while the preview is taking longer than the soft-connect threshold (#255) but is
@@ -405,7 +413,11 @@ final class MainViewModel {
     /// (both otherwise collapse to `previewHandle == nil && !previewFailed`).
     /// Get-only bridge over `previewState`; uses `if case` (the enum is not `Equatable`).
     var previewIsConnectingSlow: Bool {
-        if case .connectingSlow = self.previewState { true } else { false }
+        if case .connectingSlow = self.previewState {
+            true
+        } else {
+            false
+        }
     }
 
     /// Soft-connect timeout for the preview watchdog (#255): Continuity (iPhone) cameras get a

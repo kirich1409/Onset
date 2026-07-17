@@ -64,11 +64,15 @@ struct MainViewModelPreviewTimeoutTests {
             await withTaskCancellationHandler {
                 await withCheckedContinuation { continuation in
                     let resumeNow = self.lock.withLock { () -> Bool in
-                        if self.releasedIndices.contains(index) { return true }
+                        if self.releasedIndices.contains(index) {
+                            return true
+                        }
                         self.continuations[index] = continuation
                         return false
                     }
-                    if resumeNow { continuation.resume() }
+                    if resumeNow {
+                        continuation.resume()
+                    }
                 }
             } onCancel: {
                 self.release(callIndex: index)
@@ -143,7 +147,9 @@ struct MainViewModelPreviewTimeoutTests {
     private static func eventuallyMain(timeoutMs: Int = 4000, _ condition: () -> Bool) async -> Bool {
         let deadline = ContinuousClock.now + .milliseconds(timeoutMs)
         while ContinuousClock.now < deadline {
-            if condition() { return true }
+            if condition() {
+                return true
+            }
             try? await Task.sleep(for: .milliseconds(2))
         }
         return condition()

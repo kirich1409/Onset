@@ -248,7 +248,9 @@ struct ScreenSourceLiveTests {
         var collected: [VideoFrame] = []
         for await frame in source.frames {
             collected.append(frame)
-            if collected.count >= targetCount { break }
+            if collected.count >= targetCount {
+                break
+            }
         }
 
         let captureEnd = CMClockGetTime(CMClockGetHostTimeClock())

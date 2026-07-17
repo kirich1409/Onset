@@ -704,7 +704,11 @@ struct VTServiceRateBenchTests {
                 var screen: LaneMetrics?
                 var cam: LaneMetrics?
                 for try await (tag, laneMetrics) in group {
-                    if tag == "screen" { screen = laneMetrics } else { cam = laneMetrics }
+                    if tag == "screen" {
+                        screen = laneMetrics
+                    } else {
+                        cam = laneMetrics
+                    }
                 }
                 guard let screen, let cam else {
                     preconditionFailure("TaskGroup missing results")
@@ -1164,8 +1168,12 @@ struct VTServiceRateBenchTests {
             for entry in entries {
                 guard let logEntry = entry as? OSLogEntryLog else { continue }
                 let msg = logEntry.composedMessage
-                if msg.contains("frameDropped") { dropped += 1 }
-                if msg.contains("failed") { failed += 1 }
+                if msg.contains("frameDropped") {
+                    dropped += 1
+                }
+                if msg.contains("failed") {
+                    failed += 1
+                }
             }
             return (dropped, failed)
         } catch {

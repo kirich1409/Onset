@@ -91,7 +91,9 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
     func start(permissions: EffectivePermissions) async throws {
         self.startCalled = true
         self.startCount += 1
-        if let startError { throw startError }
+        if let startError {
+            throw startError
+        }
         // When gateStartEnabled, suspend here until releaseStart() is called. This lets a test
         // call coordinator.stop() while start() is blocked — making activationTask still nil at
         // that point — to exercise the Fix 2 (b) race window.
@@ -288,7 +290,9 @@ private final class Counter: @unchecked Sendable {
 private func eventuallyMain(timeoutMs: Int = 8000, _ condition: () -> Bool) async -> Bool {
     let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
     while Date() < deadline {
-        if condition() { return true }
+        if condition() {
+            return true
+        }
         try? await Task.sleep(nanoseconds: 5_000_000) // 5 ms
     }
     return condition()
@@ -705,7 +709,9 @@ struct RecordingCoordinatorTests {
         do {
             try await coordinator.start(CoordinatorFixtures.request())
         } catch let error as RecordingError {
-            if case .noVideoSource = error { threw = true }
+            if case .noVideoSource = error {
+                threw = true
+            }
         }
 
         #expect(threw, "start() must rethrow the RecordingError for the UI to surface (AC-6/AC-11)")
@@ -1146,7 +1152,9 @@ struct RecordingCoordinatorConsentOrderingTests {
         do {
             try await startTask.value
         } catch let error as RecordingError {
-            if case .captureDidNotActivate = error { threwCaptureDidNotActivate = true }
+            if case .captureDidNotActivate = error {
+                threwCaptureDidNotActivate = true
+            }
         }
 
         #expect(
@@ -1179,7 +1187,9 @@ struct RecordingCoordinatorConsentOrderingTests {
         do {
             try await coordinator.start(CoordinatorFixtures.request())
         } catch let error as RecordingError {
-            if case .captureDidNotActivate = error { threwCaptureDidNotActivate = true }
+            if case .captureDidNotActivate = error {
+                threwCaptureDidNotActivate = true
+            }
         }
 
         #expect(threwCaptureDidNotActivate, "start() must throw .captureDidNotActivate on activation timeout")

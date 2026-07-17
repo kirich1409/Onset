@@ -39,7 +39,9 @@ nonisolated private struct DurationAccumulator {
     /// Records one duration observation.
     mutating func record(durationMs: Double) {
         self.sumMs += durationMs
-        if durationMs > self.maxMs { self.maxMs = durationMs }
+        if durationMs > self.maxMs {
+            self.maxMs = durationMs
+        }
         self.samples += 1
     }
 }
@@ -237,7 +239,9 @@ nonisolated struct StageRateAggregator {
     ///
     /// - Parameter count: The value returned by `pendingFrameCount()`.
     mutating func recordPendingValue(_ count: Int) {
-        if count > self.pendingMax { self.pendingMax = count }
+        if count > self.pendingMax {
+            self.pendingMax = count
+        }
     }
 
     /// Records the wall-clock duration of the full `ingest(_:)` call.
