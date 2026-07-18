@@ -173,12 +173,22 @@ import SwiftUI
 
     // swiftlint:enable no_magic_numbers
 
-    #Preview("No permissions — empty state") {
+    #Preview("No permissions — screen denied, initial") {
         let model = makePreviewModel(
             screen: .notDetermined,
             camera: .notDetermined,
             microphone: .notDetermined
         )
+        return MainView(model: model) {}
+    }
+
+    #Preview("No permissions — screen denied, awaiting settings (#277)") {
+        let model = makePreviewModel(
+            screen: .notDetermined,
+            camera: .notDetermined,
+            microphone: .notDetermined
+        )
+        model.openScreenRecordingSettings()
         return MainView(model: model) {}
     }
 

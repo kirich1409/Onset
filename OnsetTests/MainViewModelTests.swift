@@ -282,6 +282,100 @@ struct MainViewModelTests {
         }
     }
 
+    // MARK: - #277: in-window screen-grant action available from the no-permissions state
+
+    @Test("Screen denied → in-window grant action available, not only return-to-onboarding (#277)")
+    func screenDenied_inWindowGrantActionAvailable() {
+        let (sut, perms) = self.makeSUT(
+            screen: .notDetermined,
+            camera: .notDetermined,
+            microphone: .notDetermined,
+            defaults: InMemoryUserDefaults()
+        )
+
+        // The dead-end contract this test guards: screen denied must expose a working
+        // in-window grant seam (request + open Settings + awaiting), mirroring
+        // OnboardingViewModel.openScreenRecordingSettings() — not just the return-to-onboarding
+        // escape hatch that used to be the only action.
+        #expect(sut.showNoPermissionsState)
+        #expect(!sut.isAwaitingScreen)
+
+        sut.openScreenRecordingSettings()
+
+        #expect(perms.requestScreenRecordingCallCount == 1)
+        #expect(perms.openScreenRecordingSettingsCallCount == 1)
+        #expect(sut.isAwaitingScreen)
+    }
+
+    @Test("checkScreenStatusNow() from the no-permissions state delegates to PermissionsService (#277)")
+    func noPermissionsState_checkScreenStatusNow_delegates() {
+        let (sut, perms) = self.makeSUT(
+            screen: .notDetermined,
+            camera: .notDetermined,
+            microphone: .notDetermined,
+            defaults: InMemoryUserDefaults()
+        )
+        #expect(sut.showNoPermissionsState)
+
+        sut.checkScreenStatusNow()
+
+        #expect(perms.checkScreenStatusNowCallCount == 1)
+    }
+
+    @Test("startScreenPolling() from the no-permissions state delegates to PermissionsService (#277)")
+    func noPermissionsState_startScreenPolling_delegates() {
+        let (sut, perms) = self.makeSUT(
+            screen: .notDetermined,
+            camera: .notDetermined,
+            microphone: .notDetermined,
+            defaults: InMemoryUserDefaults()
+        )
+        #expect(sut.showNoPermissionsState)
+
+        let task = sut.startScreenPolling()
+        task.cancel()
+
+        #expect(perms.startScreenPollingCallCount == 1)
+    }
+
+    @Test("Screen grant while awaiting → showNoPermissionsState resolves false, reaching a recordable state (#277)")
+    func noPermissionsState_screenGranted_leavesEmptyState() {
+        let (sut, perms) = self.makeSUT(
+            screen: .notDetermined,
+            camera: .notDetermined,
+            microphone: .notDetermined,
+            defaults: InMemoryUserDefaults()
+        )
+        #expect(sut.showNoPermissionsState)
+
+        sut.openScreenRecordingSettings()
+        // Simulates the OS-level grant that PermissionsService's real polling would observe —
+        // exercising the second half of the #277 contract: the in-window action must actually
+        // reach a recordable state, not just flip the awaiting flag (L2, no hardware).
+        perms.screenStatus = PermissionStatus.authorized
+
+        #expect(!sut.showNoPermissionsState)
+    }
+
+    @Test("Leaving the no-permissions state resets isAwaitingScreen (#277)")
+    func noPermissionsState_leave_resetsAwaitingScreen() {
+        let (sut, _) = self.makeSUT(
+            screen: .notDetermined,
+            camera: .notDetermined,
+            microphone: .notDetermined,
+            defaults: InMemoryUserDefaults()
+        )
+        sut.openScreenRecordingSettings()
+        #expect(sut.isAwaitingScreen)
+
+        // Regression for the stale-awaiting strand: opening Settings then leaving via the
+        // demoted "Вернуться к разрешениям" fallback without granting must not leave a later
+        // re-entry into this state showing a stuck spinner (MainViewModel is app-lifetime).
+        sut.leaveNoPermissionsState()
+
+        #expect(!sut.isAwaitingScreen)
+    }
+
     // MARK: - Screen denied state
 
     @Test("Screen not authorized → isScreenDenied true")
