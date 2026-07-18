@@ -242,6 +242,11 @@ final class RecordingCoordinator {
     @ObservationIgnored
     private let notifier: any RecordingStartNotifying
 
+    /// Prevents display/system idle sleep for the duration of a recording (#87). Tests inject a fake
+    /// to assert begin/end calls without touching the real `ProcessInfo` activity assertion.
+    @ObservationIgnored
+    private let sleepPreventer: any DisplaySleepPreventing
+
     /// Opens the recording window. Bound from the SwiftUI scene via `bindWindowActions` (env
     /// `openWindow` is not available in a plain class). Defaults to a no-op so unit tests need not
     /// wire it.
@@ -384,6 +389,7 @@ final class RecordingCoordinator {
                 )
             },
         notifier: any RecordingStartNotifying = LiveRecordingStartNotifier(),
+        sleepPreventer: any DisplaySleepPreventing = LiveDisplaySleepPreventer(),
         activationTimeoutSeconds: Double = 30,
         revealInFinder: @escaping ([URL]) -> Void = { urls in
             // Open the session folder itself in Finder (AC-9 #225): `activateFileViewerSelecting`
@@ -400,6 +406,7 @@ final class RecordingCoordinator {
         self.makeBackendStore = makeBackendStore
         self.sessionFactory = sessionFactory
         self.notifier = notifier
+        self.sleepPreventer = sleepPreventer
         self.activationTimeoutSeconds = activationTimeoutSeconds
         self.openRecordingWindow = {}
         self.dismissMainWindow = {}
@@ -603,6 +610,9 @@ final class RecordingCoordinator {
         // Start notifier fires below to confirm the recording has begun.
         self.dismissMainWindow()
         self.notifier.notifyRecordingStarted()
+        // Keep the display/system awake for the whole recording (#87) — released in the single
+        // stop-teardown path below.
+        self.sleepPreventer.beginPreventingSleep()
     }
 
     /// Awaits the first element from `session.captureActiveStream` with a bounded timeout.
@@ -777,6 +787,9 @@ final class RecordingCoordinator {
         self.lastWriteError = result.writeFailureReason
         self.session = nil
         self.startedAt = nil
+        // End the sleep-prevention hold started in activateRecording() — the sole release point,
+        // covering both a user-initiated stop() and finalizeForTermination()'s teardown.
+        self.sleepPreventer.endPreventingSleep()
 
         // Transient finished phase, then return to the origin (spec lifecycle).
         self.phase = .finished

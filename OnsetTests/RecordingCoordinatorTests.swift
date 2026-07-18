@@ -337,6 +337,63 @@ struct RecordingCoordinatorTests {
         await coordinator.stop()
     }
 
+    @Test("start → begins display-sleep prevention; stop → ends it (#87)")
+    func start_beginsSleepPrevention_stop_endsIt() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let sleepPreventer = FakeDisplaySleepPreventer()
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            sleepPreventer: sleepPreventer
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request())
+
+        #expect(sleepPreventer.beginCallCount == 1, "sleep prevention must begin exactly once on activation")
+        #expect(sleepPreventer.isPreventingSleep, "sleep prevention must be held while recording")
+
+        await coordinator.stop()
+
+        #expect(sleepPreventer.endCallCount == 1, "sleep prevention must end exactly once on stop")
+        #expect(!sleepPreventer.isPreventingSleep, "sleep prevention must be released after stop")
+    }
+
+    @Test("double stop() is idempotent — sleep prevention ends exactly once (#87)")
+    func stop_sleepPreventionIdempotent() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let sleepPreventer = FakeDisplaySleepPreventer()
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            sleepPreventer: sleepPreventer
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        await coordinator.stop()
+        // A second stop() must be a no-op (phase is no longer .recording) — it must not double-release.
+        await coordinator.stop()
+
+        #expect(sleepPreventer.endCallCount == 1, "a repeated stop() must not double-release the sleep hold")
+    }
+
+    @Test("start failure never begins sleep prevention (#87)")
+    func start_failure_neverBeginsSleepPrevention() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        fake.startError = RecordingError.noVideoSource
+        let sleepPreventer = FakeDisplaySleepPreventer()
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            sleepPreventer: sleepPreventer
+        )
+
+        await #expect(throws: RecordingError.self) {
+            try await coordinator.start(CoordinatorFixtures.request())
+        }
+
+        #expect(sleepPreventer.beginCallCount == 0, "a failed start() must never acquire the sleep hold")
+    }
+
     @Test("checklist rows are nil when source absent — nil-gating preserved")
     func start_checklistNilGating() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
