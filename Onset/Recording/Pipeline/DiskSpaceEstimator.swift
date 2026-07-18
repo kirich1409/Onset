@@ -1,6 +1,8 @@
-// swiftlint:disable function_parameter_count
+// swiftlint:disable function_parameter_count file_length
 // `evaluate`'s 6 parameters are the plan's approved interface (T-3, tasks.md) — all
-// independently required; a wrapper struct would only relocate the field count.
+// independently required; a wrapper struct would only relocate the field count. file_length:
+// the AC-1/AC-3/AC-5/AC-6/AC-11 logic is one cohesive pure calculator (T-3) — splitting it
+// across files would scatter a single reviewable unit.
 
 import Foundation
 
@@ -176,6 +178,13 @@ nonisolated enum DiskSpaceEstimator {
         previousVerdict: DiskVerdict
     )
     -> DiskVerdict {
+        // Contract: when `sameVolume` is true, the caller MUST have read `outputFreeBytes` and
+        // `systemFreeBytes` from the same underlying volume (T-2) — this function relies on that
+        // to skip a separate same-volume branch (see type-level doc) and never re-derives it.
+        assert(
+            !sameVolume || outputFreeBytes == systemFreeBytes,
+            "sameVolume caller contract violated: outputFreeBytes and systemFreeBytes must match"
+        )
         let raw = Self.rawVerdict(
             outputFreeBytes: outputFreeBytes,
             systemFreeBytes: systemFreeBytes,
@@ -187,6 +196,7 @@ nonisolated enum DiskSpaceEstimator {
             previous: previousVerdict,
             outputFreeBytes: outputFreeBytes,
             systemFreeBytes: systemFreeBytes,
+            state: state,
             thresholds: thresholds
         )
     }
@@ -255,22 +265,25 @@ nonisolated enum DiskSpaceEstimator {
 
     // MARK: - Hysteresis (AC-11)
 
-    /// Applies byte-margin dead-band hysteresis to a de-escalation.
+    /// Applies dead-band hysteresis to a de-escalation.
     ///
     /// Escalating (or a same-severity reason change) applies immediately — hysteresis only
     /// guards de-escalation, so a real worsening is never delayed. A de-escalation is accepted
-    /// only once the metric behind `previous`'s reason has recovered past its warn threshold by
-    /// `hysteresisReleaseBytes` (byte reasons), damping an oscillation whose amplitude is
-    /// smaller than the release margin (AC-11). The ETA reason trusts `raw` directly — its own
-    /// EWMA smoothing already lags raw oscillation, so a separate margin is redundant. Time-based
-    /// debounce (`deescalationDebounceSeconds`) compounds this at the tick-owning layer
-    /// (`DiskSpaceMonitor`, T-4), which can require N consecutive recovered ticks; this pure
-    /// calculator supplies the per-tick byte-margin dead-band.
+    /// only once the metric behind `previous`'s reason has recovered past a release margin: byte
+    /// reasons recover past their warn threshold by `hysteresisReleaseBytes`; the ETA reason
+    /// recovers past the tripped threshold (warn or stop, whichever `previous` was) scaled by
+    /// `etaHysteresisReleaseFactor` (AC-11) — ETA has no fixed-unit "release seconds" equivalent,
+    /// so the margin is expressed as a fraction of the threshold itself. Time-based debounce
+    /// (`deescalationDebounceSeconds`) compounds this at the tick-owning layer
+    /// (`DiskSpaceMonitor`, T-4), which requires the recovered state to persist for that long;
+    /// this pure calculator supplies the per-tick dead-band both reason types need to stop
+    /// tick-to-tick flapping.
     nonisolated private static func applyHysteresis(
         raw: DiskVerdict,
         previous: DiskVerdict,
         outputFreeBytes: Int64?,
         systemFreeBytes: Int64?,
+        state: SmoothingState,
         thresholds: DiskThresholds
     )
     -> DiskVerdict {
@@ -289,9 +302,27 @@ nonisolated enum DiskSpaceEstimator {
             return recovered ? raw : previous
 
         case .outputEta:
-            return raw
+            // No confirmed recovery signal (no free-bytes read, or a non-positive EWMA speed
+            // means "no drain slope to measure an ETA from") — stay on `previous` rather than
+            // fabricate a recovery.
+            guard let outputFree = outputFreeBytes, state.ewmaSpeed > 0 else { return previous }
+            let etaSeconds = Double(outputFree) / state.ewmaSpeed
+            let trippedThresholdSeconds: Double = if case .critical = previous {
+                thresholds.outputStopEtaSeconds
+            } else {
+                thresholds.outputWarnEtaSeconds
+            }
+            let releaseEtaSeconds = trippedThresholdSeconds * Self.etaHysteresisReleaseFactor
+            let recovered = etaSeconds > releaseEtaSeconds
+            return recovered ? raw : previous
         }
     }
+
+    /// ETA must recover to this multiple of the threshold it tripped before a `.outputEta`
+    /// verdict is eligible to de-escalate (AC-11 release margin). 1.2 was chosen so the release
+    /// band (the top 20% above the threshold) comfortably exceeds the ETA's own tick-to-tick
+    /// noise, which comes from unsmoothed free-bytes over a smoothed speed.
+    nonisolated private static let etaHysteresisReleaseFactor = 1.2
 
     // MARK: - Idle estimate (AC-1)
 
@@ -306,7 +337,7 @@ nonisolated enum DiskSpaceEstimator {
     ///   - freeBytes: The output volume's free bytes, or `nil` on a failed read.
     ///   - plan: The resolved recording plan (screen + optional camera dimensions/fps).
     ///   - config: Supplies `averageBitrate` and `audioBitrate`.
-    /// - Returns: An `ETAEstimate` with `secondsRemaining` rounded to the nearest whole minute.
+    /// - Returns: An `ETAEstimate` with `secondsRemaining` floored to the whole minute (AC-1).
     nonisolated static func idleEstimate(
         freeBytes: Int64?,
         plan: ResolvedRecordingPlan,
@@ -334,10 +365,11 @@ nonisolated enum DiskSpaceEstimator {
         let bytesPerSecond = Double(totalBitsPerSecond) / bitsPerBytePerSecond
         let rawSecondsRemaining = Double(freeBytes) / bytesPerSecond
 
-        // Round to the nearest whole minute — the headline is always "≈ N мин", never a
-        // fractional/second-precision number that would overstate the estimate's accuracy.
+        // Floor to the whole minute (AC-1: "≈ N мин" never rounds up) — an estimate that rounds
+        // up would overstate the remaining runway, the opposite of the conservative bias the
+        // headline is meant to convey.
         let secondsPerMinute = 60.0
-        let wholeMinuteSeconds = (rawSecondsRemaining / secondsPerMinute).rounded() * secondsPerMinute
+        let wholeMinuteSeconds = (rawSecondsRemaining / secondsPerMinute).rounded(.down) * secondsPerMinute
         return ETAEstimate(secondsRemaining: wholeMinuteSeconds, isEstimateAvailable: true, slopeConfidence: 0)
     }
 }

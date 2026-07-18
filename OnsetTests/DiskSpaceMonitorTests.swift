@@ -1,3 +1,7 @@
+// swiftlint:disable file_length
+// The AC-2/3/4/11 transition, concurrency, and cadence suites (T-4) are one cohesive `DiskSpaceMonitor`
+// test file per the plan's file list — same exemption pattern as `DiskSpaceEstimatorTests`.
+
 import Foundation
 @testable import Onset
 import Testing
@@ -152,6 +156,75 @@ struct DiskSpaceMonitorTransitionTests {
         #expect(await eventually { !monitor.refreshInFlight })
         #expect(await provider.callCount == 2)
         #expect(monitor.currentVerdict == .warning(.outputFree))
+    }
+
+    @Test("A de-escalation is held for deescalationDebounceSeconds before it clears the verdict (AC-11)")
+    func deescalation_isHeldForDebounceWindow() async {
+        let thresholds = makeThresholds()
+        let provider = FakeDiskSpaceProvider()
+        let clock = FakeMonotonicClock()
+        let monitor = DiskSpaceMonitor(
+            provider: provider,
+            configuration: makeConfiguration(diskThresholds: thresholds),
+            clock: clock
+        )
+
+        // Escalate to .warning(.outputFree) — applied immediately, no debounce on the way up.
+        await provider.configure(outputFreeBytes: 900, systemFreeBytes: plentifulSystemFreeBytes)
+        monitor.tickRefresh(outputURL: sampleOutputURL)
+        #expect(await eventually { monitor.currentVerdict == .warning(.outputFree) })
+
+        // Output free bytes recover well past the byte-margin release band (1100), so
+        // `DiskSpaceEstimator.evaluate` itself would clear the warning — but the debounce
+        // (8s) hasn't elapsed yet, so the monitor must keep surfacing `.warning`.
+        clock.advance(by: thresholds.readEverySeconds)
+        await provider.setOutputFreeBytes(1150)
+        monitor.tickRefresh(outputURL: sampleOutputURL)
+        #expect(await eventually { !monitor.refreshInFlight })
+        #expect(monitor.currentVerdict == .warning(.outputFree))
+
+        // Still within the debounce window (4s elapsed of the required 8s) on a second
+        // recovered read — must still hold.
+        clock.advance(by: thresholds.readEverySeconds)
+        monitor.tickRefresh(outputURL: sampleOutputURL)
+        #expect(await eventually { !monitor.refreshInFlight })
+        #expect(monitor.currentVerdict == .warning(.outputFree))
+
+        // A third recovered read pushes the persisted-recovery duration to 8s — the debounce
+        // is satisfied and the verdict finally clears.
+        clock.advance(by: thresholds.readEverySeconds)
+        monitor.tickRefresh(outputURL: sampleOutputURL)
+        #expect(await eventually { monitor.currentVerdict == .none })
+    }
+
+    @Test("An escalation during a pending de-escalation is applied immediately, not delayed (AC-11)")
+    func escalationDuringPendingDeescalation_isImmediate() async {
+        let thresholds = makeThresholds()
+        let provider = FakeDiskSpaceProvider()
+        let clock = FakeMonotonicClock()
+        let monitor = DiskSpaceMonitor(
+            provider: provider,
+            configuration: makeConfiguration(diskThresholds: thresholds),
+            clock: clock
+        )
+
+        await provider.configure(outputFreeBytes: 900, systemFreeBytes: plentifulSystemFreeBytes)
+        monitor.tickRefresh(outputURL: sampleOutputURL)
+        #expect(await eventually { monitor.currentVerdict == .warning(.outputFree) })
+
+        // Recovers past the release margin — starts a pending de-escalation, not yet committed.
+        clock.advance(by: thresholds.readEverySeconds)
+        await provider.setOutputFreeBytes(1150)
+        monitor.tickRefresh(outputURL: sampleOutputURL)
+        #expect(await eventually { !monitor.refreshInFlight })
+        #expect(monitor.currentVerdict == .warning(.outputFree))
+
+        // Before the debounce window elapses, the reading worsens to critical — this must
+        // apply immediately, never waiting out the pending de-escalation's debounce clock.
+        clock.advance(by: thresholds.readEverySeconds)
+        await provider.setOutputFreeBytes(150)
+        monitor.tickRefresh(outputURL: sampleOutputURL)
+        #expect(await eventually { monitor.currentVerdict == .critical(.outputFree) })
     }
 }
 

@@ -29,6 +29,27 @@ struct SystemMonotonicClock: MonotonicClock {
     }
 }
 
+// MARK: - Verdict severity
+
+/// Ordinal value for `.none` severity — see `verdictSeverity(_:)`.
+nonisolated private let noneSeverity = 0
+/// Ordinal value for `.warning` severity — see `verdictSeverity(_:)`.
+nonisolated private let warningSeverity = 1
+/// Ordinal value for `.critical` severity — see `verdictSeverity(_:)`.
+nonisolated private let criticalSeverity = 2
+
+/// Ordinal severity of a verdict — `.none` < `.warning` < `.critical`. Local copy of
+/// `DiskSpaceEstimator`'s equivalent (file-private there) — used here to tell an escalation
+/// (apply immediately, AC-11) from a de-escalation (must clear the debounce below) at the
+/// tick-owning layer.
+nonisolated private func verdictSeverity(_ verdict: DiskVerdict) -> Int {
+    switch verdict {
+    case .none: noneSeverity
+    case .warning: warningSeverity
+    case .critical: criticalSeverity
+    }
+}
+
 // MARK: - IdlePreflightSnapshot
 
 /// Result of one idle pre-flight read (T-7): the "≈ N мин" headline (AC-1) plus the idle disk
@@ -85,10 +106,12 @@ final class DiskSpaceMonitor {
     /// from `currentVerdict`'s final value.
     private(set) var verdictAssignmentCount = 0
 
-    /// One-shot flag: whether a low-space warning has already been posted for the CURRENT
-    /// crossing (owned here so `reset()` can clear it for a new session; T-6 is expected to
-    /// consult/clear this alongside its own notifier one-shot bookkeeping).
-    private(set) var warningPosted = false
+    /// A de-escalation candidate awaiting `deescalationDebounceSeconds` of persistence (AC-11)
+    /// before it replaces `currentVerdict`. `nil` when no de-escalation is pending — either
+    /// nothing has improved yet, or the last candidate already committed or was superseded by a
+    /// worse reading. Tracks the clock time the candidate was FIRST observed, not the last tick,
+    /// so a candidate that keeps recurring (rather than a fresh one each tick) actually ages.
+    private(set) var pendingDeescalation: (verdict: DiskVerdict, since: Double)?
 
     /// Single-flight guard: a refresh is currently awaiting the provider. `private(set)` so tests
     /// can poll for the `defer`-cleared transition instead of sleeping a fixed duration.
@@ -180,8 +203,39 @@ final class DiskSpaceMonitor {
             previousVerdict: self.currentVerdict
         )
 
-        // Equatable-guard: only write (and let SwiftUI/observers react) when the verdict actually
-        // changed — a stable reading must not churn `currentVerdict` every `readEvery` tick.
+        self.applyDebounced(verdict, now: now)
+    }
+
+    /// Commits an escalation immediately; holds a de-escalation for
+    /// `deescalationDebounceSeconds` before committing it (AC-11) — the byte/ETA-margin
+    /// hysteresis in `DiskSpaceEstimator.evaluate` already damps small oscillations per tick,
+    /// this adds the temporal requirement that the improved reading actually persists.
+    private func applyDebounced(_ verdict: DiskVerdict, now: Double) {
+        guard verdictSeverity(verdict) < verdictSeverity(self.currentVerdict) else {
+            // Escalation, or no change — apply immediately and drop any pending de-escalation:
+            // a worsening reading means the metric hasn't actually recovered, so the candidate
+            // that was aging no longer applies (stability-first — never delay a worsening verdict).
+            self.pendingDeescalation = nil
+            self.setVerdict(verdict)
+            return
+        }
+
+        if let pending = self.pendingDeescalation, pending.verdict == verdict {
+            let debounce = self.configuration.diskThresholds.deescalationDebounceSeconds
+            if now - pending.since >= debounce {
+                self.pendingDeescalation = nil
+                self.setVerdict(verdict)
+            }
+            // else: still within the debounce window — `currentVerdict` stays as-is.
+        } else {
+            // A new (or first) de-escalation candidate — start its debounce clock.
+            self.pendingDeescalation = (verdict: verdict, since: now)
+        }
+    }
+
+    /// Equatable-guard: only write (and let SwiftUI/observers react) when the verdict actually
+    /// changed — a stable reading must not churn `currentVerdict` every `readEvery` tick.
+    private func setVerdict(_ verdict: DiskVerdict) {
         if verdict != self.currentVerdict {
             self.currentVerdict = verdict
             self.verdictAssignmentCount += 1
@@ -227,6 +281,6 @@ final class DiskSpaceMonitor {
         self.smoothingState = .initial
         self.lastReadAt = nil
         self.currentVerdict = .none
-        self.warningPosted = false
+        self.pendingDeescalation = nil
     }
 }

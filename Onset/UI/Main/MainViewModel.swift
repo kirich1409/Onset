@@ -598,9 +598,12 @@ final class MainViewModel {
         guard estimate.isEstimateAvailable, let secondsRemaining = estimate.secondsRemaining else {
             return "Оценка недоступна"
         }
+        // The estimator already floors `secondsRemaining` to a whole-minute multiple (AC-1) — just
+        // truncate to `Int` here rather than rounding again, which would occasionally add back a
+        // minute the estimator deliberately floored away.
         let secondsPerMinute = 60.0
         let displayCapMinutes = 60
-        let minutes = Int((secondsRemaining / secondsPerMinute).rounded())
+        let minutes = Int(secondsRemaining / secondsPerMinute)
         return minutes > displayCapMinutes ? "> 60 мин" : "≈ \(minutes) мин"
     }
 

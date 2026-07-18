@@ -319,6 +319,20 @@ private func eventuallyMain(timeoutMs: Int = 8000, _ condition: () -> Bool) asyn
     return condition()
 }
 
+/// Async-condition counterpart to `eventuallyMain`, for polling actor-isolated state (e.g. an
+/// actor's call counter) that a synchronous closure can't read.
+@MainActor
+private func eventuallyAsync(timeoutMs: Int = 4000, _ condition: () async -> Bool) async -> Bool {
+    let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
+    while Date() < deadline {
+        if await condition() {
+            return true
+        }
+        try? await Task.sleep(nanoseconds: 5_000_000) // 5 ms
+    }
+    return await condition()
+}
+
 // MARK: - Tests
 
 @Suite("RecordingCoordinator — lifecycle (#12 Phase 0)")
@@ -1874,12 +1888,43 @@ struct RecordingCoordinatorDiskSpaceTests {
         let warned = await eventuallyMain { coordinator.diskWarning == .outputFree }
         #expect(warned, "prerequisite: a below-outputWarnBytes reading must raise the warning")
 
-        // Recover well past outputWarnBytes + hysteresisReleaseBytes, and advance the fake clock
-        // past readEverySeconds so the monitor's throttle allows a fresh read on the next tick.
-        await diskProvider.configure(outputFreeBytes: Self.safeFreeBytes, systemFreeBytes: Self.safeFreeBytes)
-        clock.advance(by: RecordingConfiguration.mvpDefault.diskThresholds.readEverySeconds + 1)
+        let thresholds = RecordingConfiguration.mvpDefault.diskThresholds
 
-        let cleared = await eventuallyMain(timeoutMs: 8000) { coordinator.diskWarning == nil }
+        // The tick loop itself fires at a real (unfaked) ~1 Hz cadence (T-6) — only the monitor's
+        // `readEvery` throttle and de-escalation debounce are driven off the injected clock. So a
+        // real tick must actually land and consume the throttled-open window before advancing the
+        // clock again; gate on the provider's `callCount` (bumped only on an APPLIED read, never a
+        // throttled-away tick) instead of guessing a fixed sleep.
+        let callsBeforeRecovery = await diskProvider.callCount
+
+        // Recover well past outputWarnBytes + hysteresisReleaseBytes. Advance the fake clock past
+        // readEverySeconds so the monitor's throttle allows the NEXT real tick to read the
+        // recovered value — this only registers a de-escalation CANDIDATE (AC-11), it must not
+        // commit yet (its `since` equals the tick's `now`, so `now - since == 0 < debounce`).
+        await diskProvider.configure(outputFreeBytes: Self.safeFreeBytes, systemFreeBytes: Self.safeFreeBytes)
+        clock.advance(by: thresholds.readEverySeconds + 1)
+
+        let sawCandidateRead = await eventuallyAsync { await diskProvider.callCount > callsBeforeRecovery }
+        #expect(
+            sawCandidateRead,
+            "prerequisite: a real tick must apply the recovered reading before the debounce is exercised"
+        )
+
+        #expect(
+            coordinator.diskWarning == .outputFree,
+            "AC-11: a recovered reading must NOT clear the warning before the debounce window elapses"
+        )
+
+        // Advance the fake clock past `deescalationDebounceSeconds` from the candidate's `since`
+        // (the `now` observed by the read above) — the next real tick's read now both clears the
+        // `readEvery` throttle and satisfies the debounce, committing the de-escalation.
+        let callsBeforeCommit = await diskProvider.callCount
+        clock.advance(by: thresholds.deescalationDebounceSeconds + 1)
+
+        let sawCommitRead = await eventuallyAsync { await diskProvider.callCount > callsBeforeCommit }
+        #expect(sawCommitRead, "prerequisite: a real tick must apply the second reading for the debounce to elapse")
+
+        let cleared = await eventuallyMain(timeoutMs: 4000) { coordinator.diskWarning == nil }
         #expect(cleared, "AC-11: warning must clear once free space recovers past the release margin")
 
         await coordinator.stop()

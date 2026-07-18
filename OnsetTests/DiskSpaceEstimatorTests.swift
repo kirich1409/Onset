@@ -251,6 +251,54 @@ struct DiskSpaceEstimatorHysteresisTests {
         )
         #expect(verdict == .critical(.outputFree))
     }
+
+    @Test("Oscillating ETA around the warn threshold does not flip the verdict every tick")
+    func oscillatingEta_doesNotFlipEveryTick() {
+        let thresholds = makeThresholds(
+            systemWarnBytes: 10,
+            outputWarnBytes: 10,
+            outputStopBytes: 5,
+            outputWarnEtaSeconds: 100,
+            outputStopEtaSeconds: 10,
+            warmupSeconds: 16
+        )
+        // A warmed-up (sampleCount/elapsedTotal past warmup), fully-confident (zero variance)
+        // 10 bytes/sec drain — chosen directly rather than fed sample-by-sample so the ETA math
+        // below (`freeBytes / ewmaSpeed`) is exact and easy to hand-verify.
+        let state = SmoothingState(
+            sampleCount: 5,
+            elapsedTotal: 20,
+            lastFreeBytes: 2000,
+            ewmaSpeed: 10,
+            deltaMean: 10,
+            deltaVariance: 0
+        )
+        func tick(_ outputFreeBytes: Int64, previousVerdict: DiskVerdict) -> DiskVerdict {
+            DiskSpaceEstimator.evaluate(
+                outputFreeBytes: outputFreeBytes,
+                systemFreeBytes: nil,
+                sameVolume: false,
+                state: state,
+                thresholds: thresholds,
+                previousVerdict: previousVerdict
+            )
+        }
+
+        // Tick 1: ETA (115s) recovers past the raw warn threshold (100s) but NOT past the
+        // release margin (`etaHysteresisReleaseFactor` 1.2 × 100 = 120s) — hysteresis holds the
+        // prior warning.
+        let tick1 = tick(1150, previousVerdict: .warning(.outputEta))
+        #expect(tick1 == .warning(.outputEta))
+
+        // Tick 2: ETA (95s) dips back under the raw warn threshold — same severity, no
+        // hysteresis needed.
+        let tick2 = tick(950, previousVerdict: tick1)
+        #expect(tick2 == .warning(.outputEta))
+
+        // Tick 3: ETA (125s) recovers past the release margin (125 > 120) — now the warning clears.
+        let tick3 = tick(1250, previousVerdict: tick2)
+        #expect(tick3 == .none)
+    }
 }
 
 // MARK: - AC-6: same-volume strictest verdict, external output not held to the OS floor
@@ -372,13 +420,27 @@ struct DiskSpaceEstimatorIdleEstimateTests {
         cameraPlan: nil
     )
 
-    @Test("Returns a whole-minute value, rounded to the nearest minute")
-    func returnsWholeMinuteValue() {
+    @Test("Returns a whole-minute value, floored down (never rounded up, AC-1)")
+    func returnsWholeMinuteValue_flooredDown() {
         // 1920×1080@30 = 12_000_000 bit/s + 128_000 audio = 12_128_000 bit/s = 1_516_000 bytes/s.
-        // 151_600_000 bytes / 1_516_000 bytes/s = 100s = 1m40s → rounds to 2 minutes (120s).
+        // 151_600_000 bytes / 1_516_000 bytes/s = 100s = 1m40s → FLOORS down to 1 minute (60s);
+        // rounding to the nearest minute (120s) would overstate the remaining runway.
         let estimate = DiskSpaceEstimator.idleEstimate(freeBytes: 151_600_000, plan: self.plan, config: self.config)
         #expect(estimate.isEstimateAvailable)
-        #expect(estimate.secondsRemaining == 120)
+        #expect(estimate.secondsRemaining == 60)
+    }
+
+    @Test("A reading just under the next whole minute still floors down, not up")
+    func almostNextWholeMinute_floorsDown() {
+        // 1_516_000 bytes/s × 119s (1m59s) worth of free space — one second short of 2 minutes,
+        // so this must floor to 1 minute (60s), not round up to 2 (120s).
+        let estimate = DiskSpaceEstimator.idleEstimate(
+            freeBytes: 1_516_000 * 119,
+            plan: self.plan,
+            config: self.config
+        )
+        #expect(estimate.isEstimateAvailable)
+        #expect(estimate.secondsRemaining == 60)
     }
 
     @Test("A very large free-space reading is still available, past the 60-minute mark")
