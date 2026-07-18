@@ -963,6 +963,17 @@ final class RecordingCoordinator {
             coordinatorLogger.info("Hotkey ⌘⌥⌃R — no intent installed, opening main window")
         }
     }
+
+    // MARK: - Dock reopen (#272)
+
+    /// Handles a Dock-icon reopen (macOS `applicationShouldHandleReopen`). While recording,
+    /// focus the recording window and suppress SwiftUI's default main-window reopen; otherwise
+    /// let the default proceed. Returns whether the system should perform its default handling.
+    func handleReopen() -> Bool {
+        guard self.phase == .recording else { return true }
+        self.openRecordingWindow()
+        return false
+    }
 }
 
 // MARK: - TerminationGate

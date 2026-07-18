@@ -44,8 +44,8 @@ enum WindowDefaults {
 struct OnsetApp: App {
     // MARK: - App delegate
 
-    /// Handles graceful termination (#243) — see `AppDelegate`. Wired to the coordinator from
-    /// `WindowActionsBridge.onAppear`, mirroring how the bridge wires the hotkey monitor.
+    /// Handles graceful termination (#243) and Dock-icon reopen while recording (#272) — see
+    /// `AppDelegate`.
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     // MARK: - Composition root
@@ -202,10 +202,12 @@ private struct WindowActionsBridge: View {
                 )
                 self.coordinator.enterMain()
 
-                // Wire the coordinator into the app delegate so applicationShouldTerminate(_:)
-                // can finalize an active recording on Cmd-Q / Dock Quit (#243). A plain
-                // NSApplicationDelegate has no SwiftUI environment access of its own.
+                // Wire the app delegate (#243 termination finalize, #272 dock-icon reopen) — a
+                // plain NSApplicationDelegate has no SwiftUI environment access of its own.
                 self.appDelegate.coordinator = self.coordinator
+                self.appDelegate.onReopen = { [coordinator = self.coordinator] in
+                    coordinator.handleReopen()
+                }
 
                 // Register the system-wide hotkey after the coordinator is fully wired
                 // (#67 / AC-9). The monitor's register() is idempotent; onAppear may fire
@@ -226,25 +228,18 @@ private struct WindowActionsBridge: View {
 
 // MARK: - AppDelegate
 
-/// Finalizes an active recording on graceful app termination (#243).
-///
-/// `NSApplication` calls `applicationShouldTerminate(_:)` synchronously on Cmd-Q, Dock Quit, and
-/// `NSApp.terminate(_:)`. Without this delegate, quitting mid-recording falls straight through to
-/// `movieFragmentInterval` fragment-recovery — the output files are only *recoverable*, never
-/// cleanly finalized. `coordinator.finalizeForTermination()` routes through the normal `stop()`
-/// funnel instead (bounded — see its doc comment), so termination gets the same finalize/reveal
-/// teardown as the button/hotkey/menu stop paths.
-///
-/// `coordinator` is wired in from `WindowActionsBridge.onAppear` — a plain `NSObject` delegate has
-/// no SwiftUI environment access of its own, so it cannot read the composition-root `@State`
-/// directly (mirrors how the bridge wires `GlobalHotKeyMonitor`).
+/// AppKit lifecycle callbacks not exposed by SwiftUI's `App` protocol: finalizes an active
+/// recording on termination (#243), and handles dock-icon reopen while recording (#272).
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    /// Set once at startup by `WindowActionsBridge`. `nil` only in the brief window before that
-    /// wiring runs, in which case termination proceeds immediately — no recording can have
-    /// started yet, so there is nothing to finalize.
+    /// Set once at startup by `WindowActionsBridge`; `nil` only before that wiring runs.
     var coordinator: RecordingCoordinator?
 
+    /// Installed by `WindowActionsBridge.onAppear`; `nil` under XCTest, where the default applies.
+    var onReopen: (@MainActor () -> Bool)?
+
+    /// Called on Cmd-Q / Dock Quit / `NSApp.terminate(_:)`; routes an active recording through
+    /// `finalizeForTermination()` so files land cleanly, not merely *recoverable*.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let coordinator, coordinator.isRecordingActive else { return .terminateNow }
         appLogger.notice("Termination requested during an active recording — finalizing before quit")
@@ -253,6 +248,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
+    }
+
+    /// Forwards Dock-icon reopen to `onReopen`, defaulting to reopening the main window when unset.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        self.onReopen?() ?? true
     }
 }
 
