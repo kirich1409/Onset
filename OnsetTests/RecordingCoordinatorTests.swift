@@ -16,6 +16,7 @@
 // (trailing_closure), matching the existing RecordingSessionTests convention.
 // file_length/type_body_length: covers full coordinator lifecycle incl. write-failure paths.
 
+import AVFoundation
 import Foundation
 @testable import Onset
 import Testing
@@ -236,6 +237,26 @@ private enum CoordinatorFixtures {
             .screenOnly(.failed(
                 url: URL(fileURLWithPath: "/tmp/onset-coordinator-screen.mp4"),
                 error: FakeWriteError()
+            )),
+            DropHealthSnapshot(
+                counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
+                sessionEverDegraded: false,
+                dominantCause: .notDegraded
+            )
+        )
+    }
+
+    /// A result whose screen writer ended in `.failed` with `AVError.Code.diskFull` — the concrete
+    /// disk-full error `AVAssetWriter` surfaces mid-recording (AC-7 last-resort regression, T-6).
+    /// Also stands in for an external output-volume unplug: the coordinator's write-error handling
+    /// (`RecordingResult.hasWriteFailure`/`writeFailureReason`) does not branch on the underlying
+    /// error type, so proving THIS error reaches `lastWriteError` proves every writer-level fault
+    /// (unplug included) degrades to the same channel, never a disk-space auto-stop.
+    static func diskFullWriteResult() -> RecordingResult {
+        .completed(
+            .screenOnly(.failed(
+                url: URL(fileURLWithPath: "/tmp/onset-coordinator-screen.mp4"),
+                error: AVError(.diskFull)
             )),
             DropHealthSnapshot(
                 counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
@@ -1777,6 +1798,241 @@ struct RecordingCoordinatorTerminationTests {
             elapsed < timeout + .milliseconds(500),
             "finalize must return ~within the timeout, not hang on the stuck teardown"
         )
+    }
+}
+
+// MARK: - Disk-space monitoring integration (#88, T-6)
+
+/// Drives `FakeDiskSpaceProvider` + `FakeMonotonicClock` + `FakeDiskSpaceWarningNotifier` through
+/// the coordinator's tick-loop integration: warning continues recording and notifies once per
+/// crossing, a critical byte-floor reading auto-stops gracefully through the single idempotent
+/// `stop()` funnel and fires `notifyAutoStopped`, a slow in-flight refresh racing a manual stop
+/// does not post a spurious warning, and a new session clears the prior session's disk-stop state.
+///
+/// Byte-floor thresholds from `RecordingConfiguration.mvpDefault.diskThresholds` are checked
+/// unconditionally by `DiskSpaceEstimator.evaluate` (no warmup/slope-confidence gating needed),
+/// so a single scripted `outputFreeBytes` reading below/above `outputStopBytes`/`outputWarnBytes`
+/// deterministically produces `.critical(.outputFree)`/`.warning(.outputFree)` on the very first
+/// tick — no need to drive multiple EWMA samples.
+@Suite("RecordingCoordinator — disk-space monitoring (#88, T-6)")
+@MainActor
+struct RecordingCoordinatorDiskSpaceTests {
+    /// Below `outputStopBytes` (2 GB default) — byte-floor critical, primary signal.
+    private static let criticalOutputFreeBytes: Int64 = 1_000_000_000
+    /// Between `outputStopBytes` (2 GB) and `outputWarnBytes` (10 GB default) — warning.
+    private static let warningOutputFreeBytes: Int64 = 5_000_000_000
+    /// Comfortably above `outputWarnBytes` + hysteresis release margin — recovered/safe reading.
+    private static let safeFreeBytes: Int64 = 50_000_000_000
+
+    @Test("warning verdict — recording continues, warning posted once, correct reason surfaced")
+    func warningVerdict_continuesAndNotifiesOnce() async throws {
+        let diskProvider = FakeDiskSpaceProvider()
+        await diskProvider.configure(
+            outputFreeBytes: Self.warningOutputFreeBytes,
+            systemFreeBytes: Self.safeFreeBytes
+        )
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let diskNotifier = FakeDiskSpaceWarningNotifier()
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            diskSpaceProvider: diskProvider,
+            diskWarningNotifier: diskNotifier
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request())
+
+        let warned = await eventuallyMain { coordinator.diskWarning == .outputFree }
+        #expect(warned, "a below-outputWarnBytes reading must surface .outputFree on diskWarning")
+        #expect(coordinator.phase == .recording, "AC-3: a warning verdict must NOT stop recording")
+        #expect(!fake.stopCalled, "warning must never trigger a stop")
+        #expect(diskNotifier.warningReasons == [.outputFree], "warning must be posted exactly once per crossing")
+
+        await coordinator.stop()
+    }
+
+    @Test("AC-11: disk warning de-escalates once free space recovers past the release margin")
+    func warningDeescalates_whenSpaceRecovers() async throws {
+        let diskProvider = FakeDiskSpaceProvider()
+        await diskProvider.configure(
+            outputFreeBytes: Self.warningOutputFreeBytes,
+            systemFreeBytes: Self.safeFreeBytes
+        )
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let diskNotifier = FakeDiskSpaceWarningNotifier()
+        let clock = FakeMonotonicClock()
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            diskSpaceProvider: diskProvider,
+            diskWarningNotifier: diskNotifier,
+            diskSpaceClock: clock
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request())
+
+        let warned = await eventuallyMain { coordinator.diskWarning == .outputFree }
+        #expect(warned, "prerequisite: a below-outputWarnBytes reading must raise the warning")
+
+        // Recover well past outputWarnBytes + hysteresisReleaseBytes, and advance the fake clock
+        // past readEverySeconds so the monitor's throttle allows a fresh read on the next tick.
+        await diskProvider.configure(outputFreeBytes: Self.safeFreeBytes, systemFreeBytes: Self.safeFreeBytes)
+        clock.advance(by: RecordingConfiguration.mvpDefault.diskThresholds.readEverySeconds + 1)
+
+        let cleared = await eventuallyMain(timeoutMs: 8000) { coordinator.diskWarning == nil }
+        #expect(cleared, "AC-11: warning must clear once free space recovers past the release margin")
+
+        await coordinator.stop()
+    }
+
+    @Test("critical verdict — auto-stops gracefully via the single idempotent stop() funnel, notifies AC-9")
+    func criticalVerdict_autoStopsGracefullyAndNotifies() async throws {
+        let diskProvider = FakeDiskSpaceProvider()
+        await diskProvider.configure(
+            outputFreeBytes: Self.criticalOutputFreeBytes,
+            systemFreeBytes: Self.safeFreeBytes
+        )
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let diskNotifier = FakeDiskSpaceWarningNotifier()
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            diskSpaceProvider: diskProvider,
+            diskWarningNotifier: diskNotifier
+        )
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request(origin: .main))
+        #expect(coordinator.phase == .recording, "prerequisite: must be recording")
+
+        let stopped = await eventuallyMain(timeoutMs: 8000) { coordinator.phase == .main }
+        #expect(stopped, "AC-4: a below-outputStopBytes reading must auto-stop the recording")
+        #expect(fake.stopCount == 1, "AC-8: the disk-critical stop must route through stop() exactly once")
+        #expect(coordinator.stoppedDueToLowSpace, "AC-9: the stop must be attributed to low disk space")
+        #expect(coordinator.lastResult != nil, "the session must finalize with a valid completed result")
+        #expect(
+            diskNotifier.autoStoppedCalls.count == 1,
+            "AC-9: notifyAutoStopped must fire exactly once for the disk-critical stop"
+        )
+        #expect(diskNotifier.autoStoppedCalls.first?.reason == .outputFree)
+        #expect(
+            diskNotifier.autoStoppedCalls.first?.filesSaved.screenURL
+                == CoordinatorFixtures.result().screen?.url,
+            "AC-9: the notification must carry the actually-saved file URL(s)"
+        )
+        #expect(diskNotifier.warningReasons.isEmpty, "a critical-from-the-start reading skips the warning state")
+    }
+
+    @Test("slow refresh racing a manual stop — no spurious warning, single teardown")
+    func slowRefreshRacingManualStop_noSpuriousWarningSingleTeardown() async throws {
+        // A reading that WOULD be a warning if applied — proves the race is guarded, not that the
+        // provider happens to report a safe value.
+        let diskProvider = FakeDiskSpaceProvider()
+        await diskProvider.configure(
+            outputFreeBytes: Self.warningOutputFreeBytes,
+            systemFreeBytes: Self.safeFreeBytes,
+            delayNanoseconds: 500_000_000 // 500 ms — well past a manual stop below
+        )
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let diskNotifier = FakeDiskSpaceWarningNotifier()
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            diskSpaceProvider: diskProvider,
+            diskWarningNotifier: diskNotifier
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request())
+
+        // Wait until the tick has actually spawned the (slow, in-flight) provider read.
+        var callCount = await diskProvider.callCount
+        var attempts = 0
+        while callCount == 0, attempts < 200 {
+            try await Task.sleep(nanoseconds: 5_000_000)
+            callCount = await diskProvider.callCount
+            attempts += 1
+        }
+        #expect(callCount >= 1, "prerequisite: the tick must have spawned the slow refresh before we race it")
+
+        // Race a manual stop while the 500 ms provider read is still in flight.
+        await coordinator.stop()
+
+        #expect(fake.stopCount == 1, "the manual stop must run the teardown exactly once")
+        #expect(
+            diskNotifier.warningReasons.isEmpty,
+            "a refresh resolving after the tick loop is cancelled must not post"
+        )
+
+        // Let the delayed refresh actually resolve inside the monitor and re-confirm nothing leaked out.
+        try await Task.sleep(nanoseconds: 700_000_000)
+        #expect(
+            diskNotifier.warningReasons.isEmpty,
+            "the stale refresh must not surface a warning even after it resolves post-stop"
+        )
+    }
+
+    @Test("AC-7 last-resort: AVError.diskFull write failure finalizes via lastWriteError, not a disk-space auto-stop")
+    func diskFullWriteError_usesExistingWriteErrorChannel() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.diskFullWriteResult())
+        let diskNotifier = FakeDiskSpaceWarningNotifier()
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            diskWarningNotifier: diskNotifier
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        await coordinator.stop()
+
+        #expect(
+            coordinator.lastWriteError != nil,
+            "AVError.diskFull must surface via the existing write-error channel, not a raw abort"
+        )
+        #expect(!coordinator.stoppedDueToLowSpace, "a writer-level disk-full fault is NOT a disk-space auto-stop")
+        #expect(diskNotifier.autoStoppedCalls.isEmpty, "the disk-space notifier must not fire for a writer-level fault")
+        #expect(coordinator.lastResult != nil, "the session must still finalize gracefully with a result")
+    }
+
+    @Test("new session clears the prior session's disk-stop state (AC-1)")
+    func newSession_clearsPriorDiskStopState() async throws {
+        let diskProvider = FakeDiskSpaceProvider()
+        await diskProvider.configure(
+            outputFreeBytes: Self.criticalOutputFreeBytes,
+            systemFreeBytes: Self.safeFreeBytes
+        )
+        let fake1 = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let fake2 = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let callCounter = Counter()
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in
+                callCounter.increment()
+                return callCounter.value == 1 ? fake1 : fake2
+            },
+            diskSpaceProvider: diskProvider
+        )
+
+        // Session 1: critical-from-the-start reading auto-stops and sets stoppedDueToLowSpace.
+        try await coordinator.start(CoordinatorFixtures.request(origin: .main))
+        let stopped = await eventuallyMain(timeoutMs: 8000) { coordinator.phase != .recording }
+        #expect(stopped, "prerequisite: session 1 must auto-stop on the critical disk verdict")
+        #expect(coordinator.stoppedDueToLowSpace, "prerequisite: session 1 stop must be attributed to low disk space")
+
+        // Reconfigure to a safe reading so session 2 does not immediately re-trigger a critical stop.
+        await diskProvider.configure(outputFreeBytes: Self.safeFreeBytes, systemFreeBytes: Self.safeFreeBytes)
+
+        // Session 2: start() must clear the prior session's disk-stop state synchronously.
+        try await coordinator.start(CoordinatorFixtures.request(origin: .main))
+
+        #expect(!coordinator.stoppedDueToLowSpace, "start() must clear stoppedDueToLowSpace for a new session (AC-1)")
+        #expect(coordinator.diskWarning == nil, "start() must clear diskWarning for a new session (AC-1)")
+
+        await coordinator.stop()
     }
 }
 

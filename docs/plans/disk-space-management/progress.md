@@ -8,11 +8,11 @@ Spec: `docs/specs/2026-07-18-disk-space-management.md` · Plan: `plan.md` · Tas
 - [x] T-3 — DiskSpaceEstimator (pure calculator) + L2 tests [TDD]
 - [x] T-4 — DiskSpaceMonitor collaborator + L2 tests
 - [x] T-5 — DiskSpaceWarningNotifying seam (warning + auto-stop cause)
-- [ ] T-6 — RecordingCoordinator integration + tests
+- [x] T-6 — RecordingCoordinator integration + tests
 - [ ] T-7 — Pre-flight idle estimate «≈N мин» (AC-1)
 - [ ] T-8 — MenuBarExtra badge reflects warning (AC-12a)
 - [ ] T-9 — Composition-root wiring (OnsetApp)
-- [ ] T-10 — docs/architecture.md update
+- [x] T-10 — docs/architecture.md update
 - [ ] T-11 — L5 calibration & acceptance (AC-10) [hardware-gated]
 
 ## Learnings
@@ -23,3 +23,5 @@ Spec: `docs/specs/2026-07-18-disk-space-management.md` · Plan: `plan.md` · Tas
 - Recurring memberwise-init arg-order bug (RecordingConfiguration:328 in T-1, DiskThresholds sites in T-3 tests) — both caught by the build, fixed. `DiskThresholds` has many fields; call sites must match declaration order.
 - Layer 2 gate: `xcodebuild test` → 975 tests in 176 suites PASSED (incl. new DiskSpaceEstimatorTests + LiveDiskSpaceProviderTests). L0+L2 green through T-5.
 - T-4: `MonotonicClock` seam (`SystemMonotonicClock` live + `FakeMonotonicClock` test) for deterministic readEvery/generation tests. FakeDiskSpaceProvider (actor) needed isolated `configure(...)`/`setOutputFreeBytes(_:)` setters — can't assign an actor's stored var from outside via await. Layer-3 gate: full `xcodebuild test` → 983/983 PASSED, no regressions.
+- T-6: integrated into existing tickTask (cached verdict read + non-awaited tickRefresh); critical -> `Task { await self.stop() }` (not inline); distinct `stoppedDueToLowSpace` (hasPendingAlert force-open untouched); AC-7 regression via `CoordinatorFixtures.diskFullWriteResult()` = `AVError(.diskFull)`; spurious-guard test `slowRefreshRacingManualStop_noSpuriousWarningSingleTeardown`. Gate: xcodebuild test 989/989 PASSED.
+- T-10 done early during the session-limit block (docs edit = main-session-allowed): new disk types added to architecture map (Pipeline/Config/Permissions/UI). Committed 60dd3a3.
