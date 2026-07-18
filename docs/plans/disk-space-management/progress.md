@@ -11,7 +11,7 @@ Spec: `docs/specs/2026-07-18-disk-space-management.md` · Plan: `plan.md` · Tas
 - [x] T-6 — RecordingCoordinator integration + tests
 - [x] T-7 — Pre-flight idle estimate «≈N мин» (AC-1)
 - [x] T-8 — MenuBarExtra badge reflects warning (AC-12a)
-- [ ] T-9 — Composition-root wiring (OnsetApp)
+- [x] T-9 — Composition-root wiring (OnsetApp)
 - [x] T-10 — docs/architecture.md update
 - [ ] T-11 — L5 calibration & acceptance (AC-10) [hardware-gated]
 
@@ -28,3 +28,4 @@ Spec: `docs/specs/2026-07-18-disk-space-management.md` · Plan: `plan.md` · Tas
 - T-7: coordinator computes idle estimate (off-main provider) one-shot on appear + recompute on record; MainViewModel display-only (`diskSpaceEstimateDisplay`: «≈ N мин»/«> 60 мин»/«оценка недоступна»). Test-fixture bug: 50GB@1080p60=~368min hit «>60» branch not «≈N» — fixture lowered to 5GB. Prod code was correct.
 - T-8: MenuBarLabelMapper (pure) carries low-space warning, mirroring deviceLostWarning (#261); coordinator diskWarning threaded in.
 - Layer 5 gate: xcodebuild test 1002/1002 PASSED.
+- T-9: composition-root wiring reconciled (single LiveDiskSpaceProvider, RecordingSession untouched). Whole-change gate `scripts/preflight.sh` PASS: swiftformat 0/187, swiftlint strict clean, privacy manifest PASS, 1002 tests. Remaining: T-11 (L5 disk-fill calibration, hardware) + /finalize + owner review (meta PR).
