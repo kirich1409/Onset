@@ -36,13 +36,15 @@ struct MainViewModelTests {
         displays: [Display] = [],
         cameras: [CameraDevice] = [],
         microphones: [MicrophoneDevice] = [],
+        diskSpaceProvider: any DiskSpaceProviding = FakeDiskSpaceProvider(),
         defaults: InMemoryUserDefaults
     )
     -> (sut: MainViewModel, perms: FakePermissionsService) {
         let perms = FakePermissionsService(screen: screen, camera: camera, microphone: microphone)
-        let coordinator = RecordingCoordinator {
-            UserDefaultsBackendSelectionStore(defaults: defaults)
-        }
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: defaults) },
+            diskSpaceProvider: diskSpaceProvider
+        )
         let sut = MainViewModel(
             permissions: perms,
             appSettings: AppSettings(store: InMemorySettingsStore()),
@@ -243,6 +245,99 @@ struct MainViewModelTests {
             #expect(sut.isRecordingWithoutAudio)
             #expect(sut.canRecord)
             #expect(sut.recordDisabledReason == nil)
+        }
+    }
+
+    // MARK: - Disk-space idle estimate (AC-1, T-7)
+
+    @Test("Before the first refresh, the idle disk-space headline is nil (nothing computed yet)")
+    func diskSpaceEstimateDisplay_nilBeforeRefresh() async {
+        await withScopedDefaults { defaults in
+            let display = Self.makeDisplay()
+            let (sut, _) = self.makeSUT(displays: [display], defaults: defaults)
+
+            #expect(sut.diskSpaceEstimateDisplay == nil)
+        }
+    }
+
+    @Test("Volume read failure → «Оценка недоступна», never a fabricated number (AC-1)")
+    func diskSpaceEstimateDisplay_unavailable_onReadFailure() async {
+        await withScopedDefaults { defaults in
+            let display = Self.makeDisplay()
+            let provider = FakeDiskSpaceProvider()
+            await provider.configure(outputFreeBytes: nil, systemFreeBytes: nil)
+            let (sut, _) = self.makeSUT(displays: [display], diskSpaceProvider: provider, defaults: defaults)
+            await sut.loadDevices()
+
+            await sut.refreshIdleDiskEstimate()
+
+            #expect(sut.diskSpaceEstimateDisplay == "Оценка недоступна")
+        }
+    }
+
+    @Test("Available free space → «≈ N мин» headline (AC-1)")
+    func diskSpaceEstimateDisplay_showsApproxMinutes_whenAvailable() async {
+        await withScopedDefaults { defaults in
+            let display = Self.makeDisplay()
+            let provider = FakeDiskSpaceProvider()
+            // 5 GB at the 1080p60 MVP-default bitrate (18 Mbps + 128 kbps audio, ~2.27 MB/s)
+            // resolves to ≈37 min — comfortably under the 60-min display cap. 50 GB (the prior
+            // value) actually resolves to ≈368 min, which correctly routes to the "> 60 мин"
+            // branch instead of exercising the "≈ N мин" branch this test targets.
+            await provider.configure(outputFreeBytes: 5_000_000_000, systemFreeBytes: 500_000_000_000)
+            let (sut, _) = self.makeSUT(displays: [display], diskSpaceProvider: provider, defaults: defaults)
+            await sut.loadDevices()
+
+            await sut.refreshIdleDiskEstimate()
+
+            let headline = sut.diskSpaceEstimateDisplay
+            #expect(headline?.hasPrefix("≈ ") == true)
+            #expect(headline?.hasSuffix(" мин") == true)
+        }
+    }
+
+    @Test("Enormous free space → «> 60 мин» headline, not an overly precise number (AC-1)")
+    func diskSpaceEstimateDisplay_showsGreaterThan60_whenPlentiful() async {
+        await withScopedDefaults { defaults in
+            let display = Self.makeDisplay()
+            let provider = FakeDiskSpaceProvider()
+            await provider.configure(outputFreeBytes: 100_000_000_000_000, systemFreeBytes: 100_000_000_000_000)
+            let (sut, _) = self.makeSUT(displays: [display], diskSpaceProvider: provider, defaults: defaults)
+            await sut.loadDevices()
+
+            await sut.refreshIdleDiskEstimate()
+
+            #expect(sut.diskSpaceEstimateDisplay == "> 60 мин")
+        }
+    }
+
+    @Test("record() recomputes the idle estimate and clears a stale idle disk warning (T-7)")
+    func record_recomputesIdleEstimate_clearsStaleWarning() async {
+        await withScopedDefaults { defaults in
+            let display = Self.makeDisplay()
+            let provider = FakeDiskSpaceProvider()
+            // Below `outputStopBytes` (2 GB) — the idle read yields a `.critical` verdict,
+            // surfaced as `diskWarning` (T-7 maps it down since there is no session to auto-stop).
+            await provider.configure(outputFreeBytes: 1_000_000_000, systemFreeBytes: 500_000_000_000)
+            let (sut, _) = self.makeSUT(
+                microphone: .denied, // AC-2(c): avoids the AC-2(b) mic-unselected guard
+                displays: [display],
+                diskSpaceProvider: provider,
+                defaults: defaults
+            )
+            await sut.loadDevices()
+            await sut.refreshIdleDiskEstimate()
+            #expect(sut.coordinator.diskWarning != nil)
+
+            // Disk space recovers before the user presses Record.
+            await provider.configure(outputFreeBytes: 500_000_000_000, systemFreeBytes: 500_000_000_000)
+            // Intercept the actual session start — this test only exercises the pre-start
+            // recompute, not a real recording.
+            sut.startSessionOverride = { _ in }
+
+            await sut.record()
+
+            #expect(sut.coordinator.diskWarning == nil)
         }
     }
 

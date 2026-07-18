@@ -10,6 +10,9 @@
 // The «Начать запись» dispatch path relies on @Environment(\.openWindow) and closure side
 // effects — no natural unit-test boundary exists here. Covered by L5 manual verification.
 //
+// file_length: one file per mapper input dimension (idle/normal/degraded/timer/device-lost/
+// low-space/transitions) keeps related suites together; splitting would scatter shared context.
+// swiftlint:disable file_length
 @testable import Onset
 import Testing
 
@@ -276,6 +279,121 @@ struct MenuBarLabelMapperDeviceLostTests {
     }
 }
 
+// MARK: - Low disk space mid-recording (AC-12a, #88, T-8)
+
+@Suite("MenuBarLabelMapper — low disk space mid-recording")
+@MainActor
+struct MenuBarLabelMapperLowSpaceTests {
+    @Test("Recording+normal with no disk warning shows no low-space warning")
+    func noWarningShowsNoLowSpace() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .normal,
+            elapsed: 60,
+            showTimer: true,
+            diskWarning: nil
+        )
+        #expect(desc.lowSpaceWarning == false)
+        #expect(desc.dot == .red)
+    }
+
+    @Test("Recording+normal with a disk warning shows low-space warning, dot stays red")
+    func diskWarningShowsLowSpaceDotStaysRed() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .normal,
+            elapsed: 60,
+            showTimer: true,
+            diskWarning: .outputFree
+        )
+        #expect(desc.lowSpaceWarning == true)
+        #expect(desc.dot == .red)
+    }
+
+    @Test("Low-space warning composes with degraded recordingState")
+    func lowSpaceAndDegradedCompose() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .degraded,
+            elapsed: 60,
+            showTimer: true,
+            diskWarning: .outputEta
+        )
+        #expect(desc.lowSpaceWarning == true)
+        #expect(desc.dot == .yellow)
+    }
+
+    @Test("Low-space warning appends a note to the accessibility label")
+    func lowSpaceAppendsAccessibilityNote() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .normal,
+            elapsed: 5,
+            showTimer: true,
+            diskWarning: .systemFree
+        )
+        #expect(desc.accessibilityLabel.contains("мало места на диске"))
+    }
+
+    @Test("De-escalation: disk warning clearing to nil clears the low-space warning")
+    func deescalationClearsLowSpaceWarning() {
+        let warned = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .normal,
+            elapsed: 60,
+            showTimer: true,
+            diskWarning: .outputFree
+        )
+        let cleared = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .normal,
+            elapsed: 60,
+            showTimer: true,
+            diskWarning: nil
+        )
+        #expect(warned.lowSpaceWarning == true)
+        #expect(cleared.lowSpaceWarning == false)
+        #expect(warned != cleared)
+    }
+
+    @Test("Idle phase ignores diskWarning — no low-space warning")
+    func idlePhaseIgnoresDiskWarning() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .idle,
+            recordingState: .normal,
+            elapsed: 0,
+            showTimer: true,
+            diskWarning: .outputFree
+        )
+        #expect(desc.lowSpaceWarning == false)
+    }
+
+    @Test("Default diskWarning parameter is nil — existing call sites unaffected")
+    func defaultParameterIsNil() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .normal,
+            elapsed: 60,
+            showTimer: true
+        )
+        #expect(desc.lowSpaceWarning == false)
+    }
+
+    @Test("Low-space warning composes with device-lost warning independently")
+    func lowSpaceAndDeviceLostCompose() {
+        let desc = MenuBarLabelMapper.descriptor(
+            phase: .recording,
+            recordingState: .normal,
+            elapsed: 60,
+            showTimer: true,
+            sourceLiveness: SourceLiveness(screen: true, camera: false, microphone: true),
+            diskWarning: .outputFree
+        )
+        #expect(desc.deviceLostWarning == true)
+        #expect(desc.lowSpaceWarning == true)
+    }
+}
+
 // MARK: - Phase transitions
 
 @Suite("MenuBarLabelMapper — phase transitions")
@@ -313,3 +431,6 @@ struct MenuBarLabelMapperPhaseTransitionTests {
         #expect(idle.elapsed == nil)
     }
 }
+
+// file_length stays disabled through EOF — whole-file rule, same pattern as FileWriterTests.
+// swiftlint:enable file_length

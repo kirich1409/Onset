@@ -105,6 +105,21 @@ struct RecordingRequest {
     let config: RecordingConfiguration
 }
 
+// MARK: - DiskStopReason+IdleWarning
+
+extension DiskStopReason {
+    /// Maps a critical disk-stop reason to its equivalent warning reason (T-7): at idle there is
+    /// no session to auto-stop, so a `.critical` verdict is surfaced through the same
+    /// `diskWarning` badge the in-recording path uses, one severity down.
+    fileprivate var idleWarningReason: DiskWarningReason {
+        switch self {
+        case .outputEta: .outputEta
+        case .outputFree: .outputFree
+        case .systemFree: .systemFree
+        }
+    }
+}
+
 // MARK: - RecordingCoordinator
 
 /// The single owner of app recording state, shared by the main window, recording window, and menu
@@ -235,6 +250,11 @@ final class RecordingCoordinator {
     /// — a graceful low-space stop is surfaced out-of-window via the `UNNotification` (AC-9), not
     /// by forcing a window open. Reset on `start()`.
     private(set) var stoppedDueToLowSpace = false
+
+    /// The pre-flight "≈ N мин" idle disk-space estimate (AC-1, T-7), or `nil` before the first
+    /// `refreshIdleDiskEstimate` call completes. `MainViewModel` only DISPLAYS this — it never
+    /// reads disk state itself; this coordinator owns `diskSpaceMonitor` and computes it off-main.
+    private(set) var idleDiskEstimate: ETAEstimate?
 
     // MARK: - Dependencies (injected)
 
@@ -654,6 +674,10 @@ final class RecordingCoordinator {
         self.diskWarning = nil
         self.stoppedDueToLowSpace = false
         self.pendingDiskStopReason = nil
+        // The idle headline (T-7) is meaningless once a session exists — the tick loop's own
+        // verdict/warning take over; clearing avoids a stale idle number surviving into a future
+        // idle re-appear before the next `refreshIdleDiskEstimate` call lands.
+        self.idleDiskEstimate = nil
         self.diskSpaceMonitor.reset()
         self.phase = .recording
 
@@ -790,6 +814,40 @@ final class RecordingCoordinator {
     }
 
     // MARK: - Disk-space monitoring (spec #88, AC-2/AC-3/AC-4/AC-11)
+
+    /// Idle pre-flight disk-space read (AC-1/AC-3, T-7): computes the "≈ N мин" headline plus the
+    /// idle disk verdict from ONE fresh snapshot, before any recording session exists. THIS
+    /// coordinator owns `diskSpaceMonitor` (and thus the provider) and reads off-main —
+    /// `MainViewModel` only displays `idleDiskEstimate`, it never reads disk state itself.
+    ///
+    /// Cadence (spec #88 T-7): called once when the main screen appears
+    /// (`MainViewModel.refreshIdleDiskEstimate()`, via `MainView`'s `.task`) and again when a new
+    /// recording is initiated (`MainViewModel.record()`) — there is no idle polling; staleness
+    /// between those two points is accepted (plan.md "Idle-оценка владелец/каденция").
+    ///
+    /// A no-op while a recording is active: once a session exists, the tick loop
+    /// (`applyDiskVerdict`) is the sole owner of `diskWarning` and auto-stop decisions.
+    func refreshIdleDiskEstimate(plan: ResolvedRecordingPlan, config: RecordingConfiguration) async {
+        guard self.phase != .recording else { return }
+        let snapshot = await self.diskSpaceMonitor.idleEstimate(
+            outputURL: config.baseOutputDirectory,
+            plan: plan
+        )
+        self.idleDiskEstimate = snapshot.estimate
+        switch snapshot.verdict {
+        case .none:
+            self.diskWarning = nil
+
+        case let .warning(reason):
+            self.diskWarning = reason
+
+        case let .critical(reason):
+            // No session exists to auto-stop (AC-4 doesn't apply at idle) and Start is NOT
+            // blocked (Open Question → option A) — still surface the same warning/badge the
+            // in-recording path uses (AC-3) so a critically-low volume is visible before Record.
+            self.diskWarning = reason.idleWarningReason
+        }
+    }
 
     /// What the tick loop must do after applying one disk-space verdict.
     private enum DiskVerdictAction: Equatable {

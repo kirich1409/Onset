@@ -584,6 +584,57 @@ final class MainViewModel {
         return "Выберите аудио-вход, чтобы начать запись"
     }
 
+    // MARK: - Disk-space idle estimate (AC-1, T-7)
+
+    /// Displayed pre-flight disk-space headline — «≈ N мин» / «> 60 мин» / «оценка недоступна».
+    ///
+    /// Read-only projection of `coordinator.idleDiskEstimate` (the coordinator owns the disk-space
+    /// monitor and computes it off-main via `refreshIdleDiskEstimate()`); this property only
+    /// FORMATS the already-computed value — it never reads disk state itself. `nil` before the
+    /// first refresh completes (nothing to show yet, mirrors `recordDisabledReason`'s `nil`-means-
+    /// "don't show a footer line" convention).
+    var diskSpaceEstimateDisplay: String? {
+        guard let estimate = self.coordinator.idleDiskEstimate else { return nil }
+        guard estimate.isEstimateAvailable, let secondsRemaining = estimate.secondsRemaining else {
+            return "Оценка недоступна"
+        }
+        let secondsPerMinute = 60.0
+        let displayCapMinutes = 60
+        let minutes = Int((secondsRemaining / secondsPerMinute).rounded())
+        return minutes > displayCapMinutes ? "> 60 мин" : "≈ \(minutes) мин"
+    }
+
+    /// Recomputes the idle disk-space estimate (AC-1). Builds the same kind of `ResolvedRecordingPlan`
+    /// `startRecording` resolves for the actual session, but is a no-op when no display is selected
+    /// yet — there is nothing to estimate before `loadDevices()` resolves one (AC-1 auto-select).
+    ///
+    /// Cadence (T-7): called once from `MainView`'s `.task` after `loadDevices()` resolves the
+    /// display (main-screen appear), and again from `record()` (record initiation) — no idle
+    /// polling; staleness between those two points is accepted.
+    func refreshIdleDiskEstimate() async {
+        guard let display = self.selectedDisplay else { return }
+        let config = RecordingConfiguration.makeMVPDefault(
+            baseDirectory: self.outputDirectoryURL,
+            cameraMirror: self.appSettings.cameraMirror
+        )
+        // Best-effort camera format resolution: unlike `resolveCameraFormat()` (the record path),
+        // this must never surface `recordError` — a camera whose format can't be picked simply
+        // estimates without the camera's contribution, it does not block the idle headline.
+        let cameraFormat = self.activeCamera.flatMap { camera in
+            try? CameraFormatSelector.pickBestFormat(
+                from: camera.formats,
+                minFps: Double(RecordingConfiguration.mvpDefault.minCameraFps),
+                allowAboveFullHD: true
+            )
+        }
+        let plan = CapabilityResolver.resolveStartProfile(
+            display: display,
+            cameraFormat: cameraFormat,
+            config: config
+        )
+        await self.coordinator.refreshIdleDiskEstimate(plan: plan, config: config)
+    }
+
     // MARK: - Device display names (resolved at UI layer via AVCaptureDevice)
 
     /// Human-readable label for a camera device.

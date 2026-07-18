@@ -29,6 +29,19 @@ struct SystemMonotonicClock: MonotonicClock {
     }
 }
 
+// MARK: - IdlePreflightSnapshot
+
+/// Result of one idle pre-flight read (T-7): the "≈ N мин" headline (AC-1) plus the idle disk
+/// verdict (AC-3), both derived from a SINGLE provider snapshot.
+@MainActor
+struct IdlePreflightSnapshot: Equatable {
+    /// The pre-flight ETA estimate shown as the main screen's disk-space headline.
+    let estimate: ETAEstimate
+    /// The idle disk verdict. Since no EWMA history exists yet, only the byte-floor checks can
+    /// trip — the ETA-gated check requires warmup and never fires here.
+    let verdict: DiskVerdict
+}
+
 // MARK: - DiskSpaceMonitor
 
 /// Owns the `readEvery` XPC-read throttle, the EWMA smoothing window, and the cached disk-space
@@ -177,16 +190,30 @@ final class DiskSpaceMonitor {
 
     // MARK: - Idle estimate (AC-1)
 
-    /// Pre-flight "≈ N мин" estimate plus the idle disk verdict, computed from one fresh snapshot
-    /// before any recording session exists. Seeds a warmup `SmoothingState` (fallback bitrate
-    /// speed has no EWMA history yet) with `previousVerdict: .none`, per T-3's contract.
-    func idleEstimate(outputURL: URL, plan: ResolvedRecordingPlan) async -> ETAEstimate {
+    /// Pre-flight "≈ N мин" estimate plus the idle disk verdict, computed from ONE fresh snapshot
+    /// before any recording session exists (T-7). Seeds a warmup `SmoothingState` (fallback
+    /// bitrate speed has no EWMA history yet) with `previousVerdict: .none`, per T-3's contract.
+    ///
+    /// Both halves share the SAME read — the caller must not read the volume twice for one
+    /// idle check (plan.md "Idle DiskVerdict" row) — so this returns both the headline estimate
+    /// (AC-1) and the idle verdict (AC-3: a system/output-free warning is possible even before a
+    /// recording starts, gated only on the byte-floor checks since there is no EWMA slope yet).
+    func idleEstimate(outputURL: URL, plan: ResolvedRecordingPlan) async -> IdlePreflightSnapshot {
         let snapshot = await self.provider.snapshot(outputURL: outputURL)
-        return DiskSpaceEstimator.idleEstimate(
+        let estimate = DiskSpaceEstimator.idleEstimate(
             freeBytes: snapshot.outputFreeBytes,
             plan: plan,
             config: self.configuration
         )
+        let verdict = DiskSpaceEstimator.evaluate(
+            outputFreeBytes: snapshot.outputFreeBytes,
+            systemFreeBytes: snapshot.systemFreeBytes,
+            sameVolume: snapshot.sameVolume,
+            state: .initial,
+            thresholds: self.configuration.diskThresholds,
+            previousVerdict: .none
+        )
+        return IdlePreflightSnapshot(estimate: estimate, verdict: verdict)
     }
 
     // MARK: - Reset (AC-1 re-estimate)

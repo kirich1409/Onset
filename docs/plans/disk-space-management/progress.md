@@ -9,8 +9,8 @@ Spec: `docs/specs/2026-07-18-disk-space-management.md` · Plan: `plan.md` · Tas
 - [x] T-4 — DiskSpaceMonitor collaborator + L2 tests
 - [x] T-5 — DiskSpaceWarningNotifying seam (warning + auto-stop cause)
 - [x] T-6 — RecordingCoordinator integration + tests
-- [ ] T-7 — Pre-flight idle estimate «≈N мин» (AC-1)
-- [ ] T-8 — MenuBarExtra badge reflects warning (AC-12a)
+- [x] T-7 — Pre-flight idle estimate «≈N мин» (AC-1)
+- [x] T-8 — MenuBarExtra badge reflects warning (AC-12a)
 - [ ] T-9 — Composition-root wiring (OnsetApp)
 - [x] T-10 — docs/architecture.md update
 - [ ] T-11 — L5 calibration & acceptance (AC-10) [hardware-gated]
@@ -25,3 +25,6 @@ Spec: `docs/specs/2026-07-18-disk-space-management.md` · Plan: `plan.md` · Tas
 - T-4: `MonotonicClock` seam (`SystemMonotonicClock` live + `FakeMonotonicClock` test) for deterministic readEvery/generation tests. FakeDiskSpaceProvider (actor) needed isolated `configure(...)`/`setOutputFreeBytes(_:)` setters — can't assign an actor's stored var from outside via await. Layer-3 gate: full `xcodebuild test` → 983/983 PASSED, no regressions.
 - T-6: integrated into existing tickTask (cached verdict read + non-awaited tickRefresh); critical -> `Task { await self.stop() }` (not inline); distinct `stoppedDueToLowSpace` (hasPendingAlert force-open untouched); AC-7 regression via `CoordinatorFixtures.diskFullWriteResult()` = `AVError(.diskFull)`; spurious-guard test `slowRefreshRacingManualStop_noSpuriousWarningSingleTeardown`. Gate: xcodebuild test 989/989 PASSED.
 - T-10 done early during the session-limit block (docs edit = main-session-allowed): new disk types added to architecture map (Pipeline/Config/Permissions/UI). Committed 60dd3a3.
+- T-7: coordinator computes idle estimate (off-main provider) one-shot on appear + recompute on record; MainViewModel display-only (`diskSpaceEstimateDisplay`: «≈ N мин»/«> 60 мин»/«оценка недоступна»). Test-fixture bug: 50GB@1080p60=~368min hit «>60» branch not «≈N» — fixture lowered to 5GB. Prod code was correct.
+- T-8: MenuBarLabelMapper (pure) carries low-space warning, mirroring deviceLostWarning (#261); coordinator diskWarning threaded in.
+- Layer 5 gate: xcodebuild test 1002/1002 PASSED.
