@@ -339,3 +339,58 @@ struct MicrophonesAvailableTests {
         #expect(result[0].uniqueID == "builtin")
     }
 }
+
+// MARK: - isBuiltInMicrophone discriminator tests
+
+@Suite("DeviceDiscovery.isBuiltInMicrophone — clamshell-hide discriminator")
+struct IsBuiltInMicrophoneTests {
+    // CoreAudio transport four-CC codes (AudioHardwareBase.h), as `device.transportType`
+    // (Int32) returns them. `kAudioDeviceTransportTypeBuiltIn` == 'bltn'; USB == 'usb '.
+    private static let builtInTransport: Int32 = 0x626C_746E
+    private static let usbTransport: Int32 = 0x7573_6220
+
+    @Test("built-in transport + internal mic-array uid → hidden")
+    func builtInTransport_internalMicUID_isHidden() {
+        let hidden = DeviceDiscovery.isBuiltInMicrophone(
+            uniqueID: "BuiltInMicrophoneDevice",
+            transportType: Self.builtInTransport
+        )
+
+        #expect(hidden)
+    }
+
+    @Test("built-in transport + 3.5mm jack uid → visible (clamshell regression)")
+    func builtInTransport_jackUID_staysVisible() {
+        // BuiltInHeadphoneInputDevice is the 3.5mm headphone-jack mic: it shares the
+        // bltn transport with the internal array but is a physical external mic that
+        // works lid-closed, so it must NOT be hidden.
+        let hidden = DeviceDiscovery.isBuiltInMicrophone(
+            uniqueID: "BuiltInHeadphoneInputDevice",
+            transportType: Self.builtInTransport
+        )
+
+        #expect(!hidden)
+    }
+
+    @Test("built-in transport + unknown uid → hidden (fail-safe)")
+    func builtInTransport_unknownUID_isHidden() {
+        // Fail-safe: an internal mic whose uid differs on another model / macOS version
+        // is still hidden rather than silently recording digital silence in clamshell.
+        let hidden = DeviceDiscovery.isBuiltInMicrophone(
+            uniqueID: "SomeFutureInternalMicUID",
+            transportType: Self.builtInTransport
+        )
+
+        #expect(hidden)
+    }
+
+    @Test("non-built-in transport → never hidden")
+    func usbTransport_anyUID_staysVisible() {
+        let hidden = DeviceDiscovery.isBuiltInMicrophone(
+            uniqueID: "AppleUSBAudioEngine:Generic:USB-Mic",
+            transportType: Self.usbTransport
+        )
+
+        #expect(!hidden)
+    }
+}

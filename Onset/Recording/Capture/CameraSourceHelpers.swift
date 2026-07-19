@@ -17,12 +17,36 @@ enum CameraCaptureState {
 
 // MARK: - CameraCaptureShims
 
-/// Bundles the two delegate shims so `CameraCaptureState.running` stays a single associated value.
+/// Bundles the two delegate shims plus the held configuration-lock device so
+/// `CameraCaptureState.running` stays a single associated value (a 3-member tuple would
+/// violate the `large_tuple` rule, hence the struct rather than a third associated value).
 ///
-/// Avoids a 3-member tuple which would violate the `large_tuple` rule.
-struct CameraCaptureShims {
+/// `lockedDevice` is NOT a delegate shim: it carries the `AVCaptureDevice` whose
+/// configuration lock `buildAndStartSession` acquired and intentionally holds through
+/// `startRunning` for `role == .record` (so AVFoundation does not revert a 4K `activeFormat`
+/// to 1080p, #265). Teardown (`releaseRunning`) reads it back to unlock. `nil` for `.preview`,
+/// which releases its lock right after configuration and never holds it while running.
+///
+/// `AVCaptureDevice` is not `Sendable`; storing it in actor-isolated state is safe because the
+/// owning `CameraSource` is an actor and the field is only read on the actor.
+///
+/// `nonisolated` (mirrors `SessionHandle` below): under `SWIFT_DEFAULT_ACTOR_ISOLATION =
+/// MainActor` the type would otherwise be MainActor-isolated, and reading the non-Sendable
+/// `lockedDevice` from `CameraSource` (a plain actor, not Main) in `releaseRunning` would cross
+/// isolation. The struct is constructed and read only on the owning `CameraSource` actor and
+/// never escapes it, so dropping the type-level isolation is sound and needs no `Sendable`
+/// conformance. (`video`/`audio` are `@unchecked Sendable` classes, so they read fine regardless;
+/// only the non-Sendable `lockedDevice` forced the change.)
+nonisolated struct CameraCaptureShims {
     let video: VideoOutputShim
     let audio: AudioOutputShim
+    let lockedDevice: AVCaptureDevice?
+
+    /// KVO token observing `isSuspended` on the recording device (#222). Retained here for the
+    /// lifetime of `.running` so the observation stays active; `invalidate()`-d explicitly at
+    /// every teardown site alongside the disconnect `NotificationCenter` observer removal,
+    /// mirroring that existing teardown symmetry rather than relying on token deinit timing.
+    let suspensionObservation: NSKeyValueObservation
 }
 
 // MARK: - SessionHandle
@@ -150,6 +174,25 @@ nonisolated func shouldHandleSessionFault(notificationObject: AnyObject?, sessio
 /// - Returns: `true` only when `notificationDeviceID` equals `cameraID`.
 nonisolated func shouldHandleDisconnect(notificationDeviceID: String?, cameraID: String) -> Bool {
     notificationDeviceID == cameraID
+}
+
+/// Returns `true` when a KVO `isSuspended` change for `notificationDeviceID` should terminate
+/// the camera lane for `cameraID`.
+///
+/// Extracted from the KVO closure registered by `makeSuspensionObservation` so the filtering
+/// predicate can be unit-tested without live `AVCaptureDevice` or KVO machinery. Mirrors
+/// `shouldHandleDisconnect` (AC-12: only the recording device's own suspension may terminate
+/// the recording — another device's `isSuspended` flip, e.g. a second connected camera, must not).
+///
+/// - Parameters:
+///   - isSuspended: The KVO change's new value. `false` (e.g. lid reopening mid-recording) never
+///     terminates — the one-shot lifecycle never restarts a stopped lane.
+///   - notificationDeviceID: The `uniqueID` of the device whose `isSuspended` changed.
+///   - cameraID: The `uniqueID` of the camera this source is recording from.
+/// - Returns: `true` only when `isSuspended` is `true` and `notificationDeviceID` equals `cameraID`.
+nonisolated func shouldHandleSuspension(isSuspended: Bool, notificationDeviceID: String?, cameraID: String) -> Bool {
+    guard isSuspended else { return false }
+    return notificationDeviceID == cameraID
 }
 
 /// Computes the inter-frame delivery gap in milliseconds between two consecutive camera PTS values.

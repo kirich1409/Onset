@@ -9,6 +9,14 @@ never add availability checks or fallbacks for older macOS. Single scheme: `Onse
 Critical product requirements, in priority order: **stability**, **performance**,
 **scalable architecture**. Weigh every design decision against these three.
 
+**Runtime is loaded, not idle**: real usage is screen+camera recording while the
+user drives other apps (browser, IDE, editor, AI tooling) — CPU/GPU/VideoToolbox
+are already contended before recording starts. Design and verify perf under
+representative concurrent load, never a quiet machine (camera stabilization's
+designed bypass was only found to fire at ~23s under normal load because
+viability had been judged idle). Full render/export-level saturation is out of
+scope for perf verdicts.
+
 ## Autonomy
 
 The app is developed entirely by agents (overview spec, principle 15): own the
@@ -35,12 +43,11 @@ merge-ready PR. Never pause mid-task to ask "should I continue?".
   remains, open the PR, state in its body which gates remain and where they run, and
   leave it unmerged and the issue out of Done until a session on the target hardware
   verifies.
-- When gates pass: mark PR ready + `gh pr merge --auto --squash`, no per-PR
-  confirmation (personal repo). EXCEPTION — meta changes that shape agent behavior
-  and the owner's expectations/costs (CLAUDE.md, `.claude/`, `.github/workflows/`,
-  lint/build configs, `docs/specs/`) are NEVER auto-merged: open the PR, explicitly
-  call the owner to review, merge only after approval. Evidence over assertions in
-  the PR body: Swift Testing summary, lint result, screenshot for UI changes.
+- When gates pass: mark PR ready + `gh pr merge --auto --squash`, no per-PR confirmation (personal repo).
+  EXCEPTION — meta changes that shape agent behavior and the owner's expectations/costs (CLAUDE.md, `.claude/`,
+  `.github/workflows/`, lint/build configs, `docs/specs/`) are NEVER auto-merged: open the PR, explicitly call
+  the owner to review, merge only after approval. Evidence over assertions in the PR body: Swift Testing
+  summary, lint result, screenshot for UI changes.
 
 ## Language
 
@@ -57,8 +64,7 @@ scripts/preflight.sh
 xcodebuild build -scheme Onset -destination 'platform=macOS' -configuration Debug \
   ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
 
-# Unit tests (Swift Testing, L2 only — L5 env-gated, see Testing;
-# CODE_SIGNING_ALLOWED=NO is fine here, never for L5)
+# Unit tests (Swift Testing, L2 only — L5 env-gated, see Testing; CODE_SIGNING_ALLOWED=NO fine here, never L5)
 xcodebuild test -scheme Onset -destination 'platform=macOS' -configuration Debug \
   ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO
 
@@ -71,35 +77,32 @@ Artifact checks (CI `artifact-checks` job):
 
 - `scripts/check-privacy-manifest.sh` — works on SOURCE, no build needed (fast
   pre-check; fatal in CI: official Required-Reason codes for UserDefaults).
-- `scripts/check-entitlements.sh <Onset.app>` and `scripts/check-no-network.sh
-  <Onset.app>` — need the BUILT .app: entitlements are injected at signing;
-  no-network invariant = binary must not link network frameworks.
-- `scripts/verify-cfr.sh screen.mp4 camera.mp4 60 30` — CFR cadence from real packet
-  timestamps (ffprobe metadata lies). Slow: ~1 min per 10 min of video; the
-  fresh-content check needs MOTION in frame — a static scene fails falsely.
+- `scripts/check-entitlements.sh <Onset.app>` and `scripts/check-no-network.sh <Onset.app>` — need the BUILT
+  .app: entitlements are injected at signing; no-network invariant = binary must not link network frameworks.
+- `scripts/verify-cfr.sh screen.mp4 camera.mp4 60 30` — CFR cadence from real packet timestamps (ffprobe
+  metadata lies). Slow: ~1 min per 10 min of video; the fresh-content check needs MOTION in frame — a static scene fails falsely.
 
 ## Testing
 
 - Swift Testing only, zero XCTest. The XCTest "Executed 0 tests" banner is FALSE —
   the verdict is the Swift Testing summary line; never use `-quiet` (hides it).
-- L5 (real hardware) suites are env-gated: `ONSET_RUN_L5_CAPTURE=1` (CameraSource,
-  RecordingSession), `ONSET_RUN_L5_ENCODE=1` (VideoEncoder, FileWriter); `xcodebuild
-  test -testPlan Onset-L5` sets both. `-only-testing` matches suites, not functions.
-  See `docs/quality/production-quality-bar.md` §4.3.
-- L5 requires a SIGNED build — drop `CODE_SIGNING_ALLOWED=NO` for build-for-testing;
-  an unsigned test host writes a sticky TCC deny for screen capture (recovery:
-  `tccutil reset ScreenCapture` + manual re-grant).
-- BEFORE any L5 run: check stale test hosts with `pgrep -la Onset`; kill them with
-  `pkill -9 Onset` (exactly this name, never broader). One `xcodebuild test` at a
-  time — hardware tests fight over the camera and hang, spawning extra instances.
+- L5 (real hardware) suites are env-gated: `ONSET_RUN_L5_CAPTURE=1` (CameraSource, RecordingSession),
+  `ONSET_RUN_L5_ENCODE=1` (VideoEncoder, FileWriter); `xcodebuild test -testPlan Onset-L5` sets both.
+  `-only-testing` matches suites, not functions. See `docs/quality/production-quality-bar.md` §4.3.
+- L5 requires a SIGNED build — drop `CODE_SIGNING_ALLOWED=NO` for build-for-testing; an unsigned test host
+  writes a sticky TCC deny for screen capture (recovery: `tccutil reset ScreenCapture` + manual re-grant).
+- BEFORE any L5 run: `pgrep -la Onset`. `pkill -9 Onset` (exactly this name, never broader) is fine for a stale
+  or hung host — no live lock held, a dead lock PID, or the owner's OK — but never kill a live run (another
+  session's test or the owner's app). One `xcodebuild test` at a time — hardware tests fight over the camera and hang.
+- **Shared target Mac** — concurrent agent sessions and the owner share one machine's camera/screen. Before any
+  hardware or `.app` grab (L5, the UI loop, launching `.app`, `screencapture`) hold the machine-global lock via
+  `scripts/hw-lock.sh` (`run [--wait] -- CMD` auto-releases a single grab; `acquire`/`release` wraps a multi-step
+  UI-loop hold). It reclaims a crashed session's stale lock by dead PID — no panacea; `--wait` serializes, `status` shows the holder.
 - Reference hardware for L5: Logitech MX Brio (`docs/quality/production-quality-bar.md`).
+- Perf L5 must include a representative-load scenario (other apps active), not only a quiet machine — see the runtime-is-loaded principle above.
 - Recordings land in session subfolders `Onset <timestamp>/` inside the user-selected base directory (default `~/Movies/Onset/`) — L5 outputs for verify-cfr/ffprobe live there.
 - Test-writing conventions (fakes, naming, suites): `OnsetTests/CLAUDE.md`.
-- Coverage on by default in `Onset.xctestplan`, scoped to target `Onset` (not the test
-  bundle); the L5 plan gathers none. Inspect: add `-resultBundlePath /tmp/R.xcresult`
-  to `xcodebuild test`, then `scripts/coverage-summary.sh /tmp/R.xcresult` (CI posts
-  the same to the job summary). Report-only — gate via `ONSET_COVERAGE_MIN` (off).
-- OnsetUITests target exists but is not wired into the Onset scheme's Test action.
+- Coverage on by default in `Onset.xctestplan` (target `Onset`, not test bundle); L5 plan gathers none. Inspect via `-resultBundlePath` + `scripts/coverage-summary.sh` (CI posts to job summary). Report-only — gate via `ONSET_COVERAGE_MIN` (off).
 
 ## Project structure
 
@@ -117,33 +120,27 @@ Artifact checks (CI `artifact-checks` job):
 
 Fast pointers:
 
-- Start recording → `RecordingSession.start(permissions:)`; capability preflight →
-  `CapabilityProbe.probe()` → `CapabilityResolver`.
-- CFR slots / catch-up → `CFRNormalizer`; host-clock conversion (`CMSyncConvertTime`)
-  happens once, at ingest in `CameraSourceShims.swift`.
-- Record-button enable logic → `MainViewModel.canRecord`; TCC wrappers →
-  `ScreenRecordingPermission`, `CaptureDevicePermission`.
+- Start recording → `RecordingSession.start(permissions:)`; capability preflight → `CapabilityProbe.probe()` → `CapabilityResolver`.
+- CFR slots / catch-up → `CFRNormalizer`; host-clock conversion (`CMSyncConvertTime`) happens once, at ingest in `CameraSourceShims.swift`.
+- Record-button enable logic → `MainViewModel.canRecord`; TCC wrappers → `ScreenRecordingPermission`, `CaptureDevicePermission`.
 
 Full type-level map (Russian): `docs/architecture.md`.
 
 ## Key approaches
 
-- **Pure logic + impure actor pairing**: branching logic lives in nonisolated pure
-  types (`CFRNormalizer`, `CapabilityResolver`, `EffectivePermissions`, `AppRouter`,
-  `MenuBarLabelMapper`); framework/C interop stays inside actors. New logic follows
-  this split.
-- **Default MainActor isolation**: value types declare `Equatable`/`Hashable`
-  conformances on the `nonisolated` type declaration itself. For structs this is
-  sufficient — the compiler synthesizes nonisolated witnesses. For enums,
-  `InferIsolatedConformances` still infers the synthesized conformance as
-  `@MainActor` even on a `nonisolated` decl, so enums require an explicit
+- **Pure logic + impure actor pairing**: branching logic lives in nonisolated pure types (`CFRNormalizer`,
+  `CapabilityResolver`, `EffectivePermissions`, `AppRouter`, `MenuBarLabelMapper`); framework/C interop stays
+  inside actors. New logic follows this split.
+- **Default MainActor isolation**: value types declare `Equatable`/`Hashable` on the `nonisolated` type decl
+  itself. Structs suffice — the compiler synthesizes nonisolated witnesses. Enums don't: `InferIsolatedConformances`
+  infers the synthesized conformance as `@MainActor` even on a `nonisolated` decl, so an enum needs an explicit
   `nonisolated static func ==` witness to be usable off the main actor.
 - **Single T0 epoch** (`HostTimeAnchor`) per session; all PTS are host-time offsets
   from T0, converted once at ingest.
 - **One-shot lifecycle**: `start()` succeeds once, a throwing `start()` is terminal,
   `stop()` is idempotent — no restarts.
 - **Single AsyncStream subscriber**: `RecordingCoordinator` is the only subscriber of
-  session streams and the only `@Observable` state owner; views are readers.
+  session streams and the sole *session-lifecycle* state owner; `AppSettings` owns settings.
 - **DI seams**: factory protocols (`EncoderFactory`, `WriterFactory`, `SourceFactory`)
   plus closure seams on view models; tests use `Fake*` types with
   `AsyncStream.makeStream`.
@@ -188,24 +185,18 @@ Full type-level map (Russian): `docs/architecture.md`.
   may surface an identically-named symbol that behaves differently on macOS. Check the
   symbol's actual macOS semantics via the `apple-docs` MCP (primary), macOS SDK headers,
   or developer.apple.com; trust the doc/MCP platform line over a hand-read header.
-- After completing a task, fold non-obvious learnings into CLAUDE.md
-  (`/claude-md-management:revise-claude-md`). Maintenance = add AND delete: a rule
-  Claude already follows without being told gets removed; keep this file ≤200 lines.
-- UI design is not done by agents: write a brief for the Claude Design service and
-  hand it to the user.
+- Fold non-obvious learnings into CLAUDE.md via `/claude-md-management:revise-claude-md`; add AND delete, keep ≤200 lines.
+- **UI: standard components, no agent visual design.** Build from stock SwiftUI/AppKit
+  (`Settings`, `Form`, `TabView`, `Toggle`, `LabeledContent`…), no hand-rolled controls to match a mockup;
+  brief visual *design* to the Claude Design service (<https://claude.ai/design/p/975364e4-479d-49bb-87a1-202a02c7b5c0>), hand to user.
 
 ## Gotchas
 
-- `Config/Strict.xcconfig` (Onset target): warnings-as-errors, strict memory safety
-  (`unsafe` annotations required for C interop), upcoming features ExistentialAny /
-  InternalImportsByDefault / MemberImportVisibility.
-- The app must never gain network-client code — spec AC enforced by
-  `check-no-network.sh`.
-- CI job timeouts (hang detection): build 20 min, unit 20 min, lint 10 min,
-  privacy-manifest 5 min, artifact-checks 10 min, CodeQL 60 min — anything running
-  longer is stuck, not slow.
-- `AVCaptureDevice.authorizationStatus` is cached in-process (macOS 26.x): a TCC
-  revoke is visible only after app restart. Platform behavior, NOT a bug — don't
-  investigate it as one.
+- `Config/Strict.xcconfig` (Onset target): warnings-as-errors, strict memory safety (`unsafe` annotations
+  required for C interop), upcoming features ExistentialAny / InternalImportsByDefault / MemberImportVisibility.
+- The app must never gain network-client code — spec AC enforced by `check-no-network.sh`.
+- CI job timeouts (hang detection): build 20 min, unit 20 min, lint 10 min, privacy-manifest
+  5 min, artifact-checks 10 min, CodeQL 60 min — anything running longer is stuck, not slow.
+- `AVCaptureDevice.authorizationStatus` is cached in-process (macOS 26.x): a TCC revoke is visible only after app restart. Platform behavior, NOT a bug — don't investigate it as one.
 - Not product code, never analyze: `com/` (JVM artifact of Claude tooling), `.codex/`
   (Xcode MCP bridge config), `swarm-report/` (gitignored orchestration state).

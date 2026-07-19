@@ -111,7 +111,9 @@ actor DualFileOutputStage {
         /// and `markFinished()` is what seals the `drops` stream. If a fault left `drops` open,
         /// `DropMonitor.stop()` — which drains those streams — would hang on session stop (#202).
         var isLive: Bool {
-            if case .live = self.state { return true }
+            if case .live = self.state {
+                return true
+            }
             return false
         }
     }
@@ -348,7 +350,9 @@ actor DualFileOutputStage {
         }
         // Update baseline only when curFmt is non-nil: a nil format description (degenerate
         // buffer) must not reset the baseline and mask the next real format change.
-        if let curFmt { self.audioPrevFmtDesc = curFmt }
+        if let curFmt {
+            self.audioPrevFmtDesc = curFmt
+        }
 
         guard let retimed = self.retime(sample) else {
             // Retiming failed (degenerate buffer) — drop this sample rather than write a
@@ -599,8 +603,12 @@ actor DualFileOutputStage {
 
         var results: [RecordingPipelineKind: FinishResult] = [:]
         // Prefer the early-finalised result when present; otherwise the just-finished one.
-        if let screen { results[.screen] = screen }
-        if let camera { results[.camera] = camera }
+        if let screen {
+            results[.screen] = screen
+        }
+        if let camera {
+            results[.camera] = camera
+        }
         return results
     }
 

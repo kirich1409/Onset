@@ -39,7 +39,9 @@ nonisolated private struct DurationAccumulator {
     /// Records one duration observation.
     mutating func record(durationMs: Double) {
         self.sumMs += durationMs
-        if durationMs > self.maxMs { self.maxMs = durationMs }
+        if durationMs > self.maxMs {
+            self.maxMs = durationMs
+        }
         self.samples += 1
     }
 }
@@ -288,7 +290,9 @@ nonisolated struct StageRateAggregator {
     ///
     /// - Parameter count: The value returned by `pendingFrameCount()`.
     mutating func recordPendingValue(_ count: Int) {
-        if count > self.pendingMax { self.pendingMax = count }
+        if count > self.pendingMax {
+            self.pendingMax = count
+        }
     }
 
     /// Records the wall-clock duration of the full `ingest(_:)` call.
@@ -344,6 +348,12 @@ nonisolated struct StageRateAggregator {
     /// Exposed for L2 tests that verify the fixed tick-lag semantics.
     var tickLagMaxMs: Double {
         self.tickLag.maxMs
+    }
+
+    /// Count of `pendingFrameCount()` queries recorded since the last flush.
+    /// Exposed for L2 tests verifying every submit() drives exactly one VT query (#151).
+    var pendingQueryCount: Int {
+        self.pendMs.samples
     }
 
     // MARK: - Flush
@@ -444,6 +454,7 @@ nonisolated struct StageRateAggregator {
             + " pend_ms_avg=\(self.fmt(self.pendMs.avgMs))"
             + " pend_ms_max=\(self.fmt(self.pendMs.maxMs))"
             + " pending_max=\(self.pendingMax)"
+            + " pend_qps=\(self.fmt(self.rate(self.pendMs.samples, over: elapsedSeconds)))"
             + " ing_ms_avg=\(self.fmt(self.ingMs.avgMs))"
             + " ing_ms_max=\(self.fmt(self.ingMs.maxMs))"
             + " win_s=\(self.fmt(elapsedSeconds))"

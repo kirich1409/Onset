@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import os
 import SwiftUI
 
@@ -17,10 +18,13 @@ nonisolated private let mainViewLogger = Logger(
 /// and a footer with a brief summary. Delegates all logic to `MainViewModel`.
 ///
 /// View states:
-/// - No permissions (AC-2d): empty state with return-to-onboarding button
+/// - No permissions (AC-2d): in-window screen-grant flow (#277), mirroring onboarding's
+///   request/open-settings/awaiting/auto-relaunch machinery, with a demoted
+///   return-to-onboarding fallback
 /// - Normal: section cards + Record button
 ///
 /// Section sub-views live in `MainView+Sections.swift`.
+/// No-permissions empty-state sub-views live in `MainView+NoPermissions.swift`.
 /// Preview doubles and `#Preview` blocks live in `MainView+Previews.swift`.
 @MainActor
 struct MainView: View {
@@ -32,8 +36,10 @@ struct MainView: View {
         static let sectionSpacing: CGFloat = 12
         /// Aspect ratio for the camera preview card (16:9 landscape).
         static let previewAspectRatio: CGFloat = 16.0 / 9.0 // swiftlint:disable:this no_magic_numbers
-        /// Maximum height for the camera preview card so it stays compact inside the fixed window (#74).
-        static let previewMaxHeight: CGFloat = 140
+        /// Maximum height for the camera preview card: still compact inside the fixed 460×660 window (#74/#316),
+        /// but tall enough that the 16:9 preview nearly fills the 392pt card inner width, minimizing the
+        /// pillarbox margins on either side (#267). At 180pt the preview is 320pt wide → ~36pt margin per side.
+        static let previewMaxHeight: CGFloat = 180
         static let recordButtonHeight: CGFloat = 44
         static let rowSpacing: CGFloat = 8
         static let iconColumnWidth: CGFloat = 16
@@ -87,6 +93,9 @@ struct MainView: View {
         .frame(width: WindowDefaults.width, height: WindowDefaults.height)
         .task {
             await self.model.loadDevices()
+            // One-shot idle disk-space estimate (AC-1, T-7): computed once here, after
+            // `loadDevices()` resolves the display — no idle polling (see `refreshIdleDiskEstimate`).
+            await self.model.refreshIdleDiskEstimate()
             // Parks here until the view disappears: SwiftUI cancels the task, which
             // terminates the device-change stream and tears down its observer.
             await self.model.observeDeviceChanges()
@@ -137,7 +146,11 @@ struct MainView: View {
             "Папка для записи недоступна",
             isPresented: Binding(
                 get: { self.model.outputDirectoryError != nil },
-                set: { if !$0 { self.model.outputDirectoryError = nil } }
+                set: {
+                    if !$0 {
+                        self.model.outputDirectoryError = nil
+                    }
+                }
             )
         ) {
             Button("ОК") { self.model.outputDirectoryError = nil }
@@ -146,33 +159,6 @@ struct MainView: View {
                 Text(message)
             }
         }
-    }
-
-    // MARK: - No permissions empty state (AC-2d)
-
-    private var noPermissionsView: some View {
-        VStack(spacing: Metrics.noPermissionsSpacing) {
-            Spacer()
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: Metrics.emptyIconSize))
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
-            Text("Запись недоступна")
-                .font(.title3)
-                .fontWeight(.semibold)
-            Text("Выдайте разрешения на запись экрана или камеру, чтобы начать.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, Metrics.noPermissionsTextPaddingH)
-            Button("Вернуться к разрешениям") {
-                self.onReturnToOnboarding()
-            }
-            .buttonStyle(.borderedProminent)
-            .accessibilityLabel("Вернуться к разрешениям")
-            Spacer()
-        }
-        .padding(.horizontal, Metrics.outerPaddingH)
     }
 
     // MARK: - Main content
@@ -193,6 +179,19 @@ struct MainView: View {
             }
             self.stickyFooter
         }
+        // Menu-bar-first app: ⌘, only fires when Onset is frontmost, so the config screen
+        // needs a visible way into Settings. `SettingsLink` opens the Settings scene without
+        // an @Environment(\.openSettings) seam. The toolbar lives in the window title bar
+        // (chrome), so it does not consume the fixed `.contentSize` content frame.
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                SettingsLink {
+                    Image(systemName: "gearshape")
+                }
+                .accessibilityLabel("Настройки")
+                .help("Настройки")
+            }
+        }
     }
 
     /// The sticky footer: record button + optional reason/error text.
@@ -211,6 +210,13 @@ struct MainView: View {
 
     @ViewBuilder
     private var recordFooter: some View {
+        if let diskEstimate = self.model.diskSpaceEstimateDisplay {
+            Text(diskEstimate)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .accessibilityLabel(diskEstimate)
+        }
         if let reason = self.model.recordDisabledReason {
             Text(reason)
                 .font(.caption)
@@ -335,17 +341,35 @@ struct SectionCard<Content: View>: View {
 
 /// `NSViewRepresentable` wrapper for `CameraPreviewView`.
 ///
-/// `CameraPreviewView.init` wires the `AVCaptureVideoPreviewLayer`; `updateNSView` is a no-op
-/// by design. Force recreation by toggling `.id(model.previewGeneration)` on the call site.
+/// `CameraPreviewView.init` wires the `AVCaptureVideoPreviewLayer`; the device-change recreation
+/// is forced by toggling `.id(model.previewGeneration)` on the call site. `updateNSView` is the
+/// SOLE writer of the preview connection's `isVideoMirrored`: driven by `cameraMirror` (observed
+/// from `AppSettings`), it flips the preview live as a cheap layer transform — no session
+/// reconfiguration, no `CameraSource` rebuild, no flicker.
 struct CameraPreviewRepresentable: NSViewRepresentable {
     let sessionHandle: SessionHandle?
+
+    /// Whether the live preview is horizontally mirrored. Sourced from `AppSettings.cameraMirror`
+    /// at the call site so SwiftUI re-invokes `updateNSView` when the toggle changes.
+    let cameraMirror: Bool
 
     func makeNSView(context: Context) -> CameraPreviewView {
         CameraPreviewView(sessionHandle: self.sessionHandle)
     }
 
     func updateNSView(_ nsView: CameraPreviewView, context: Context) {
-        // No-op: CameraPreviewView wires the layer in init.
-        // Caller must use .id() to force recreation when sessionHandle changes.
+        // Sole writer of the preview connection's mirror state. The layer itself is wired in
+        // CameraPreviewView.init (which also disables automatic mirroring); device changes are
+        // handled by .id()-driven recreation at the call site.
+        // isVideoMirroringSupported guard mirrors the recording path (applyRecordingMirror).
+        guard let connection = nsView.previewLayer?.connection, connection.isVideoMirroringSupported else {
+            return
+        }
+        // updateNSView runs on every SwiftUI pass (device discovery, permission/hover/state churn);
+        // only touch the connection when the value actually differs to avoid redundant writes.
+        guard connection.isVideoMirrored != self.cameraMirror else {
+            return
+        }
+        connection.isVideoMirrored = self.cameraMirror
     }
 }

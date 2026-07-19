@@ -110,6 +110,18 @@ nonisolated enum CapabilityResolver {
         // while preserving the capped fps. The raw scalar arithmetic is kept here: the
         // solver legitimately needs the scalar values (budget remainder, pixel count,
         // sqrt aspect-solve) — not the boolean predicate.
+        //
+        // 4K camera + 4K screen budget note (deliberate acceptance):
+        //   Budget cap = 995M px/s.  cameraRateInfo uses fps = min(maxFps, maxScreenFps),
+        //   so a Brio 4K@30 contributes 3840×2160×30 ≈ 248.8M px/s.
+        //   A 4K@60 screen contributes 3840×2160×60 ≈ 497.7M px/s.
+        //   Combined ≈ 746.5M < 995M → ~25% headroom → screen is NOT downscaled. ✓
+        //
+        //   Knife-edge: a hypothetical 4K@60 camera would contribute 497.7M px/s;
+        //   combined with a 4K@60 screen ≈ 995.3M > 995M → the screen WOULD be
+        //   shaved by one solver step. The Brio announces 4K@30, so it fits cleanly.
+        //   If a future 4K@60 camera appears and the screen appears to shrink by a
+        //   tiny amount, this is correct resolver behaviour — not a bug.
         (capped.width, capped.height) = Self.downscaleIfNeeded(
             width: capped.width,
             height: capped.height,
@@ -141,10 +153,15 @@ nonisolated enum CapabilityResolver {
         let cameraPlan: ResolvedCameraPlan? = cameraFormat.map { format in
             let evenCamW: Int = max(Int(format.pixelWidth) & ~1, Self.minEvenDimension)
             let evenCamH: Int = max(Int(format.pixelHeight) & ~1, Self.minEvenDimension)
+            // Grid+bitrate must run at the real activated cadence — `CameraSource` pins the
+            // device to `config.minCameraFps` (activateFormat / nominalFps), regardless of
+            // the format's announced maxFps. Binding to `minCameraFps` never raises the grid
+            // (selected formats always have maxFps ≥ minCameraFps); the budget reservation in
+            // `cameraRateInfo` intentionally stays conservative at maxFps.
             return ResolvedCameraPlan(
                 width: evenCamW,
                 height: evenCamH,
-                fps: cameraFps
+                fps: min(cameraFps, config.minCameraFps)
             )
         }
 

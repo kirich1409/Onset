@@ -144,17 +144,38 @@ extension MainViewModel {
             self.cameraEnabled = true
             self.selectedCameraID = id
             self.disconnectedCameraName = nil
+            // A selected camera is present this session — arm the live-disconnect announcement (#256).
+            self.hasObservedPresentCamera = true
             mainViewModelLogger.debug("Restored camera selection — device present")
 
         case let .disconnected(name):
             self.cameraEnabled = true
             self.selectedCameraID = nil
+            // Edge-trigger on the nil→non-nil transition: loadCamerasAndMicrophones re-runs on every
+            // device-change event, so the still-unplugged camera re-enters .disconnected on each
+            // reload. Announcing only on the edge prevents VoiceOver spam from unrelated device
+            // changes while the camera stays absent (#256).
+            let wasConnected = self.disconnectedCameraName == nil
             self.disconnectedCameraName = name
             mainViewModelLogger.info("Saved camera not available — showing disconnected notice")
+            // The dominant disconnect flow nils selectedCameraID → preview goes .idle (no announce)
+            // and CameraUnavailableRow is silent. Announce explicitly here (the single real
+            // live-unplug site); gated so a saved-but-absent camera at launch stays silent (#256).
+            let announcement = cameraDisconnectAnnouncement(
+                name: name,
+                hasObservedPresentCamera: self.hasObservedPresentCamera
+            )
+            if wasConnected, let announcement {
+                self.postAnnouncementSeam(announcement)
+            }
 
         case .noSavedSelection:
             // First launch or explicitly cleared — apply the first-camera default.
             self.selectFirstCameraIfNeeded()
+            // Arm the announcement only if a real camera actually got auto-selected.
+            if self.selectedCamera != nil {
+                self.hasObservedPresentCamera = true
+            }
         }
 
         switch DeviceSelectionResolver.resolve(
@@ -256,6 +277,12 @@ extension MainViewModel {
         var cameraDesc: String?
         if let camera = self.activeCamera {
             let name = self.cameraLabel(for: camera)
+            // Intentionally uses the baseline tier (≤1080p): pickBestFormat is called WITHOUT
+            // allowAboveFullHD, which defaults to false. The record path uses the record tier
+            // (4K, allowAboveFullHD: true) via resolveCameraFormat in MainViewModel+Record.swift —
+            // native 4K IS deliverable and held for the whole recording (L5-verified, 2026-07-02).
+            // The checklist label is an availability hint, not the exact record format — this is
+            // accepted behavior, not a bug.
             if let fmt = try? CameraFormatSelector.pickBestFormat(
                 from: camera.formats,
                 minFps: Double(RecordingConfiguration.mvpDefault.minCameraFps)

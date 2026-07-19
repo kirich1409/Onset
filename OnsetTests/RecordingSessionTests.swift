@@ -52,7 +52,9 @@ private final class FakeEncoder: EncoderControlling, @unchecked Sendable {
 
     func start() throws {
         self.startCalled = true
-        if let startError { throw startError }
+        if let startError {
+            throw startError
+        }
     }
 
     func ingest(_ frame: VideoFrame) {
@@ -130,7 +132,9 @@ private final class FakeScreenSource: VideoFrameSource, @unchecked Sendable {
 
     func start(anchoredTo anchor: HostTimeAnchor) async throws {
         self.startCalled = true
-        if let startError { throw startError }
+        if let startError {
+            throw startError
+        }
     }
 
     func stop() async {
@@ -481,7 +485,9 @@ private func eventually(
 -> Bool {
     let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
     while Date() < deadline {
-        if await condition() { return true }
+        if await condition() {
+            return true
+        }
         try? await Task.sleep(nanoseconds: 5_000_000) // 5 ms
     }
     return await condition()
@@ -506,7 +512,9 @@ struct RecordingSessionProbeTests {
         do {
             try await session.start(permissions: SessionFixtures.fullPermissions())
         } catch let error as RecordingError {
-            if case .noHardwareEncoder = error { isNoHardwareEncoder = true }
+            if case .noHardwareEncoder = error {
+                isNoHardwareEncoder = true
+            }
         }
         #expect(isNoHardwareEncoder, "start() must throw .noHardwareEncoder")
 
@@ -696,7 +704,7 @@ struct RecordingSessionStopTests {
         let threshold = RecordingConfiguration.mvpDefault.postStopDropWarningThreshold
         let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
         encoders.screenEncoder.emitDrop(DropEvent(
-            reason: .encoderBackpressureDrops, source: .encode, count: threshold, detectedAt: dropPts
+            reason: .encoderBackpressureDrops, source: .encodeScreen, count: threshold, detectedAt: dropPts
         ))
         // Poll until the drop is ingested so the test doesn't stop before the monitor sees it.
         _ = await eventually { await session.currentDrops().counters.encoderBackpressureDrops >= 1 }
@@ -726,7 +734,7 @@ struct RecordingSessionStopTests {
         // counters would pass vacuously even without the idempotency fix.
         let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
         encoders.screenEncoder.emitDrop(DropEvent(
-            reason: .encoderBackpressureDrops, source: .encode, count: 1, detectedAt: dropPts
+            reason: .encoderBackpressureDrops, source: .encodeScreen, count: 1, detectedAt: dropPts
         ))
 
         let first = await session.stop()
@@ -768,7 +776,7 @@ struct RecordingSessionStopTests {
         // the memoized-task fix (both returns of zeroed counters look "equal").
         let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
         encoders.screenEncoder.emitDrop(DropEvent(
-            reason: .encoderBackpressureDrops, source: .encode, count: 1, detectedAt: dropPts
+            reason: .encoderBackpressureDrops, source: .encodeScreen, count: 1, detectedAt: dropPts
         ))
 
         // Fire two concurrent stop() calls. Actor serialization guarantees the first to arrive
@@ -1155,7 +1163,7 @@ struct RecordingSessionStateSurfaceTests {
         let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
         let burst = RecordingConfiguration.mvpDefault.degradedBackpressureThreshold + 1
         encoders.screenEncoder.emitDrop(
-            DropEvent(reason: .encoderBackpressureDrops, source: .encode, count: burst, detectedAt: dropPts)
+            DropEvent(reason: .encoderBackpressureDrops, source: .encodeScreen, count: burst, detectedAt: dropPts)
         )
 
         let first = await received.value
@@ -1182,7 +1190,7 @@ struct RecordingSessionStateSurfaceTests {
 
         let dropPts = CMTime(seconds: 1.0, preferredTimescale: 600)
         encoders.screenEncoder.emitDrop(DropEvent(
-            reason: .encoderBackpressureDrops, source: .encode, count: 3, detectedAt: dropPts
+            reason: .encoderBackpressureDrops, source: .encodeScreen, count: 3, detectedAt: dropPts
         ))
 
         // Poll currentDrops() until the asynchronously-ingested drop is reflected.
@@ -1246,6 +1254,7 @@ struct RecordingSessionOutputDirectoryTests {
             bitDepth: mvp.bitDepth,
             maxScreenFps: mvp.maxScreenFps,
             minCameraFps: mvp.minCameraFps,
+            cameraMirror: mvp.cameraMirror,
             bitrateTable: mvp.bitrateTable,
             dataRateLimitsPeakMultiplier: mvp.dataRateLimitsPeakMultiplier,
             keyFrameIntervalSeconds: mvp.keyFrameIntervalSeconds,
@@ -1259,6 +1268,7 @@ struct RecordingSessionOutputDirectoryTests {
             degradedWindowSeconds: mvp.degradedWindowSeconds,
             postStopDropWarningThreshold: mvp.postStopDropWarningThreshold,
             budgetCap: mvp.budgetCap,
+            diskThresholds: mvp.diskThresholds,
             baseOutputDirectory: tempDir
         )
 
@@ -1323,6 +1333,7 @@ struct RecordingSessionOutputDirectoryTests {
             bitDepth: mvp.bitDepth,
             maxScreenFps: mvp.maxScreenFps,
             minCameraFps: mvp.minCameraFps,
+            cameraMirror: mvp.cameraMirror,
             bitrateTable: mvp.bitrateTable,
             dataRateLimitsPeakMultiplier: mvp.dataRateLimitsPeakMultiplier,
             keyFrameIntervalSeconds: mvp.keyFrameIntervalSeconds,
@@ -1336,6 +1347,7 @@ struct RecordingSessionOutputDirectoryTests {
             degradedWindowSeconds: mvp.degradedWindowSeconds,
             postStopDropWarningThreshold: mvp.postStopDropWarningThreshold,
             budgetCap: mvp.budgetCap,
+            diskThresholds: mvp.diskThresholds,
             baseOutputDirectory: base
         )
 
@@ -1523,7 +1535,9 @@ struct RecordingSessionLiveTests {
         }
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer {
-            if !keepOutput { try? FileManager.default.removeItem(at: tempDir) }
+            if !keepOutput {
+                try? FileManager.default.removeItem(at: tempDir)
+            }
         }
 
         let writerFactory = LiveWriterFactory(configuration: config) { kind in
@@ -1959,6 +1973,102 @@ struct RecordingSessionProductionNamingTests {
             let size = (attrs?[.size] as? Int) ?? 0
             #expect(size > 0, "file must be non-empty: \(url.lastPathComponent) size=\(size)")
         }
+    }
+}
+
+// MARK: - writerFactoryBuilder DI seam
+
+/// Overload of `makeSession` that accepts a `writerFactoryBuilder` closure instead of a
+/// pre-built `writers:` factory. Allows tests to verify that the builder is called and that
+/// the URL provider it receives produces sessionDirectory-rooted paths.
+private func makeSession(
+    writerFactoryBuilder: (@Sendable (@escaping @Sendable (RecordingPipelineKind) -> URL) -> any WriterFactory)? = nil
+)
+-> RecordingSession {
+    let encoders = FakeEncoderFactory()
+    let sources = FakeSourceFactory()
+    let okProbe: @Sendable () -> ProbeResult = { .ok(SessionFixtures.plan()) }
+    return RecordingSession(
+        plan: SessionFixtures.plan(),
+        display: SessionFixtures.display(),
+        cameraDevice: SessionFixtures.cameraDevice(),
+        cameraFormat: SessionFixtures.cameraFormat(),
+        micDevice: SessionFixtures.micDevice(),
+        config: .mvpDefault,
+        probe: okProbe,
+        encoderFactory: encoders,
+        writerFactoryBuilder: writerFactoryBuilder,
+        sourceFactory: sources
+    )
+}
+
+/// Overload of `makeSession` that accepts both an explicit `writers:` factory and a
+/// `writerFactoryBuilder`, allowing tests to verify the priority chain.
+private func makeSession(
+    writers: SessionFakeWriterFactory,
+    writerFactoryBuilder: (@Sendable (@escaping @Sendable (RecordingPipelineKind) -> URL) -> any WriterFactory)? = nil
+)
+-> RecordingSession {
+    let encoders = FakeEncoderFactory()
+    let sources = FakeSourceFactory()
+    let okProbe: @Sendable () -> ProbeResult = { .ok(SessionFixtures.plan()) }
+    return RecordingSession(
+        plan: SessionFixtures.plan(),
+        display: SessionFixtures.display(),
+        cameraDevice: SessionFixtures.cameraDevice(),
+        cameraFormat: SessionFixtures.cameraFormat(),
+        micDevice: SessionFixtures.micDevice(),
+        config: .mvpDefault,
+        probe: okProbe,
+        encoderFactory: encoders,
+        writerFactory: writers,
+        writerFactoryBuilder: writerFactoryBuilder,
+        sourceFactory: sources
+    )
+}
+
+// MARK: - writerFactoryBuilder wiring tests
+
+/// Verifies the three-way priority chain: explicit `writerFactory` > `writerFactoryBuilder` >
+/// live `LiveWriterFactory`.
+///
+/// These tests exercise `RecordingSession.init` in isolation — no session start, no hardware.
+@Suite("RecordingSession — writerFactoryBuilder wiring")
+struct RecordingSessionBuilderWiringTests {
+    // MARK: - Priority: explicit writerFactory beats writerFactoryBuilder
+
+    /// When both `writerFactory` and `writerFactoryBuilder` are provided, the explicit factory
+    /// is used and the builder is never called (the `??` short-circuits).
+    @Test("writerFactory wins over writerFactoryBuilder when both provided")
+    func writerFactory_winsOverBuilder_whenBothProvided() {
+        final class BuilderInvoked: @unchecked Sendable { var called = false }
+        let invoked = BuilderInvoked()
+        let explicit = SessionFakeWriterFactory()
+        let session = makeSession(writers: explicit) { _ in
+            invoked.called = true
+            return SessionFakeWriterFactory()
+        }
+        #expect(!invoked.called)
+        _ = session // silence unused-result warning
+    }
+
+    // MARK: - writerFactoryBuilder receives a sessionDirectory-rooted URL provider
+
+    /// When `writerFactoryBuilder` is provided (and `writerFactory` is nil), the builder is
+    /// called with a URL provider whose output is a descendant of `session.sessionDirectory`.
+    @Test("writerFactoryBuilder receives a sessionDirectory-rooted URL provider")
+    func writerFactoryBuilder_receivesSessionDirRootedURLProvider() {
+        final class CapturedURL: @unchecked Sendable { var value: URL? }
+        let captured = CapturedURL()
+        let session = makeSession { urlProvider in
+            captured.value = urlProvider(.screen)
+            return LiveWriterFactory(configuration: .mvpDefault, urlProvider: urlProvider)
+        }
+        guard let url = captured.value else {
+            Issue.record("writerFactoryBuilder was not called")
+            return
+        }
+        #expect(url.path(percentEncoded: false).hasPrefix(session.sessionDirectory.path(percentEncoded: false)))
     }
 }
 

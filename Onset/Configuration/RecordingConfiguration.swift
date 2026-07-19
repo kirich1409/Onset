@@ -66,6 +66,16 @@ nonisolated struct RecordingConfiguration {
     /// resolution format with fps ≥ this value.
     nonisolated let minCameraFps: Int
 
+    // MARK: - Camera
+
+    /// Whether the camera image is horizontally mirrored in the recorded output.
+    ///
+    /// Capture-side preference (consistent with `minCameraFps`), read fresh at record start and
+    /// applied to the recording VDO connection's `isVideoMirrored` at session setup. The live
+    /// preview honors the same value reactively; the recorded file honors it from the next
+    /// session start. Default `false` (raw sensor orientation).
+    nonisolated let cameraMirror: Bool
+
     // MARK: - Rate Control (VBR)
 
     /// Average-bitrate lookup table as an ordered array of (key, value) pairs.
@@ -219,6 +229,13 @@ nonisolated struct RecordingConfiguration {
     /// AC-5: screen resolution is capped so combined pixel-rate stays within this budget.
     nonisolated let budgetCap: EngineBudgetCap
 
+    // MARK: - Disk Space Monitoring (#88)
+
+    /// Thresholds and cadence for proactive disk-space monitoring during recording.
+    ///
+    /// **Placeholders** — reasoned defaults pending L5 calibration (AC-10). See `DiskThresholds`.
+    nonisolated let diskThresholds: DiskThresholds
+
     // MARK: - Output Directory
 
     /// Base directory under which session subdirectories are created (`~/Movies/Onset/` by default).
@@ -306,12 +323,12 @@ nonisolated struct RecordingConfiguration {
     /// is still inferred as `@MainActor`-isolated, causing a compile error. A named function
     /// carries its `nonisolated` annotation unambiguously through the type-checker.
     ///
-    /// - Parameter baseDirectory: The user-selected base output directory. When `nil`,
-    ///   `~/Movies/Onset/` is used as the default.
-    nonisolated static func makeMVPDefault(
-        baseDirectory: URL? = nil
-    )
-    -> Self {
+    /// - Parameters:
+    ///   - baseDirectory: The user-selected base output directory. When `nil`,
+    ///     `~/Movies/Onset/` is used as the default.
+    ///   - cameraMirror: Whether the recorded camera image is horizontally mirrored. Default
+    ///     `false` so `static let mvpDefault` and existing callers compile unchanged.
+    nonisolated static func makeMVPDefault(baseDirectory: URL? = nil, cameraMirror: Bool = false) -> Self {
         // `RecordingOutput.directory()` is the single authoritative source for `~/Movies/Onset/`.
         // It uses `NSHomeDirectory()` internally — a plain Foundation free function with no actor
         // isolation — so it is safe to call from this `nonisolated` context.
@@ -330,6 +347,9 @@ nonisolated struct RecordingConfiguration {
         // Source: spec "CapabilityProbe и pre-flight бюджет": "один движок ≈ 4K120 ≈ ~995M px/s"
         let budgetCap = EngineBudgetCap(maxPixelsPerSecond: 995_000_000)
 
+        let movieFragmentIntervalSeconds = 4.0
+        let diskThresholds = Self.makeDefaultDiskThresholds(movieFragmentIntervalSeconds: movieFragmentIntervalSeconds)
+
         return Self(
             container: .mp4,
             codec: .hevc,
@@ -341,6 +361,7 @@ nonisolated struct RecordingConfiguration {
             bitDepth: 8,
             maxScreenFps: 60,
             minCameraFps: 30,
+            cameraMirror: cameraMirror,
             bitrateTable: bitrateTable,
             dataRateLimitsPeakMultiplier: 2.0,
             keyFrameIntervalSeconds: 2.0,
@@ -350,7 +371,7 @@ nonisolated struct RecordingConfiguration {
             audioSampleRate: 48000,
             audioChannelCount: 1,
             audioBitrate: 128_000,
-            movieFragmentInterval: 4.0,
+            movieFragmentInterval: movieFragmentIntervalSeconds,
             // Degraded-state policy placeholders — калибруется post-MVP against real drop rates.
             degradedBackpressureThreshold: 30,
             degradedWindowSeconds: 2.0,
@@ -358,7 +379,37 @@ nonisolated struct RecordingConfiguration {
             // Critical-recording-signals placeholders live as property defaults on the stored
             // properties themselves (single source of truth) — calibrate post-MVP via L5 (MX Brio).
             budgetCap: budgetCap,
+            diskThresholds: diskThresholds,
             baseOutputDirectory: baseOutputDirectory
+        )
+    }
+
+    /// Builds the default disk-space monitoring thresholds (#88).
+    ///
+    /// Reasoned defaults, not yet calibrated (AC-10/L5). Split out of `makeMVPDefault` purely to
+    /// keep that function's body under the strict `function_body_length` budget.
+    ///
+    /// - Parameter movieFragmentIntervalSeconds: Sizes `ewmaTimeConstantSeconds` (≥ 4×) and
+    ///   `readEverySeconds` (≈ 1×).
+    nonisolated static func makeDefaultDiskThresholds(movieFragmentIntervalSeconds: Double) -> DiskThresholds {
+        let bytesPerGB: Int64 = 1_000_000_000
+        // EWMA window ≥ 4× movieFragmentInterval (~16s): the smoothed slope reflects ≥ 4 reads.
+        let ewmaTimeConstantSeconds = 4.0 * movieFragmentIntervalSeconds
+        return DiskThresholds(
+            // System warn ≤10GB / stop ≤5GB; output warn ETA≤10min|≤10GB / stop ETA≤2min|≤2GB.
+            systemWarnBytes: 10 * bytesPerGB,
+            systemStopBytes: 5 * bytesPerGB,
+            outputWarnBytes: 10 * bytesPerGB,
+            outputStopBytes: 2 * bytesPerGB,
+            outputWarnEtaSeconds: 10 * 60,
+            outputStopEtaSeconds: 2 * 60,
+            ewmaTimeConstantSeconds: ewmaTimeConstantSeconds,
+            readEverySeconds: movieFragmentIntervalSeconds,
+            // Warmup spans the full smoothing window before the EWMA slope is trusted.
+            warmupSeconds: ewmaTimeConstantSeconds,
+            // Hysteresis release margin (0.5 GB) + de-escalation debounce (~2 read cycles).
+            hysteresisReleaseBytes: bytesPerGB / 2,
+            deescalationDebounceSeconds: 2 * movieFragmentIntervalSeconds
         )
     }
 }
@@ -381,6 +432,7 @@ extension RecordingConfiguration: Equatable {
             && lhs.bitDepth == rhs.bitDepth
             && lhs.maxScreenFps == rhs.maxScreenFps
             && lhs.minCameraFps == rhs.minCameraFps
+            && lhs.cameraMirror == rhs.cameraMirror
             && bitrateTablesEqual
             && lhs.dataRateLimitsPeakMultiplier == rhs.dataRateLimitsPeakMultiplier
             && lhs.keyFrameIntervalSeconds == rhs.keyFrameIntervalSeconds
@@ -404,6 +456,7 @@ extension RecordingConfiguration: Equatable {
             && lhs.criticalNotificationDedupeSeconds == rhs.criticalNotificationDedupeSeconds
             && lhs.budgetCap == rhs.budgetCap
             && lhs.baseOutputDirectory == rhs.baseOutputDirectory
+            && lhs.diskThresholds == rhs.diskThresholds
     }
 }
 

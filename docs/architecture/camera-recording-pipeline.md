@@ -57,25 +57,37 @@ C callback → EncodedSampleSink
 | `enc_ms` | encoder | время VTCompressionSessionEncodeFrame |
 | `pend_ms` | encoder | время pendingFrameCount() |
 | `pending_max` | encoder | пик NumberOfPendingFrames за окно |
+| `pend_qps` | encoder | частота запросов pendingFrameCount() (VTSessionCopyProperty), запросов/с — замер для #151 |
 | `ing_ms` | encoder | полное время ingest() |
 
 ---
 
 ## 2. Выбор формата и пиннинг частоты
 
-`CameraFormatSelector.pickBestFormat` реализует политику 16:9 + Full HD (issue #145):
+`CameraFormatSelector.pickBestFormat` реализует политику 16:9 (issue #145), с двумя
+резолюционными ярусами через `allowAboveFullHD`:
 
 1. Отфильтровываются форматы с `maxFps < 30` (инвариант AC-5).
 2. Из оставшихся выбираются форматы 16:9 (`pixelWidth * 9 == pixelHeight * 16`).
-3. Среди 16:9-форматов предпочитается наибольший с `height ≤ 1080` (1080p при наличии,
-   иначе шаг вниз до 720p и т.д.); если все 16:9-форматы выше 1080p — берётся наименьший
-   из них (ближайший сверху к целевому разрешению).
+3. Среди 16:9-форматов:
+   - `allowAboveFullHD == false` (дефолт — preview / device-list) — предпочитается наибольший
+     с `height ≤ 1080` (1080p при наличии, иначе шаг вниз до 720p и т.д.); если все 16:9-форматы
+     выше 1080p — берётся наименьший из них (ближайший сверху к целевому разрешению).
+   - `allowAboveFullHD == true` (record path, `resolveCameraFormat`) — кэп снят: выбирается
+     формат с максимальным числом пикселей среди всех 16:9-кандидатов (4K, когда камера
+     его отдаёт).
 4. При равном разрешении побеждает бо́льший `maxFps` (60 перед 30).
 5. Если 16:9-форматов нет — fallback на максимальное число пикселей (tie-break: бо́льший fps).
 6. `RecordingError.noSuitableCameraFormat` бросается только при пустом qualifying-множестве.
 
-Следствие: Brio, предлагающий и 4K30, и 1080p60, получит **1080p** (16:9, ≤1080, выше fps),
-а не 4K30. 4K недоступен через AVFoundation на macOS (см. [`docs/quality/macos-avfoundation-camera-limits.md`](../quality/macos-avfoundation-camera-limits.md)); вынесено в [#177](https://github.com/kirich1409/Onset/issues/177) (нужен CMIO/IOKit-стек). 1080p60 — аналогично: AVFoundation ограничивает реальную доставку ~20fps, 60fps вынесено в [#178](https://github.com/kirich1409/Onset/issues/178).
+Следствие: Brio, предлагающий и 4K30, и 1080p60, получит **1080p** на preview/device-list пути
+(16:9, ≤1080, выше fps), но **4K на record-пути** — 4K достижим через AVFoundation на macOS
+(hold-lock через `startRunning()`, #265; см. [`docs/quality/macos-avfoundation-camera-limits.md`](../quality/macos-avfoundation-camera-limits.md)
+за полной историей вердикта). Камера-энкодер строится от resolved-размеров фактически выбранного
+формата (`CapabilityResolver` → `RecordingComponentFactories`), поэтому апскейл-рассогласования
+между 4K-энкодером и 1080p-доставкой нет ни на одном пути. 60fps остаётся недостижим на любом
+пути — hardware-constraint конкретной камеры (Brio ~20-25fps фактической каденции), не лимит
+AVFoundation; отслеживается в [#178](https://github.com/kirich1409/Onset/issues/178).
 Встроенная камера FaceTime HD (квадратный Center-Stage формат 1552×1552) теперь получит
 16:9-режим (например, 1920×1080) — центральное следствие введения 16:9-предпочтения.
 
@@ -186,6 +198,12 @@ device.activeVideoMaxFrameDuration = bestRange.minFrameDuration  // min == max
 
 **Изменение:** ветка fix #112 (конфиг-флип + телеметрия + L5 A/B-харнесс).
 
+**Связанный замер (#151).** На статичном экране clock-driver эмитит ~fps holds/дорожку,
+и каждый hold через `submit()` делает один `pendingFrameCount()` (`VTSessionCopyProperty`).
+Ключ `pend_qps` в encoder-строке показывает частоту этих запросов. Решение о tick-scoped
+кэше pending (чтобы holds одного тика читали одно значение вместо N round-trip в VT)
+принимается ТОЛЬКО после замера `pend_qps` на L5 (тихая машина, MX Brio) — не спекулятивно.
+
 ### 6.3 Гипотезы #112, опровергнутые A/B на железе (2026-06-07)
 
 Три гипотезы были выдвинуты до нахождения корневой причины и проверены на
@@ -287,13 +305,27 @@ overflow 12–15/с (2026-06-07, issue #112). На тихой машине overf
 
 ### 8.4 Режимы камеры
 
-`CameraFormatSelector` переключён на политику 16:9 + Full HD (issue #145): вместо
-«максимум пикселей» алгоритм предпочитает наибольший 16:9-формат с `height ≤ 1080`.
-Для Brio это означает автовыбор **1080p** (не 4K30): 4K30 и 1080p60 **недостижимы через
-AVFoundation на macOS** (L5-verified; Brio реально отдаёт ~20fps) — вынесены в
-[#177](https://github.com/kirich1409/Onset/issues/177) (4K) и [#178](https://github.com/kirich1409/Onset/issues/178) (60fps),
-требуют смены стека захвата (CMIO/IOKit). MVP-скоуп камеры: 16:9, макс. доставляемое
-разрешение (1080p), авто-выбором, без ручного пикера (issue #113 закрыт).
+`CameraFormatSelector` переключён на политику 16:9 (issue #145): вместо «максимум пикселей»
+алгоритм предпочитает наибольший 16:9-формат — на два яруса, через `allowAboveFullHD`:
+
+- **Preview / device-list** (`allowAboveFullHD: false`, дефолт) — кэп `height ≤ 1080`. Для Brio
+  это означает автовыбор 1080p для превью и для чеклист-лейбла (`MainViewModel+Devices.swift`).
+- **Record path** (`allowAboveFullHD: true`, `resolveCameraFormat` в `MainViewModel+Record.swift`) —
+  кэп снят: выбирается наибольшее доступное 16:9-разрешение (4K для Brio). Камера-энкодер строится
+  от этих же resolved-размеров (`CapabilityResolver` → `RecordingComponentFactories`), поэтому
+  рассогласования VT-сессии с фактически доставляемым форматом нет.
+
+4K достижим через AVFoundation на macOS: изначальный вывод «4K недостижимо, нужен CMIO/IOKit»
+([#177](https://github.com/kirich1409/Onset/issues/177)) опровергнут — 4K реверсировался в 1080p
+из-за бага lock-lifecycle приложения (`unlockForConfiguration()` до `startRunning()`), исправлено
+в [#265](https://github.com/kirich1409/Onset/issues/265). L5-прогон полного record-пути
+(2026-07-02, MX Brio) подтвердил native 4K, удержанный всю запись, с нулём потерь кадров даже под
+worst-case полноэкранным движением экрана 4K60. Подробности:
+`docs/quality/macos-avfoundation-camera-limits.md`.
+
+60fps остаётся недостижим на обеих камерах — hardware-constraint конкретно Brio
+(отслеживается в [#178](https://github.com/kirich1409/Onset/issues/178)), не связано со
+снятием 4K-кэпа выше. MVP-скоуп камеры: 16:9, авто-выбором, без ручного пикера (issue #113 закрыт).
 
 Ручное управление источником камеры реализовано через
 `MainViewModel.cameraPickerSelection` (#224, поверх `cameraEnabled` из #77, #76):

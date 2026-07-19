@@ -177,6 +177,7 @@ struct StageRateAggregatorEncoderFormatTests {
         #expect(line.contains(" pend_ms_avg="))
         #expect(line.contains(" pend_ms_max="))
         #expect(line.contains(" pending_max="))
+        #expect(line.contains(" pend_qps="))
         #expect(line.contains(" ing_ms_avg="))
         #expect(line.contains(" ing_ms_max="))
         #expect(line.hasSuffix("win_s=1.0"))
@@ -424,6 +425,20 @@ struct StageRateAggregatorEncoderDurationTests {
         #expect(line.contains(" pending_max=9 "))
     }
 
+    @Test("pend_qps reports the pendingFrameCount query rate over the window (#151)")
+    func pendQueryRate() throws {
+        var agg = StageRateAggregator(lane: "camera", stage: .encoder, nominalFps: 30)
+        agg.recordPendingQuery(durationMs: 1.0)
+        agg.recordPendingQuery(durationMs: 1.0)
+        agg.recordPendingQuery(durationMs: 1.0)
+        agg.recordPendingQuery(durationMs: 1.0)
+        #expect(agg.pendingQueryCount == 4)
+        // 4 queries over a 2-second window → 2.0 queries/second.
+        let result = agg.flush(elapsedSeconds: 2.0)
+        let line = try #require(result)
+        #expect(line.contains(" pend_qps=2.0 "))
+    }
+
     @Test("ing_ms_avg and ing_ms_max accumulate ingest durations")
     func ingestDuration() throws {
         var agg = StageRateAggregator(lane: "camera", stage: .encoder, nominalFps: 30)
@@ -450,6 +465,7 @@ struct StageRateAggregatorEncoderDurationTests {
         #expect(line.contains(" pend_ms_avg=0.0 "))
         #expect(line.contains(" pend_ms_max=0.0 "))
         #expect(line.contains(" pending_max=0 "))
+        #expect(line.contains(" pend_qps=0.0 "))
         #expect(line.contains(" ing_ms_avg=0.0 "))
         #expect(line.contains(" ing_ms_max=0.0 "))
     }
@@ -464,6 +480,7 @@ struct StageRateAggregatorEncoderDurationTests {
         #expect(line.contains(" pend_ms_avg=0.0 "))
         #expect(line.contains(" pend_ms_max=0.0 "))
         #expect(line.contains(" pending_max=0 "))
+        #expect(line.contains(" pend_qps=0.0 "))
         #expect(line.contains(" ing_ms_avg=0.0 "))
         #expect(line.contains(" ing_ms_max=0.0 "))
     }

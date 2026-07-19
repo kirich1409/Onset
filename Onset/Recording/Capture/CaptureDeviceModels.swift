@@ -122,12 +122,19 @@ nonisolated struct MicrophoneDevice {
     /// **Never log this field.** Device uniqueIDs are PII-adjacent; log counts only.
     let uniqueID: String
 
-    /// `true` when this is the notebook's built-in microphone.
+    /// `true` for the notebook's internal microphone array — every device on the
+    /// built-in (`bltn`) transport EXCEPT the 3.5mm headphone-jack input.
     ///
-    /// Built-in mics deliver digital silence while the lid is closed (clamshell mode with an
-    /// external display), but no AVFoundation or CoreAudio property signals this — the device
-    /// stays connected and non-suspended. `isBuiltIn` is the flag that lets the picker hide
-    /// it while the lid is closed (see `DeviceDiscovery.microphonesAvailable(_:lidClosed:)`).
+    /// The internal mic array delivers digital silence while the lid is closed
+    /// (clamshell mode with an external display), but no AVFoundation or CoreAudio
+    /// property signals this — the device stays connected and non-suspended.
+    /// `isBuiltIn` is the flag that lets the picker hide it while the lid is closed
+    /// (see `DeviceDiscovery.microphonesAvailable(_:lidClosed:)`). It is set from
+    /// `DeviceDiscovery.isBuiltInMicrophone(uniqueID:transportType:)`, a fail-safe
+    /// discriminator: any `bltn`-transport mic is hidden (model-agnostic, so an
+    /// internal mic whose `uniqueID` differs is never left silently recording
+    /// silence), except the jack input (`BuiltInHeadphoneInputDevice`) — a physical
+    /// external mic that works lid-closed and must stay `false`/visible.
     let isBuiltIn: Bool
 
     /// Creates a microphone snapshot.

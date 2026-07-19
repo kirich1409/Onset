@@ -27,7 +27,13 @@ enum WindowID {
 /// content size with no flexible range for the user to drag.
 enum WindowDefaults {
     static let width: CGFloat = 460
-    static let height: CGFloat = 560
+    /// Tall enough that `MainView.mainContent`'s `ScrollView` does not need to actually
+    /// scroll in the worst realistic content state: all sections, the camera live preview
+    /// (#267), both device-loss notice rows (#261), and a footer disabled-reason line
+    /// (#316). Measured 648pt via `NSHostingView.fittingSize` on that layout; the
+    /// `ScrollView` itself stays in place as a safety net for larger Dynamic Type, not
+    /// the default state.
+    static let height: CGFloat = 660
     static let recordingWidth: CGFloat = 370
     static let recordingHeight: CGFloat = 420
 }
@@ -36,6 +42,12 @@ enum WindowDefaults {
 
 @main
 struct OnsetApp: App {
+    // MARK: - App delegate
+
+    /// Handles graceful termination (#243) and Dock-icon reopen while recording (#272) — see
+    /// `AppDelegate`.
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     // MARK: - Composition root
 
     /// The single `PermissionsService` instance shared across all scenes.
@@ -55,6 +67,17 @@ struct OnsetApp: App {
     /// The single recording-lifecycle owner, shared by all recording-aware surfaces (#36/#37/#38).
     /// Window actions are wired into it from `WindowActionsBridge` once the env actions exist.
     @State private var coordinator = RecordingCoordinator()
+
+    /// The single `@Observable` settings model — in-memory source of truth for app-wide settings.
+    ///
+    /// Owned here at the composition root and injected into every consumer (`RootView` →
+    /// `MainViewModel`, `MenuBarLabel`) so a toggle in the Settings window propagates live.
+    /// Under XCTest an `InMemorySettingsStore` is injected: this `@State` initial value is
+    /// evaluated even though the windows render `EmptyView`, and a `UserDefaults.standard`-backed
+    /// store would trap (see `UserDefaultsSettingsStore` / `OnsetTests/CLAUDE.md`).
+    @State private var appSettings = AppSettings(
+        store: isRunningUnderXCTest ? InMemorySettingsStore() as any SettingsPersisting : UserDefaultsSettingsStore()
+    )
 
     /// System-wide hotkey monitor (#67 / AC-9 third stop path). Created at app-init time;
     /// registered once from `WindowActionsBridge.onAppear` after the coordinator is wired.
@@ -84,11 +107,16 @@ struct OnsetApp: App {
                 RootView(
                     permissionsService: self.permissionsService,
                     coordinator: self.coordinator,
+                    appSettings: self.appSettings,
                     hasPostScreenGrantArg: CommandLine.arguments.contains(AppRelauncher.postScreenGrantArg)
                 )
                 // Capture the env window actions into the coordinator (a plain class cannot read
                 // @Environment(\.openWindow) itself). Also registers the system-wide hotkey (#67).
-                .background(WindowActionsBridge(coordinator: self.coordinator, hotKeyMonitor: self.hotKeyMonitor))
+                .background(WindowActionsBridge(
+                        coordinator: self.coordinator,
+                        hotKeyMonitor: self.hotKeyMonitor,
+                        appDelegate: self.appDelegate
+                    ))
             }
         }
         // Fixed-size window that wraps the content — prevents user resizing.
@@ -115,9 +143,24 @@ struct OnsetApp: App {
         // Menu bar item (#38). Full 3-state label and context menu.
         // Suppressed under XCTest so test hosts do not accumulate competing status items.
         MenuBarExtra(isInserted: .constant(!isRunningUnderXCTest)) {
-            MenuBarMenu(coordinator: self.coordinator, diagnosticsCoordinator: self.diagnosticsCoordinator)
+            MenuBarMenu(
+                coordinator: self.coordinator,
+                diagnosticsCoordinator: self.diagnosticsCoordinator,
+                appSettings: self.appSettings
+            )
         } label: {
-            MenuBarLabel(coordinator: self.coordinator)
+            MenuBarLabel(coordinator: self.coordinator, appSettings: self.appSettings)
+        }
+
+        // Settings (⌘,) window. The scene is lazy and not auto-presented; it is reached via ⌘,
+        // (with a focused window) or the `SettingsLink` in `MenuBarMenu`. Suppressed under XCTest
+        // for the same reason as the sibling scenes — a test host must not open settings windows.
+        Settings {
+            if isRunningUnderXCTest {
+                EmptyView()
+            } else {
+                SettingsView(appSettings: self.appSettings, coordinator: self.coordinator)
+            }
         }
     }
 }
@@ -135,6 +178,7 @@ struct OnsetApp: App {
 private struct WindowActionsBridge: View {
     let coordinator: RecordingCoordinator
     let hotKeyMonitor: GlobalHotKeyMonitor
+    let appDelegate: AppDelegate
 
     @Environment(\.openWindow) private var openWindow
     @Environment(\.dismissWindow) private var dismissWindow
@@ -158,6 +202,13 @@ private struct WindowActionsBridge: View {
                 )
                 self.coordinator.enterMain()
 
+                // Wire the app delegate (#243 termination finalize, #272 dock-icon reopen) — a
+                // plain NSApplicationDelegate has no SwiftUI environment access of its own.
+                self.appDelegate.coordinator = self.coordinator
+                self.appDelegate.onReopen = { [coordinator = self.coordinator] in
+                    coordinator.handleReopen()
+                }
+
                 // Register the system-wide hotkey after the coordinator is fully wired
                 // (#67 / AC-9). The monitor's register() is idempotent; onAppear may fire
                 // more than once on scene re-attachment, so the guard inside register() is
@@ -172,6 +223,36 @@ private struct WindowActionsBridge: View {
                     coordinator.handleHotKey()
                 }
             }
+    }
+}
+
+// MARK: - AppDelegate
+
+/// AppKit lifecycle callbacks not exposed by SwiftUI's `App` protocol: finalizes an active
+/// recording on termination (#243), and handles dock-icon reopen while recording (#272).
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Set once at startup by `WindowActionsBridge`; `nil` only before that wiring runs.
+    var coordinator: RecordingCoordinator?
+
+    /// Installed by `WindowActionsBridge.onAppear`; `nil` under XCTest, where the default applies.
+    var onReopen: (@MainActor () -> Bool)?
+
+    /// Called on Cmd-Q / Dock Quit / `NSApp.terminate(_:)`; routes an active recording through
+    /// `finalizeForTermination()` so files land cleanly, not merely *recoverable*.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let coordinator, coordinator.isRecordingActive else { return .terminateNow }
+        appLogger.notice("Termination requested during an active recording — finalizing before quit")
+        Task {
+            await coordinator.finalizeForTermination()
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    /// Forwards Dock-icon reopen to `onReopen`, defaulting to reopening the main window when unset.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        self.onReopen?() ?? true
     }
 }
 
@@ -202,6 +283,10 @@ struct RootView: View {
 
     let permissionsService: PermissionsService
     let coordinator: RecordingCoordinator
+
+    /// The shared settings model, forwarded into the `MainViewModel` so the record seam and
+    /// camera preview read the same instance the Settings window mutates.
+    let appSettings: AppSettings
 
     // MARK: - Transient routing state
 
@@ -234,14 +319,17 @@ struct RootView: View {
     init(
         permissionsService: PermissionsService,
         coordinator: RecordingCoordinator,
+        appSettings: AppSettings,
         hasPostScreenGrantArg: Bool
     ) {
         self.permissionsService = permissionsService
         self.coordinator = coordinator
+        self.appSettings = appSettings
         _hasPostScreenGrantArg = State(initialValue: hasPostScreenGrantArg)
         _onboardingViewModel = State(initialValue: OnboardingViewModel(permissions: permissionsService))
         _mainViewModel = State(initialValue: MainViewModel(
             permissions: permissionsService,
+            appSettings: appSettings,
             coordinator: coordinator
         ))
     }

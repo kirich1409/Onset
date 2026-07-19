@@ -203,4 +203,49 @@ struct CameraFormatSelectorTests {
         #expect(best.pixelHeight == 1080)
         #expect(best.maxFps == 30)
     }
+
+    // MARK: - allowAboveFullHD: selector behaviour when caller explicitly opts in to >1080p
+
+    // The record path passes allowAboveFullHD: true (resolveCameraFormat in
+    // MainViewModel+Record.swift) — these two tests document the selector's lifted-cap
+    // behaviour at the value level, independent of the caller.
+
+    @Test("allowAboveFullHD true with 4K, 1080p and 720p available — picks 4K over the rest")
+    func allowAboveFullHD_4KAvailable_picks4KOver1080p() throws {
+        // Proves the cap is lifted: 4K must win over the ≤1080p options that would
+        // have been chosen under the default (false) behaviour.
+        //
+        // This is also the record path's exact scenario: resolveCameraFormat
+        // (MainViewModel+Record.swift) calls pickBestFormat with allowAboveFullHD: true, and
+        // the camera encoder is built from this same resolved format's dimensions
+        // (CapabilityResolver → RecordingComponentFactories), so there is no upscale mismatch.
+        //
+        // PR #281 previously capped this path at 1080p after observing camera stutter under
+        // 4K, attributing it to AVFoundation delivering only 1080p from the Brio. A live L5
+        // spike (2026-07-02, MX Brio) traced the stutter to a VT-session/format mismatch
+        // artifact instead: recording native 4K camera + 4K60 screen produced zero frame loss,
+        // including under worst-case full-screen motion. See
+        // docs/quality/production-quality-bar.md §5.
+        let formats = [
+            format(width: 1280, height: 720, maxFps: 30), // 720p  16:9
+            format(width: 1920, height: 1080, maxFps: 30), // 1080p 16:9 — would win with default cap
+            format(width: 3840, height: 2160, maxFps: 30), // 4K    16:9 — wins when cap lifted
+        ]
+        let best = try CameraFormatSelector.pickBestFormat(from: formats, minFps: 30, allowAboveFullHD: true)
+        #expect(best.pixelWidth == 3840)
+        #expect(best.pixelHeight == 2160)
+    }
+
+    @Test("allowAboveFullHD true with no 4K available — picks largest available (1080p)")
+    func allowAboveFullHD_no4K_picksLargestAvailable() throws {
+        // When the camera has no 4K format the lifted cap still returns the best
+        // available resolution — not an error.
+        let formats = [
+            format(width: 1280, height: 720, maxFps: 30), // 720p 16:9
+            format(width: 1920, height: 1080, maxFps: 30), // 1080p 16:9 — wins (largest)
+        ]
+        let best = try CameraFormatSelector.pickBestFormat(from: formats, minFps: 30, allowAboveFullHD: true)
+        #expect(best.pixelWidth == 1920)
+        #expect(best.pixelHeight == 1080)
+    }
 }

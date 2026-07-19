@@ -19,6 +19,8 @@ nonisolated private let menuBarMenuLogger = Logger(
 /// - «Открыть Onset» — opens and focuses the main window.
 /// - «Начать запись» — dispatches `coordinator.menuBarRecordIntent` when the main window is
 ///   mounted (intent installed by `MainView.onAppear`), or opens the main window as fallback.
+/// - «Показывать таймер записи» — checkmark toggle mirroring the Индикация settings tab (same
+///   `showMenuBarTimer`).
 /// - «Экспортировать диагностику» — collects recent OS log entries and presents NSSavePanel.
 /// - «Версия X.Y.Z (N)» — non-interactive build attribution label for beta feedback (#166).
 /// - «Выход»
@@ -26,12 +28,19 @@ nonisolated private let menuBarMenuLogger = Logger(
 /// **Recording / Degraded:**
 /// - «Остановить» — calls `coordinator.stop()` (the AC-9 menu-bar stop path).
 /// - «Открыть окно записи» — focuses the recording window.
+/// - «Показывать таймер записи» — checkmark toggle mirroring the Индикация settings tab (same
+///   `showMenuBarTimer`).
 ///
-/// Pure reader of `coordinator` and `diagnosticsCoordinator` — no own state.
+/// Reads `coordinator`/`diagnosticsCoordinator` for menu state; binds `appSettings.showMenuBarTimer`
+/// (read-write via the timer toggle). Holds no own `@State`.
 @MainActor
 struct MenuBarMenu: View {
     let coordinator: RecordingCoordinator
     let diagnosticsCoordinator: DiagnosticsSaveCoordinator
+
+    /// The shared settings model. `@Bindable` so the menu's timer toggle writes through to the same
+    /// `showMenuBarTimer` as the Индикация settings tab (single in-memory source of truth).
+    @Bindable var appSettings: AppSettings
 
     @Environment(\.openWindow)
     private var openWindow
@@ -64,7 +73,21 @@ struct MenuBarMenu: View {
             }
         }
 
+        // Mirrors the Индикация settings tab's «Показывать таймер записи» — same `showMenuBarTimer`.
+        // Renders as a stock checkmark menu item; reachable here so the preference can be flipped
+        // without opening Settings.
+        Toggle("Показывать таймер записи", isOn: self.$appSettings.showMenuBarTimer)
+
         Divider()
+
+        // ⌘, only fires with a focused window, so a menu-bar-centric app needs an explicit entry
+        // to reach the Settings scene when no other window is open. `SettingsLink` opens it.
+        SettingsLink {
+            Text("Настройки…")
+        }
+        // Render «⌘,» next to the item and make the shortcut work while the menu is open —
+        // the standard app-menu ⌘, only fires when Onset is frontmost (menu-bar-first usage).
+        .keyboardShortcut(",", modifiers: .command)
 
         Button("Экспортировать диагностику") {
             self.diagnosticsCoordinator.export()
@@ -103,5 +126,10 @@ struct MenuBarMenu: View {
             self.openWindow(id: WindowID.recording)
             AppActivation.bringToFront()
         }
+
+        // Mirrors the Индикация settings tab's «Показывать таймер записи» — same `showMenuBarTimer`.
+        // The counter shows during recording, but it's a persistent indication preference, so keep
+        // it reachable in the recording menu too.
+        Toggle("Показывать таймер записи", isOn: self.$appSettings.showMenuBarTimer)
     }
 }

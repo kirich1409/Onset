@@ -5,6 +5,7 @@ import Testing
 // MARK: - RecordingConfiguration tests
 
 @Suite("RecordingConfiguration")
+@MainActor
 struct RecordingConfigurationTests {
     /// Resolved once per test instance (each @Test gets a fresh struct, re-created per
     /// Swift Testing isolation rules — no shared mutable state).
@@ -166,5 +167,31 @@ struct RecordingConfigurationTests {
             camera: SourceDimensions(width: 3840, height: 2160, fps: 60)
         )
         #expect(!fits)
+    }
+
+    // MARK: - Camera Mirror
+
+    @Test("mvpDefault — cameraMirror defaults to false")
+    func mvpDefault_cameraMirror_false() {
+        #expect(self.sut.cameraMirror == false)
+    }
+
+    /// The hand-rolled `==` must include `cameraMirror`: two configs differing ONLY in that
+    /// field must compare non-equal, or change-detection silently ignores the mirror toggle.
+    @Test("== treats configs differing only in cameraMirror as non-equal")
+    func equality_cameraMirrorOnlyDifference_isNonEqual() {
+        let unmirrored = RecordingConfiguration.makeMVPDefault(cameraMirror: false)
+        let mirrored = RecordingConfiguration.makeMVPDefault(cameraMirror: true)
+        #expect(unmirrored != mirrored)
+    }
+
+    /// Sanity guard for the inequality test above: two configs built with the SAME mirror value
+    /// (and otherwise identical) must compare equal, so the inequality is attributable to
+    /// `cameraMirror` alone.
+    @Test("== treats configs with identical cameraMirror as equal")
+    func equality_sameCameraMirror_isEqual() {
+        let lhs = RecordingConfiguration.makeMVPDefault(cameraMirror: true)
+        let rhs = RecordingConfiguration.makeMVPDefault(cameraMirror: true)
+        #expect(lhs == rhs)
     }
 }

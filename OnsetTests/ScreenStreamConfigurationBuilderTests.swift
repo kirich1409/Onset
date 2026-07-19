@@ -84,6 +84,7 @@ struct ScreenStreamConfigurationBuilderTests {
             bitDepth: self.config.bitDepth,
             maxScreenFps: self.config.maxScreenFps,
             minCameraFps: self.config.minCameraFps,
+            cameraMirror: self.config.cameraMirror,
             bitrateTable: self.config.bitrateTable,
             dataRateLimitsPeakMultiplier: self.config.dataRateLimitsPeakMultiplier,
             keyFrameIntervalSeconds: self.config.keyFrameIntervalSeconds,
@@ -97,6 +98,7 @@ struct ScreenStreamConfigurationBuilderTests {
             degradedWindowSeconds: self.config.degradedWindowSeconds,
             postStopDropWarningThreshold: self.config.postStopDropWarningThreshold,
             budgetCap: self.config.budgetCap,
+            diskThresholds: self.config.diskThresholds,
             baseOutputDirectory: self.config.baseOutputDirectory
         )
         let streamConfig = ScreenStreamConfigurationBuilder.makeConfiguration(plan: plan, config: customConfig)
@@ -118,6 +120,7 @@ struct ScreenStreamConfigurationBuilderTests {
             bitDepth: self.config.bitDepth,
             maxScreenFps: self.config.maxScreenFps,
             minCameraFps: self.config.minCameraFps,
+            cameraMirror: self.config.cameraMirror,
             bitrateTable: self.config.bitrateTable,
             dataRateLimitsPeakMultiplier: self.config.dataRateLimitsPeakMultiplier,
             keyFrameIntervalSeconds: self.config.keyFrameIntervalSeconds,
@@ -131,6 +134,7 @@ struct ScreenStreamConfigurationBuilderTests {
             degradedWindowSeconds: self.config.degradedWindowSeconds,
             postStopDropWarningThreshold: self.config.postStopDropWarningThreshold,
             budgetCap: self.config.budgetCap,
+            diskThresholds: self.config.diskThresholds,
             baseOutputDirectory: self.config.baseOutputDirectory
         )
         let streamConfig = ScreenStreamConfigurationBuilder.makeConfiguration(plan: plan, config: emptyConfig)

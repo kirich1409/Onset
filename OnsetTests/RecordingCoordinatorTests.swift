@@ -9,7 +9,6 @@
 // verified without a real RecordingSession.
 //
 // swiftlint:disable no_magic_numbers
-// swiftlint:disable trailing_closure
 // swiftlint:disable file_length
 // swiftlint:disable type_body_length
 // Rationale: synthetic fixture dimensions / drop counts are inherent test data (no_magic_numbers);
@@ -17,6 +16,7 @@
 // (trailing_closure), matching the existing RecordingSessionTests convention.
 // file_length/type_body_length: covers full coordinator lifecycle incl. write-failure paths.
 
+import AVFoundation
 import Foundation
 @testable import Onset
 import Testing
@@ -64,6 +64,11 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
     var gateStartEnabled = false
     private let (gateStream, gateContinuation) = AsyncStream.makeStream(of: Void.self)
 
+    /// When `true`, `stop()` suspends until `releaseStop()` is called — simulates an in-flight or
+    /// genuinely stuck teardown (VideoToolbox flush / `finishWriting()` blocked), the #243 scenario.
+    var gateStopEnabled = false
+    private let (stopGateStream, stopGateContinuation) = AsyncStream.makeStream(of: Void.self)
+
     /// The health snapshot returned by `currentDrops()` while recording.
     var liveDrops = DropHealthSnapshot(
         counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
@@ -102,7 +107,9 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
     func start(permissions: EffectivePermissions) async throws {
         self.startCalled = true
         self.startCount += 1
-        if let startError { throw startError }
+        if let startError {
+            throw startError
+        }
         // When gateStartEnabled, suspend here until releaseStart() is called. This lets a test
         // call coordinator.stop() while start() is blocked — making activationTask still nil at
         // that point — to exercise the Fix 2 (b) race window.
@@ -130,12 +137,27 @@ private final class FakeRecordingControlling: RecordingControlling, @unchecked S
     func stop() async -> RecordingResult {
         self.stopCalled = true
         self.stopCount += 1
+        // When gateStopEnabled, suspend here until releaseStop() — simulates a teardown that is
+        // in flight (defect 1) or stuck (defect 2). stopCount is bumped BEFORE suspending so a test
+        // can prove entry; the coordinator's memoized stopTask ensures this runs exactly once even
+        // when a second stop path (termination) awaits the same handle.
+        if self.gateStopEnabled {
+            for await _ in self.stopGateStream {
+                break
+            }
+        }
         // The live session finishes all streams on stop; mirror that so the coordinator's
         // subscription loops end deterministically.
         self.stateContinuation.finish()
         self.revocationContinuation.finish()
         self.captureActiveContinuation.finish()
         return self.result
+    }
+
+    /// Test hook: unblock a `stop()` suspension gated by `gateStopEnabled`.
+    func releaseStop() {
+        self.stopGateContinuation.yield(())
+        self.stopGateContinuation.finish()
     }
 
     func currentDrops() async -> DropHealthSnapshot {
@@ -247,6 +269,26 @@ private enum CoordinatorFixtures {
         )
     }
 
+    /// A result whose screen writer ended in `.failed` with `AVError.Code.diskFull` — the concrete
+    /// disk-full error `AVAssetWriter` surfaces mid-recording (AC-7 last-resort regression, T-6).
+    /// Also stands in for an external output-volume unplug: the coordinator's write-error handling
+    /// (`RecordingResult.hasWriteFailure`/`writeFailureReason`) does not branch on the underlying
+    /// error type, so proving THIS error reaches `lastWriteError` proves every writer-level fault
+    /// (unplug included) degrades to the same channel, never a disk-space auto-stop.
+    static func diskFullWriteResult() -> RecordingResult {
+        .completed(
+            .screenOnly(.failed(
+                url: URL(fileURLWithPath: "/tmp/onset-coordinator-screen.mp4"),
+                error: AVError(.diskFull)
+            )),
+            DropHealthSnapshot(
+                counters: DropCounters(encoderBackpressureDrops: 0, captureDrops: 0, cfrNormalizationDrops: 0),
+                sessionEverDegraded: false,
+                dominantCause: .notDegraded
+            )
+        )
+    }
+
     /// Request with all three checklist rows populated (screen + camera + mic).
     static func fullChecklistRequest() -> RecordingRequest {
         RecordingRequest(
@@ -292,10 +334,26 @@ private final class Counter: @unchecked Sendable {
 private func eventuallyMain(timeoutMs: Int = 8000, _ condition: () -> Bool) async -> Bool {
     let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
     while Date() < deadline {
-        if condition() { return true }
+        if condition() {
+            return true
+        }
         try? await Task.sleep(nanoseconds: 5_000_000) // 5 ms
     }
     return condition()
+}
+
+/// Async-condition counterpart to `eventuallyMain`, for polling actor-isolated state (e.g. an
+/// actor's call counter) that a synchronous closure can't read.
+@MainActor
+private func eventuallyAsync(timeoutMs: Int = 4000, _ condition: () async -> Bool) async -> Bool {
+    let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
+    while Date() < deadline {
+        if await condition() {
+            return true
+        }
+        try? await Task.sleep(nanoseconds: 5_000_000) // 5 ms
+    }
+    return await condition()
 }
 
 // MARK: - Tests
@@ -309,7 +367,11 @@ struct RecordingCoordinatorTests {
         let notifier = FakeRecordingStartNotifier()
         var openedRecording = false
         var dismissedMain = false
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake }, notifier: notifier)
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            notifier: notifier
+        )
         coordinator.bindWindowActions(
             openRecordingWindow: { openedRecording = true },
             dismissMainWindow: { dismissedMain = true },
@@ -333,10 +395,70 @@ struct RecordingCoordinatorTests {
         await coordinator.stop()
     }
 
+    @Test("start → begins display-sleep prevention; stop → ends it (#87)")
+    func start_beginsSleepPrevention_stop_endsIt() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let sleepPreventer = FakeDisplaySleepPreventer()
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            sleepPreventer: sleepPreventer
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request())
+
+        #expect(sleepPreventer.beginCallCount == 1, "sleep prevention must begin exactly once on activation")
+        #expect(sleepPreventer.isPreventingSleep, "sleep prevention must be held while recording")
+
+        await coordinator.stop()
+
+        #expect(sleepPreventer.endCallCount == 1, "sleep prevention must end exactly once on stop")
+        #expect(!sleepPreventer.isPreventingSleep, "sleep prevention must be released after stop")
+    }
+
+    @Test("double stop() is idempotent — sleep prevention ends exactly once (#87)")
+    func stop_sleepPreventionIdempotent() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let sleepPreventer = FakeDisplaySleepPreventer()
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            sleepPreventer: sleepPreventer
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        await coordinator.stop()
+        // A second stop() must be a no-op (phase is no longer .recording) — it must not double-release.
+        await coordinator.stop()
+
+        #expect(sleepPreventer.endCallCount == 1, "a repeated stop() must not double-release the sleep hold")
+    }
+
+    @Test("start failure never begins sleep prevention (#87)")
+    func start_failure_neverBeginsSleepPrevention() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        fake.startError = RecordingError.noVideoSource
+        let sleepPreventer = FakeDisplaySleepPreventer()
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            sleepPreventer: sleepPreventer
+        )
+
+        await #expect(throws: RecordingError.self) {
+            try await coordinator.start(CoordinatorFixtures.request())
+        }
+
+        #expect(sleepPreventer.beginCallCount == 0, "a failed start() must never acquire the sleep hold")
+    }
+
     @Test("checklist rows are nil when source absent — nil-gating preserved")
     func start_checklistNilGating() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         // Default request: only screenDescription is non-nil; camera + mic are nil.
         try await coordinator.start(CoordinatorFixtures.request())
@@ -351,7 +473,10 @@ struct RecordingCoordinatorTests {
     @Test("state stream is consumed — a .degraded transition updates recordingState")
     func stateStream_updatesRecordingState() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         #expect(coordinator.recordingState == .normal, "starts normal")
@@ -367,7 +492,10 @@ struct RecordingCoordinatorTests {
     @Test("elapsed increments while recording")
     func elapsed_increments() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         // elapsed starts at 0; the tick loop derives it from the start Date. After ~1.1s it is ≥ 1.
@@ -382,7 +510,8 @@ struct RecordingCoordinatorTests {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
         var revealed: [URL]?
         let coordinator = RecordingCoordinator(
-            sessionFactory: { _ in fake },
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
             revealInFinder: { revealed = $0 }
         )
 
@@ -402,7 +531,10 @@ struct RecordingCoordinatorTests {
     @Test("stop → phase returns to .idle when started from the menu bar")
     func stop_returnsToIdleOrigin() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request(origin: .menuBar))
         await coordinator.stop()
@@ -418,7 +550,10 @@ struct RecordingCoordinatorTests {
             result: CoordinatorFixtures.result(backpressureDrops: 64)
         )
         let openCounter = Counter()
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
         coordinator.bindWindowActions(
             openRecordingWindow: {},
             dismissMainWindow: {},
@@ -438,7 +573,10 @@ struct RecordingCoordinatorTests {
     func stop_menuBarWithWriteError_opensMainWindow() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.failedWriteResult())
         let openCounter = Counter()
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
         coordinator.bindWindowActions(
             openRecordingWindow: {},
             dismissMainWindow: {},
@@ -461,7 +599,10 @@ struct RecordingCoordinatorTests {
         let fake = FakeRecordingControlling(
             result: CoordinatorFixtures.result(backpressureDrops: 128, sessionEverDegraded: false)
         )
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         await coordinator.stop()
@@ -478,7 +619,10 @@ struct RecordingCoordinatorTests {
         let fake = FakeRecordingControlling(
             result: CoordinatorFixtures.result(backpressureDrops: 1, sessionEverDegraded: false)
         )
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         await coordinator.stop()
@@ -490,7 +634,10 @@ struct RecordingCoordinatorTests {
     @Test("stop is idempotent across concurrent paths — teardown runs once")
     func stop_idempotentAcrossPaths() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
 
@@ -513,10 +660,13 @@ struct RecordingCoordinatorTests {
         // satisfies the compiler — the box is only written from @MainActor via the coordinator.
         let factoryCounter = Counter()
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in
-            factoryCounter.increment()
-            return fake
-        })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in
+                factoryCounter.increment()
+                return fake
+            }
+        )
 
         // Two concurrent start() calls (e.g. double-click on Record button). The synchronous
         // isStarting guard must let only one through; session.start() must be called exactly once.
@@ -537,7 +687,10 @@ struct RecordingCoordinatorTests {
     @Test("elapsed is frozen after stop — the tick loop is cancelled")
     func elapsed_frozenAfterStop() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         // Wait until at least one tick so elapsed > 0 and the loop is confirmed running.
@@ -569,10 +722,13 @@ struct RecordingCoordinatorTests {
         let callCounter = Counter()
         // Single coordinator instance — reused across both sessions to verify the FIX 2 reset.
         // A fresh coordinator2 would default false and could never catch stale carry-over.
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in
-            callCounter.increment()
-            return callCounter.value == 1 ? fake1 : fake2
-        })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in
+                callCounter.increment()
+                return callCounter.value == 1 ? fake1 : fake2
+            }
+        )
 
         // --- Session 1: degraded stop ---
         try await coordinator.start(CoordinatorFixtures.request())
@@ -600,7 +756,10 @@ struct RecordingCoordinatorTests {
     @Test("stop with write-failed result sets lastWriteError; acknowledge clears it")
     func stop_writeFailure_setsError() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.failedWriteResult())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         await coordinator.stop()
@@ -614,7 +773,10 @@ struct RecordingCoordinatorTests {
     @Test("stop with clean result leaves lastWriteError nil")
     func stop_cleanResult_noWriteError() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         await coordinator.stop()
@@ -627,10 +789,13 @@ struct RecordingCoordinatorTests {
         let fake1 = FakeRecordingControlling(result: CoordinatorFixtures.failedWriteResult())
         let fake2 = FakeRecordingControlling(result: CoordinatorFixtures.result())
         let callCounter2 = Counter()
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in
-            callCounter2.increment()
-            return callCounter2.value == 1 ? fake1 : fake2
-        })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in
+                callCounter2.increment()
+                return callCounter2.value == 1 ? fake1 : fake2
+            }
+        )
 
         // Session 1: ends with a write error.
         try await coordinator.start(CoordinatorFixtures.request())
@@ -649,14 +814,19 @@ struct RecordingCoordinatorTests {
     func start_failureRethrows() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
         fake.startError = RecordingError.noVideoSource
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
         coordinator.enterMain() // begin in .main
 
         var threw = false
         do {
             try await coordinator.start(CoordinatorFixtures.request())
         } catch let error as RecordingError {
-            if case .noVideoSource = error { threw = true }
+            if case .noVideoSource = error {
+                threw = true
+            }
         }
 
         #expect(threw, "start() must rethrow the RecordingError for the UI to surface (AC-6/AC-11)")
@@ -669,9 +839,12 @@ struct RecordingCoordinatorTests {
     func menuBarRecordIntent_installedClosureRuns() {
         // Verifies that the coordinator stores and dispatches the intent closure exactly as set.
         // This is the seam wiring test: MainView installs the closure; this proves it fires.
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in
-            FakeRecordingControlling(result: CoordinatorFixtures.result())
-        })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in
+                FakeRecordingControlling(result: CoordinatorFixtures.result())
+            }
+        )
 
         var ran = false
         coordinator.menuBarRecordIntent = { ran = true }
@@ -685,9 +858,12 @@ struct RecordingCoordinatorTests {
         // When no main window is mounted, intent is nil and the menu bar falls back to
         // openWindow. This test proves the coordinator does not crash on nil intent.
         // The SwiftUI Button else-branch (openWindow) has no unit-test seam — L5 only.
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in
-            FakeRecordingControlling(result: CoordinatorFixtures.result())
-        })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in
+                FakeRecordingControlling(result: CoordinatorFixtures.result())
+            }
+        )
 
         // intent is nil by default; optional-call must be a no-op without crashing.
         coordinator.menuBarRecordIntent?()
@@ -703,7 +879,10 @@ struct RecordingCoordinatorRevocationTests {
     @Test(".sourceRevoked(.screen) → screen liveness false, camera+mic live, phase still .recording")
     func screenRevoked_updatesLiveness() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         #expect(coordinator.sourceLiveness == .allLive, "starts fully live")
@@ -724,7 +903,10 @@ struct RecordingCoordinatorRevocationTests {
     @Test(".sourceRevoked(.camera) → camera + mic liveness false, screen live, phase still .recording")
     func cameraRevoked_updatesCameraAndMicLiveness() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         #expect(coordinator.sourceLiveness == .allLive, "starts fully live")
@@ -745,7 +927,10 @@ struct RecordingCoordinatorRevocationTests {
     @Test(".allVideoSourcesLost → coordinator calls stop(), phase transitions away from .recording")
     func allVideoSourcesLost_stopsSession() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
         coordinator.enterMain() // set origin=.main so we can assert phase==.main after stop
         coordinator.bindWindowActions(
             openRecordingWindow: {},
@@ -775,10 +960,13 @@ struct RecordingCoordinatorRevocationTests {
         let fake1 = FakeRecordingControlling(result: CoordinatorFixtures.result())
         let fake2 = FakeRecordingControlling(result: CoordinatorFixtures.result())
         let callCounter = Counter()
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in
-            callCounter.increment()
-            return callCounter.value == 1 ? fake1 : fake2
-        })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in
+                callCounter.increment()
+                return callCounter.value == 1 ? fake1 : fake2
+            }
+        )
         coordinator.bindWindowActions(
             openRecordingWindow: {},
             dismissMainWindow: {},
@@ -817,7 +1005,10 @@ struct RecordingCoordinatorHotKeyTests {
     @Test("recording in progress — handleHotKey triggers stop()")
     func handleHotKey_whileRecording_triggerStop() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
         coordinator.bindWindowActions(
             openRecordingWindow: {},
             dismissMainWindow: {},
@@ -844,9 +1035,12 @@ struct RecordingCoordinatorHotKeyTests {
     func handleHotKey_notRecording_intentInstalled_callsIntent() {
         let intentCounter = Counter()
         let openWindowCounter = Counter()
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in
-            FakeRecordingControlling(result: CoordinatorFixtures.result())
-        })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in
+                FakeRecordingControlling(result: CoordinatorFixtures.result())
+            }
+        )
         coordinator.bindWindowActions(
             openRecordingWindow: {},
             dismissMainWindow: {},
@@ -867,7 +1061,10 @@ struct RecordingCoordinatorHotKeyTests {
     func handleHotKey_notRecording_noIntent_opensMainWindow() {
         let openWindowCounter = Counter()
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
         coordinator.bindWindowActions(
             openRecordingWindow: {},
             dismissMainWindow: {},
@@ -887,7 +1084,10 @@ struct RecordingCoordinatorHotKeyTests {
     @Test("double handleHotKey while recording — stop() runs exactly once")
     func handleHotKey_doubleTap_stopsExactlyOnce() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
         coordinator.bindWindowActions(
             openRecordingWindow: {},
             dismissMainWindow: {},
@@ -919,7 +1119,10 @@ struct RecordingCoordinatorWriterFailedTests {
     @Test(".writerFailed(.screen) → screen liveness false, camera + mic unchanged, phase still .recording")
     func screenWriterFailed_flipsScreenLiveness() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         #expect(coordinator.sourceLiveness == .allLive, "starts fully live")
@@ -938,7 +1141,10 @@ struct RecordingCoordinatorWriterFailedTests {
     @Test(".writerFailed(.camera) → camera + mic liveness false, screen unchanged, phase still .recording")
     func cameraWriterFailed_flipsCameraAndMicLiveness() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
 
         try await coordinator.start(CoordinatorFixtures.request())
         #expect(coordinator.sourceLiveness == .allLive, "starts fully live")
@@ -982,7 +1188,10 @@ struct RecordingCoordinatorConsentOrderingTests {
 
         var openedRecording = false
         var dismissedMain = false
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
         coordinator.bindWindowActions(
             openRecordingWindow: { openedRecording = true },
             dismissMainWindow: { dismissedMain = true },
@@ -1027,7 +1236,8 @@ struct RecordingCoordinatorConsentOrderingTests {
         // Use a LARGE timeout (100 s) so that if stream-finish is NOT the trigger, the test would
         // block for 100 s (deterministic proof that fix #1 drives the revert, not the timeout).
         let coordinator = RecordingCoordinator(
-            sessionFactory: { _ in fake },
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
             activationTimeoutSeconds: 100
         )
         coordinator.enterMain()
@@ -1057,7 +1267,9 @@ struct RecordingCoordinatorConsentOrderingTests {
         do {
             try await startTask.value
         } catch let error as RecordingError {
-            if case .captureDidNotActivate = error { threwCaptureDidNotActivate = true }
+            if case .captureDidNotActivate = error {
+                threwCaptureDidNotActivate = true
+            }
         }
 
         #expect(
@@ -1080,7 +1292,8 @@ struct RecordingCoordinatorConsentOrderingTests {
 
         // Use a tiny timeout (50 ms) so the test does not take 30 s.
         let coordinator = RecordingCoordinator(
-            sessionFactory: { _ in fake },
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
             activationTimeoutSeconds: 0.05
         )
         coordinator.enterMain()
@@ -1089,7 +1302,9 @@ struct RecordingCoordinatorConsentOrderingTests {
         do {
             try await coordinator.start(CoordinatorFixtures.request())
         } catch let error as RecordingError {
-            if case .captureDidNotActivate = error { threwCaptureDidNotActivate = true }
+            if case .captureDidNotActivate = error {
+                threwCaptureDidNotActivate = true
+            }
         }
 
         #expect(threwCaptureDidNotActivate, "start() must throw .captureDidNotActivate on activation timeout")
@@ -1103,7 +1318,8 @@ struct RecordingCoordinatorConsentOrderingTests {
         fake.simulateCaptureNeverActivates = true
 
         let coordinator = RecordingCoordinator(
-            sessionFactory: { _ in fake },
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
             activationTimeoutSeconds: 100
         )
         coordinator.enterMain()
@@ -1147,7 +1363,8 @@ struct RecordingCoordinatorConsentOrderingTests {
 
         var openedRecording = false
         let coordinator = RecordingCoordinator(
-            sessionFactory: { _ in fake },
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
             activationTimeoutSeconds: 100
         )
         coordinator.enterMain()
@@ -1204,7 +1421,8 @@ struct RecordingCoordinatorConsentOrderingTests {
 
         var openedRecording = false
         let coordinator = RecordingCoordinator(
-            sessionFactory: { _ in fake },
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
             activationTimeoutSeconds: 100
         )
         coordinator.enterMain()
@@ -1238,6 +1456,652 @@ struct RecordingCoordinatorConsentOrderingTests {
         #expect(coordinator.phase == .main, "phase must be .main after cancel-flag revert")
         #expect(!openedRecording, "recording window must NOT open when cancel flag is set")
     }
+
+    // MARK: - Default sessionFactory wiring
+
+    @Test("defaultSessionFactory_buildsRecordingSessionFromResolvedSelection")
+    func defaultSessionFactory_buildsRecordingSessionFromResolvedSelection() {
+        // Constructs a coordinator WITHOUT injecting sessionFactory so the PRODUCTION default
+        // closure (the one that switches on resolved.encoder/source/writer and builds Live*
+        // factories) is stored. Calls that closure directly with a known ResolvedBackendSelection
+        // and asserts it produces a RecordingSession — exercising the resolved→factory wiring
+        // without calling session.start() (which would touch capture hardware).
+        //
+        // The switch today always yields .live for every stage (single-case enums), so this cannot
+        // behaviourally distinguish "consumes resolved" from "ignores it" until a second backend
+        // case is added. The test is forward-looking: it guards the wiring and will catch a
+        // regression the moment another case exists.
+        let coordinator = RecordingCoordinator {
+            UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults())
+        }
+        let resolved = ResolvedBackendSelection(source: .live, encoder: .live, writer: .live)
+        let session = coordinator.sessionFactory(CoordinatorFixtures.request(), resolved)
+        #expect(session is RecordingSession, "production default sessionFactory must produce a RecordingSession")
+    }
+}
+
+// MARK: - isRecordingActive gate (Settings T-8 — recording-affecting controls)
+
+/// Tests for the `isRecordingActive` observable gate that `ControlAvailability` reads to grey out
+/// settings whose `SettingApplyPolicy` is `.nextRecordingStart` during an active recording.
+///
+/// The contract (see the property doc on `RecordingCoordinator.isRecordingActive`): `true` from the
+/// ENTRY of `start()` through the COMPLETION of `stop()` — covering the whole startup window plus the
+/// recording — and `false` once fully stopped OR after any start that reverts. The three reset sites
+/// are exercised here: the `session.start()` catch, the `if !activated` cleanup defer
+/// (denial / timeout / user-cancel), and the end of `stop()`. The `isStarting` `defer` must NOT
+/// reset it — otherwise the gate would drop to `false` on the success path mid-start.
+@Suite("RecordingCoordinator — isRecordingActive gate (Settings T-8)")
+@MainActor
+struct RecordingCoordinatorActiveGateTests {
+    @Test("isRecordingActive is false when idle")
+    func isRecordingActive_falseWhenIdle() {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+
+        #expect(!coordinator.isRecordingActive, "gate must be false before any recording starts")
+    }
+
+    @Test("isRecordingActive becomes true across the start window — before phase == .recording")
+    func isRecordingActive_trueAcrossStartWindow() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        // Suppress auto-emit so start() stays in the activation wait and we can observe the gate
+        // while isStarting is still true and phase has not yet flipped to .recording.
+        fake.simulateCaptureNeverActivates = true
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+
+        // Launch start() without awaiting — it suspends in the activation wait.
+        let startTask = Task { try await coordinator.start(CoordinatorFixtures.request()) }
+        // Let the task run up to the activation wait (same ordering dependency as the #171 tests).
+        try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+
+        // The gate must already be true mid-start, even though phase has not reached .recording.
+        #expect(coordinator.phase != .recording, "prerequisite: still in the start window")
+        #expect(coordinator.isRecordingActive, "gate must be true across the whole start window (set at entry)")
+
+        // Activation fires → start() completes; the success path leaves the gate true.
+        fake.emitCaptureActive()
+        try await startTask.value
+        #expect(coordinator.phase == .recording, "prerequisite: now recording")
+        #expect(coordinator.isRecordingActive, "gate must remain true while recording (success path)")
+
+        await coordinator.stop()
+    }
+
+    @Test("isRecordingActive returns to false after a normal stop()")
+    func isRecordingActive_falseAfterNormalStop() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        #expect(coordinator.isRecordingActive, "prerequisite: gate is true while recording")
+
+        await coordinator.stop()
+        #expect(!coordinator.isRecordingActive, "gate must reset to false after a normal stop()")
+    }
+
+    @Test("isRecordingActive resets to false when session.start() throws (catch path)")
+    func isRecordingActive_falseOnSessionStartError() async {
+        // Exercises the reset in the `session.start()` catch block — the gate is set true at entry,
+        // so a throw before activation must not leave it stuck true.
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        fake.startError = RecordingError.noVideoSource
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+
+        do {
+            try await coordinator.start(CoordinatorFixtures.request())
+        } catch {
+            // Expected — the session refused to start.
+        }
+
+        #expect(!coordinator.isRecordingActive, "gate must reset to false when session.start() throws")
+    }
+
+    @Test("isRecordingActive resets to false on a start that never activates (timeout)")
+    func isRecordingActive_falseOnActivationTimeout() async {
+        // Exercises the `if !activated` cleanup defer: capture never activates and the bounded
+        // timeout fires, so start() throws .captureDidNotActivate and the gate must revert.
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        fake.simulateCaptureNeverActivates = true
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            activationTimeoutSeconds: 0.05
+        )
+
+        do {
+            try await coordinator.start(CoordinatorFixtures.request())
+        } catch {
+            // Expected — capture did not activate.
+        }
+
+        #expect(!coordinator.isRecordingActive, "gate must reset to false after an activation timeout")
+    }
+
+    @Test("isRecordingActive resets to false when stop() cancels the consent wait")
+    func isRecordingActive_falseOnUserCancelDuringConsentWait() async throws {
+        // Exercises the `if !activated` cleanup defer via the user-cancel path: stop() during the
+        // consent wait reverts silently, and the gate must not be left stuck true.
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        fake.simulateCaptureNeverActivates = true
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            activationTimeoutSeconds: 100
+        )
+        coordinator.enterMain()
+
+        let startTask = Task { try await coordinator.start(CoordinatorFixtures.request()) }
+        try await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+
+        // User cancels mid-consent — silent revert.
+        await coordinator.stop()
+        try await startTask.value
+
+        #expect(!coordinator.isRecordingActive, "gate must reset to false after a user cancel during consent wait")
+    }
+
+    // MARK: - Dock reopen (#272)
+
+    @Test("handleReopen() while recording focuses the recording window and suppresses the default")
+    func handleReopen_whileRecording_focusesRecordingWindow_andSuppressesDefault() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+        var openedRecording = false
+        coordinator.bindWindowActions(
+            openRecordingWindow: { openedRecording = true },
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        #expect(coordinator.phase == .recording)
+
+        let shouldPerformDefault = coordinator.handleReopen()
+
+        #expect(!shouldPerformDefault, "recording phase must suppress SwiftUI's default reopen")
+        #expect(openedRecording, "recording phase must focus the recording window")
+
+        await coordinator.stop()
+    }
+
+    @Test("handleReopen() while showing main window allows the default reopen")
+    func handleReopen_whenMain_allowsDefault() {
+        let coordinator = RecordingCoordinator {
+            UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults())
+        }
+        var openedRecording = false
+        coordinator.bindWindowActions(
+            openRecordingWindow: { openedRecording = true },
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+        coordinator.enterMain()
+
+        let shouldPerformDefault = coordinator.handleReopen()
+
+        #expect(shouldPerformDefault, "main phase must allow the default reopen")
+        #expect(!openedRecording, "main phase must not focus the recording window")
+    }
+
+    @Test("handleReopen() while idle allows the default reopen")
+    func handleReopen_whenIdle_allowsDefault() {
+        let coordinator = RecordingCoordinator {
+            UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults())
+        }
+        var openedRecording = false
+        coordinator.bindWindowActions(
+            openRecordingWindow: { openedRecording = true },
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+
+        let shouldPerformDefault = coordinator.handleReopen()
+
+        #expect(shouldPerformDefault, "idle phase must allow the default reopen")
+        #expect(!openedRecording, "idle phase must not focus the recording window")
+    }
+}
+
+// MARK: - Termination finalization (#243)
+
+/// Regression coverage for #243: graceful app termination (Cmd-Q / Dock Quit) during an active
+/// recording must await the normal `stop()` teardown instead of falling straight through to
+/// `movieFragmentInterval` fragment-recovery. Exercises `RecordingCoordinator.finalizeForTermination`
+/// directly — the injectable seam `AppDelegate.applicationShouldTerminate(_:)` calls into — rather
+/// than driving `NSApplication` itself.
+@Suite("RecordingCoordinator — finalizeForTermination (#243)")
+@MainActor
+struct RecordingCoordinatorTerminationTests {
+    @Test("active recording — finalizeForTermination awaits stop() before returning")
+    func finalizeForTermination_activeRecording_awaitsStop() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+        try await coordinator.start(CoordinatorFixtures.request())
+        #expect(coordinator.phase == .recording, "prerequisite: must be recording")
+
+        await coordinator.finalizeForTermination()
+
+        // stop() was awaited to completion — not merely called and left in flight — the
+        // coordinator's own post-stop state (isRecordingActive gate, stopCount) proves it ran to
+        // the end rather than racing finalizeForTermination's return.
+        #expect(fake.stopCalled, "stop() must be called when a recording is active at termination")
+        #expect(fake.stopCount == 1, "stop() must be awaited exactly once, not left running unawaited")
+        #expect(
+            !coordinator.isRecordingActive,
+            "gate must be false — finalizeForTermination awaited stop() to completion"
+        )
+    }
+
+    @Test("no active recording — finalizeForTermination returns immediately without calling stop()")
+    func finalizeForTermination_noActiveRecording_doesNotCallStop() async {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+        coordinator.enterMain()
+        #expect(!coordinator.isRecordingActive, "prerequisite: idle, no recording started")
+
+        await coordinator.finalizeForTermination()
+
+        #expect(!fake.stopCalled, "stop() must not be called — the regression is an UNCONDITIONAL await, not a no-op")
+    }
+
+    /// #243 defect 1: a stop() is ALREADY in flight (user/hotkey/menu/.allVideoSourcesLost) when
+    /// termination fires. The old finalize started a FRESH guarded stop() that no-op'd against
+    /// isStopping and returned instantly, letting the process terminate mid-teardown. finalize must
+    /// instead await the SAME in-flight teardown handle.
+    @Test("in-flight teardown at termination — finalize awaits THAT teardown, not a fresh no-op stop()")
+    func finalizeForTermination_awaitsInFlightTeardown() async throws { // swiftlint:disable:this function_body_length
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        fake.gateStopEnabled = true
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+        try await coordinator.start(CoordinatorFixtures.request())
+        #expect(coordinator.phase == .recording, "prerequisite: must be recording")
+
+        // A user/hotkey/auto stop is already in flight, suspended on the fake's stop gate.
+        let inFlightStop = Task { await coordinator.stop() }
+        // Let the in-flight teardown reach the gate. The teardown Task first joins the cancelled
+        // tick loop before calling the gated session.stop(), so poll rather than assume one yield.
+        var spins = 0
+        while !fake.stopCalled, spins < 1000 {
+            await Task.yield()
+            spins += 1
+        }
+        #expect(fake.stopCalled, "prerequisite: an in-flight teardown entered and suspended on the gate")
+
+        // Termination fires while that teardown is still running.
+        var finalizeReturned = false
+        let finalizeTask = Task {
+            await coordinator.finalizeForTermination()
+            finalizeReturned = true
+        }
+
+        // finalize must NOT return while the in-flight teardown is still gated — it awaits the SAME
+        // handle. (A no-op fresh stop() would return here — the old-code regression.)
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        #expect(
+            !finalizeReturned,
+            "finalize returned before the in-flight teardown finished — it no-op'd instead of awaiting the real handle"
+        )
+
+        // Complete the in-flight teardown; finalize must now return.
+        fake.releaseStop()
+        await finalizeTask.value
+        await inFlightStop.value
+
+        #expect(finalizeReturned, "finalize must return once the awaited in-flight teardown completes")
+        #expect(
+            fake.stopCount == 1,
+            "session.stop() invoked exactly once — finalize awaited the shared handle, not a second stop"
+        )
+        #expect(!coordinator.isRecordingActive, "gate cleared — the teardown finalize awaited ran to completion")
+    }
+
+    /// #243 defect 2: a genuinely stuck teardown (VideoToolbox flush / finishWriting() blocked —
+    /// exactly what the bound exists for). finalize must ABANDON at the deadline and return, so
+    /// applicationShouldTerminate's reply(true) fires and quit proceeds bounded — never hangs.
+    @Test("stuck teardown — finalizeForTermination abandons at the deadline instead of hanging")
+    func finalizeForTermination_stuckTeardown_returnsWithinTimeout() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        fake.gateStopEnabled = true // teardown suspends and is never released before assertions
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake }
+        )
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+        try await coordinator.start(CoordinatorFixtures.request())
+        // Drain the orphaned (abandoned) teardown after the assertions so it does not linger blocked.
+        defer { fake.releaseStop() }
+
+        let timeout: Duration = .milliseconds(50)
+        let clock = ContinuousClock()
+        let start = clock.now
+
+        // Reply-exactly-once: finalize does not call NSApp.reply itself — AppDelegate does, once,
+        // after this single await returns. The internal CheckedContinuation is resumed exactly once
+        // (TerminationGate), so finalize returns exactly once on every path; a double-resume would
+        // trap the process, so reaching the assertion below proves resume-once held.
+        await coordinator.finalizeForTermination(timeout: timeout)
+        let elapsed = clock.now - start
+
+        // Returned bounded — abandoned the stuck teardown at the deadline rather than hanging on the
+        // non-cancellable finishWriting(). Generous slack absorbs scheduler jitter under parallel test load.
+        #expect(
+            elapsed < timeout + .milliseconds(500),
+            "finalize must return ~within the timeout, not hang on the stuck teardown"
+        )
+    }
+}
+
+// MARK: - Disk-space monitoring integration (#88, T-6)
+
+/// Drives `FakeDiskSpaceProvider` + `FakeMonotonicClock` + `FakeDiskSpaceWarningNotifier` through
+/// the coordinator's tick-loop integration: warning continues recording and notifies once per
+/// crossing, a critical byte-floor reading auto-stops gracefully through the single idempotent
+/// `stop()` funnel and fires `notifyAutoStopped`, a slow in-flight refresh racing a manual stop
+/// does not post a spurious warning, and a new session clears the prior session's disk-stop state.
+///
+/// Byte-floor thresholds from `RecordingConfiguration.mvpDefault.diskThresholds` are checked
+/// unconditionally by `DiskSpaceEstimator.evaluate` (no warmup/slope-confidence gating needed),
+/// so a single scripted `outputFreeBytes` reading below/above `outputStopBytes`/`outputWarnBytes`
+/// deterministically produces `.critical(.outputFree)`/`.warning(.outputFree)` on the very first
+/// tick — no need to drive multiple EWMA samples.
+@Suite("RecordingCoordinator — disk-space monitoring (#88, T-6)")
+@MainActor
+struct RecordingCoordinatorDiskSpaceTests {
+    /// Below `outputStopBytes` (2 GB default) — byte-floor critical, primary signal.
+    private static let criticalOutputFreeBytes: Int64 = 1_000_000_000
+    /// Between `outputStopBytes` (2 GB) and `outputWarnBytes` (10 GB default) — warning.
+    private static let warningOutputFreeBytes: Int64 = 5_000_000_000
+    /// Comfortably above `outputWarnBytes` + hysteresis release margin — recovered/safe reading.
+    private static let safeFreeBytes: Int64 = 50_000_000_000
+
+    @Test("warning verdict — recording continues, warning posted once, correct reason surfaced")
+    func warningVerdict_continuesAndNotifiesOnce() async throws {
+        let diskProvider = FakeDiskSpaceProvider()
+        await diskProvider.configure(
+            outputFreeBytes: Self.warningOutputFreeBytes,
+            systemFreeBytes: Self.safeFreeBytes
+        )
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let diskNotifier = FakeDiskSpaceWarningNotifier()
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            diskSpaceProvider: diskProvider,
+            diskWarningNotifier: diskNotifier
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request())
+
+        let warned = await eventuallyMain { coordinator.diskWarning == .outputFree }
+        #expect(warned, "a below-outputWarnBytes reading must surface .outputFree on diskWarning")
+        #expect(coordinator.phase == .recording, "AC-3: a warning verdict must NOT stop recording")
+        #expect(!fake.stopCalled, "warning must never trigger a stop")
+        #expect(diskNotifier.warningReasons == [.outputFree], "warning must be posted exactly once per crossing")
+
+        await coordinator.stop()
+    }
+
+    @Test("AC-11: disk warning de-escalates once free space recovers past the release margin")
+    func warningDeescalates_whenSpaceRecovers() async throws {
+        let diskProvider = FakeDiskSpaceProvider()
+        await diskProvider.configure(
+            outputFreeBytes: Self.warningOutputFreeBytes,
+            systemFreeBytes: Self.safeFreeBytes
+        )
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let diskNotifier = FakeDiskSpaceWarningNotifier()
+        let clock = FakeMonotonicClock()
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            diskSpaceProvider: diskProvider,
+            diskWarningNotifier: diskNotifier,
+            diskSpaceClock: clock
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request())
+
+        let warned = await eventuallyMain { coordinator.diskWarning == .outputFree }
+        #expect(warned, "prerequisite: a below-outputWarnBytes reading must raise the warning")
+
+        let thresholds = RecordingConfiguration.mvpDefault.diskThresholds
+
+        // The tick loop itself fires at a real (unfaked) ~1 Hz cadence (T-6) — only the monitor's
+        // `readEvery` throttle and de-escalation debounce are driven off the injected clock. So a
+        // real tick must actually land and consume the throttled-open window before advancing the
+        // clock again; gate on the provider's `callCount` (bumped only on an APPLIED read, never a
+        // throttled-away tick) instead of guessing a fixed sleep.
+        let callsBeforeRecovery = await diskProvider.callCount
+
+        // Recover well past outputWarnBytes + hysteresisReleaseBytes. Advance the fake clock past
+        // readEverySeconds so the monitor's throttle allows the NEXT real tick to read the
+        // recovered value — this only registers a de-escalation CANDIDATE (AC-11), it must not
+        // commit yet (its `since` equals the tick's `now`, so `now - since == 0 < debounce`).
+        await diskProvider.configure(outputFreeBytes: Self.safeFreeBytes, systemFreeBytes: Self.safeFreeBytes)
+        clock.advance(by: thresholds.readEverySeconds + 1)
+
+        let sawCandidateRead = await eventuallyAsync { await diskProvider.callCount > callsBeforeRecovery }
+        #expect(
+            sawCandidateRead,
+            "prerequisite: a real tick must apply the recovered reading before the debounce is exercised"
+        )
+
+        #expect(
+            coordinator.diskWarning == .outputFree,
+            "AC-11: a recovered reading must NOT clear the warning before the debounce window elapses"
+        )
+
+        // Advance the fake clock past `deescalationDebounceSeconds` from the candidate's `since`
+        // (the `now` observed by the read above) — the next real tick's read now both clears the
+        // `readEvery` throttle and satisfies the debounce, committing the de-escalation.
+        let callsBeforeCommit = await diskProvider.callCount
+        clock.advance(by: thresholds.deescalationDebounceSeconds + 1)
+
+        let sawCommitRead = await eventuallyAsync { await diskProvider.callCount > callsBeforeCommit }
+        #expect(sawCommitRead, "prerequisite: a real tick must apply the second reading for the debounce to elapse")
+
+        let cleared = await eventuallyMain(timeoutMs: 4000) { coordinator.diskWarning == nil }
+        #expect(cleared, "AC-11: warning must clear once free space recovers past the release margin")
+
+        await coordinator.stop()
+    }
+
+    @Test("critical verdict — auto-stops gracefully via the single idempotent stop() funnel, notifies AC-9")
+    func criticalVerdict_autoStopsGracefullyAndNotifies() async throws {
+        let diskProvider = FakeDiskSpaceProvider()
+        await diskProvider.configure(
+            outputFreeBytes: Self.criticalOutputFreeBytes,
+            systemFreeBytes: Self.safeFreeBytes
+        )
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let diskNotifier = FakeDiskSpaceWarningNotifier()
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            diskSpaceProvider: diskProvider,
+            diskWarningNotifier: diskNotifier
+        )
+        coordinator.bindWindowActions(
+            openRecordingWindow: {},
+            dismissMainWindow: {},
+            dismissRecordingWindow: {},
+            openMainWindow: {}
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request(origin: .main))
+        #expect(coordinator.phase == .recording, "prerequisite: must be recording")
+
+        let stopped = await eventuallyMain(timeoutMs: 8000) { coordinator.phase == .main }
+        #expect(stopped, "AC-4: a below-outputStopBytes reading must auto-stop the recording")
+        #expect(fake.stopCount == 1, "AC-8: the disk-critical stop must route through stop() exactly once")
+        #expect(coordinator.stoppedDueToLowSpace, "AC-9: the stop must be attributed to low disk space")
+        #expect(coordinator.lastResult != nil, "the session must finalize with a valid completed result")
+        #expect(
+            diskNotifier.autoStoppedCalls.count == 1,
+            "AC-9: notifyAutoStopped must fire exactly once for the disk-critical stop"
+        )
+        #expect(diskNotifier.autoStoppedCalls.first?.reason == .outputFree)
+        #expect(
+            diskNotifier.autoStoppedCalls.first?.filesSaved.screenURL
+                == CoordinatorFixtures.result().screen?.url,
+            "AC-9: the notification must carry the actually-saved file URL(s)"
+        )
+        #expect(diskNotifier.warningReasons.isEmpty, "a critical-from-the-start reading skips the warning state")
+    }
+
+    @Test("slow refresh racing a manual stop — no spurious warning, single teardown")
+    func slowRefreshRacingManualStop_noSpuriousWarningSingleTeardown() async throws {
+        // A reading that WOULD be a warning if applied — proves the race is guarded, not that the
+        // provider happens to report a safe value.
+        let diskProvider = FakeDiskSpaceProvider()
+        await diskProvider.configure(
+            outputFreeBytes: Self.warningOutputFreeBytes,
+            systemFreeBytes: Self.safeFreeBytes,
+            delayNanoseconds: 500_000_000 // 500 ms — well past a manual stop below
+        )
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let diskNotifier = FakeDiskSpaceWarningNotifier()
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            diskSpaceProvider: diskProvider,
+            diskWarningNotifier: diskNotifier
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request())
+
+        // Wait until the tick has actually spawned the (slow, in-flight) provider read.
+        var callCount = await diskProvider.callCount
+        var attempts = 0
+        while callCount == 0, attempts < 200 {
+            try await Task.sleep(nanoseconds: 5_000_000)
+            callCount = await diskProvider.callCount
+            attempts += 1
+        }
+        #expect(callCount >= 1, "prerequisite: the tick must have spawned the slow refresh before we race it")
+
+        // Race a manual stop while the 500 ms provider read is still in flight.
+        await coordinator.stop()
+
+        #expect(fake.stopCount == 1, "the manual stop must run the teardown exactly once")
+        #expect(
+            diskNotifier.warningReasons.isEmpty,
+            "a refresh resolving after the tick loop is cancelled must not post"
+        )
+
+        // Let the delayed refresh actually resolve inside the monitor and re-confirm nothing leaked out.
+        try await Task.sleep(nanoseconds: 700_000_000)
+        #expect(
+            diskNotifier.warningReasons.isEmpty,
+            "the stale refresh must not surface a warning even after it resolves post-stop"
+        )
+    }
+
+    @Test("AC-7 last-resort: AVError.diskFull write failure finalizes via lastWriteError, not a disk-space auto-stop")
+    func diskFullWriteError_usesExistingWriteErrorChannel() async throws {
+        let fake = FakeRecordingControlling(result: CoordinatorFixtures.diskFullWriteResult())
+        let diskNotifier = FakeDiskSpaceWarningNotifier()
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in fake },
+            diskWarningNotifier: diskNotifier
+        )
+
+        try await coordinator.start(CoordinatorFixtures.request())
+        await coordinator.stop()
+
+        #expect(
+            coordinator.lastWriteError != nil,
+            "AVError.diskFull must surface via the existing write-error channel, not a raw abort"
+        )
+        #expect(!coordinator.stoppedDueToLowSpace, "a writer-level disk-full fault is NOT a disk-space auto-stop")
+        #expect(diskNotifier.autoStoppedCalls.isEmpty, "the disk-space notifier must not fire for a writer-level fault")
+        #expect(coordinator.lastResult != nil, "the session must still finalize gracefully with a result")
+    }
+
+    @Test("new session clears the prior session's disk-stop state (AC-1)")
+    func newSession_clearsPriorDiskStopState() async throws {
+        let diskProvider = FakeDiskSpaceProvider()
+        await diskProvider.configure(
+            outputFreeBytes: Self.criticalOutputFreeBytes,
+            systemFreeBytes: Self.safeFreeBytes
+        )
+        let fake1 = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let fake2 = FakeRecordingControlling(result: CoordinatorFixtures.result())
+        let callCounter = Counter()
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: InMemoryUserDefaults()) },
+            sessionFactory: { _, _ in
+                callCounter.increment()
+                return callCounter.value == 1 ? fake1 : fake2
+            },
+            diskSpaceProvider: diskProvider
+        )
+
+        // Session 1: critical-from-the-start reading auto-stops and sets stoppedDueToLowSpace.
+        try await coordinator.start(CoordinatorFixtures.request(origin: .main))
+        let stopped = await eventuallyMain(timeoutMs: 8000) { coordinator.phase != .recording }
+        #expect(stopped, "prerequisite: session 1 must auto-stop on the critical disk verdict")
+        #expect(coordinator.stoppedDueToLowSpace, "prerequisite: session 1 stop must be attributed to low disk space")
+
+        // Reconfigure to a safe reading so session 2 does not immediately re-trigger a critical stop.
+        await diskProvider.configure(outputFreeBytes: Self.safeFreeBytes, systemFreeBytes: Self.safeFreeBytes)
+
+        // Session 2: start() must clear the prior session's disk-stop state synchronously.
+        try await coordinator.start(CoordinatorFixtures.request(origin: .main))
+
+        #expect(!coordinator.stoppedDueToLowSpace, "start() must clear stoppedDueToLowSpace for a new session (AC-1)")
+        #expect(coordinator.diskWarning == nil, "start() must clear diskWarning for a new session (AC-1)")
+
+        await coordinator.stop()
+    }
 }
 
 // MARK: - Critical signals (critical-recording-signals, Phase C)
@@ -1262,7 +2126,7 @@ struct RecordingCoordinatorCriticalTests {
     )
     -> RecordingCoordinator {
         RecordingCoordinator(
-            sessionFactory: { _ in FakeRecordingControlling(result: CoordinatorFixtures.result()) },
+            sessionFactory: { _, _ in FakeRecordingControlling(result: CoordinatorFixtures.result()) },
             notifier: notifier
         )
     }
@@ -1388,7 +2252,7 @@ struct RecordingCoordinatorCriticalTests {
     func deniedNotifier_indicatorStillReflectsHard() {
         // A no-op notifier stands in for the denied path (the live notifier silently drops when denied).
         let coordinator = RecordingCoordinator(
-            sessionFactory: { _ in FakeRecordingControlling(result: CoordinatorFixtures.result()) },
+            sessionFactory: { _, _ in FakeRecordingControlling(result: CoordinatorFixtures.result()) },
             notifier: NoOpNotifier()
         )
 
@@ -1403,7 +2267,7 @@ struct RecordingCoordinatorCriticalTests {
     @Test("AC-10: soft + denied notifier → no crash, disk-only by design")
     func deniedNotifier_soft_noCrash() {
         let coordinator = RecordingCoordinator(
-            sessionFactory: { _ in FakeRecordingControlling(result: CoordinatorFixtures.result()) },
+            sessionFactory: { _, _ in FakeRecordingControlling(result: CoordinatorFixtures.result()) },
             notifier: NoOpNotifier()
         )
 
@@ -1418,7 +2282,7 @@ struct RecordingCoordinatorCriticalTests {
     func tickLoop_feedsMonotonicElapsed() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
         fake.liveSessionElapsedSeconds = 42 // injected monotonic clock, distinct from Date()-elapsed
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake })
+        let coordinator = RecordingCoordinator { _, _ in fake }
 
         try await coordinator.start(CoordinatorFixtures.request())
         let threaded = await eventuallyMain { coordinator.lastMonotonicElapsedSeconds == 42 }
@@ -1530,5 +2394,4 @@ private final class NoOpNotifier: RecordingStartNotifying {
 }
 
 // swiftlint:enable no_magic_numbers
-// swiftlint:enable trailing_closure
 // swiftlint:enable type_body_length

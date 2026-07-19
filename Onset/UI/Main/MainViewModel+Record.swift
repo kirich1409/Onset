@@ -14,6 +14,11 @@ extension MainViewModel {
         self.recordError = nil
         self.outputDirectoryError = nil
 
+        // T-7 (AC-1): recompute the idle disk-space headline on every record initiation, so the
+        // main screen never shows a stale-by-one-appear number if `start()` fails validation and
+        // the user stays on this screen.
+        await self.refreshIdleDiskEstimate()
+
         guard self.validateRecordGuards() else { return }
         guard self.validateOutputDirectory() else { return }
         guard let display = self.validateDisplaySelection() else { return }
@@ -85,12 +90,21 @@ extension MainViewModel {
 
     /// Resolves the camera format for the active camera. Returns `nil` when camera is disabled
     /// or no camera is selected. Throws and sets `recordError` when the camera has no suitable format.
+    ///
+    /// Record path opts into `allowAboveFullHD: true` — native 4K (e.g. the Brio's 3840×2160 16:9
+    /// format) is preferred when the camera advertises it. The camera encoder is built from this
+    /// same resolved format's dimensions (`CapabilityResolver` → `RecordingComponentFactories`), so
+    /// there is no upscale mismatch. Budget math: camera 4K30 (~248.8M px/s) + screen 4K60
+    /// (~497.7M px/s) ≈ 746.5M px/s, under the 995M `EngineBudgetCap` with ~25% headroom; L5 on the
+    /// reference Brio (2026-07-02) confirmed zero frame loss recording both at native resolution,
+    /// including under worst-case full-screen motion.
     func resolveCameraFormat() throws -> CameraFormat? {
         guard let camera = self.activeCamera else { return nil }
         do {
             return try CameraFormatSelector.pickBestFormat(
                 from: camera.formats,
-                minFps: Double(RecordingConfiguration.mvpDefault.minCameraFps)
+                minFps: Double(RecordingConfiguration.mvpDefault.minCameraFps),
+                allowAboveFullHD: true
             )
         } catch {
             self.recordError = "Не удалось выбрать формат камеры"
@@ -103,8 +117,13 @@ extension MainViewModel {
 
     /// Stops preview, builds the request, and calls `coordinator.start`.
     func startRecording(display: Display, cameraFormat: CameraFormat?) async {
-        // Build config with the user-selected (or default) base output directory (#225).
-        let config = RecordingConfiguration.makeMVPDefault(baseDirectory: self.outputDirectoryURL)
+        // Build config with the user-selected (or default) base output directory (#225) and the
+        // current camera-mirror setting. The mirror is read fresh here (record start), never on a
+        // running session — the one-shot pipeline honors the value captured at this point.
+        let config = RecordingConfiguration.makeMVPDefault(
+            baseDirectory: self.outputDirectoryURL,
+            cameraMirror: self.appSettings.cameraMirror
+        )
         let plan = CapabilityResolver.resolveStartProfile(
             display: display,
             cameraFormat: cameraFormat,
@@ -115,7 +134,7 @@ extension MainViewModel {
         if let preview = self.previewSource {
             await preview.stop()
             self.previewSource = nil
-            self.previewHandle = nil
+            self.setPreviewState(.idle)
         }
 
         let request = RecordingRequest(

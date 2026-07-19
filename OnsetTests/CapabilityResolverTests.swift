@@ -26,6 +26,9 @@ private func makeCamera(pixelWidth: Int32, pixelHeight: Int32, maxFps: Double) -
 
 // MARK: - CapabilityResolver tests
 
+// type_body_length: single-concern suite covering all CapabilityResolver pure-math paths;
+// kept in one struct so the shared `config` fixture is visible everywhere.
+// swiftlint:disable type_body_length
 @Suite("CapabilityResolver.resolveStartProfile — pure budget math")
 struct CapabilityResolverTests {
     private let config = RecordingConfiguration.mvpDefault
@@ -308,4 +311,87 @@ struct CapabilityResolverTests {
         )
         #expect(plan.displayID == 42)
     }
+
+    // MARK: - 4K camera + 4K screen fits budget without screen downscale
+
+    // Budget arithmetic (deliberate acceptance; see CapabilityResolver.swift step-2 comment):
+    //   Budget cap = 995M px/s.
+    //   Camera fps = min(30, maxScreenFps=60) = 30 → camera rate = 3840×2160×30 ≈ 248.8M px/s.
+    //   Screen rate = 3840×2160×60 ≈ 497.7M px/s.
+    //   Combined ≈ 746.5M < 995M → ~25% headroom → screen is NOT downscaled.
+    //
+    //   Camera fps=30 (not 60) is load-bearing: a 4K@60 camera would contribute 497.7M,
+    //   pushing the total to ≈ 995.3M > 995M and triggering a one-step downscale.
+
+    @Test("4K@30 camera + 4K@60 screen fits budget — screen not downscaled")
+    func resolve_4K30Camera_4K60Screen_fitsWithoutDownscale() {
+        let display = makeDisplay(pixelWidth: 3840, pixelHeight: 2160, refreshHz: 60.0)
+        // maxFps: 30 — matches the Brio 4K@30 announcement; do NOT use 60 (see knife-edge above).
+        let camera = makeCamera(pixelWidth: 3840, pixelHeight: 2160, maxFps: 30.0)
+
+        let plan = CapabilityResolver.resolveStartProfile(
+            display: display,
+            cameraFormat: camera,
+            config: self.config
+        )
+
+        // Screen must NOT be downscaled — the 4K@30 camera fits within the budget headroom.
+        #expect(plan.screenWidth == 3840)
+        #expect(plan.screenHeight == 2160)
+        // Budget invariant holds.
+        #expect(plan.combinedPixelsPerSecond <= self.config.budgetCap.maxPixelsPerSecond)
+        // Sanity: even dimensions preserved.
+        #expect(plan.screenWidth.isMultiple(of: 2))
+        #expect(plan.screenHeight.isMultiple(of: 2))
+
+        // Camera plan must also be present at its native 4K resolution — not just the screen.
+        guard let cameraPlan = plan.cameraPlan else {
+            Issue.record("Expected a camera plan, but got nil")
+            return
+        }
+        #expect(cameraPlan.width == 3840)
+        #expect(cameraPlan.height == 2160)
+    }
+
+    // MARK: - Camera plan fps matches the activated cadence, not the announced maxFps (#269)
+
+    @Test("Camera plan fps binds to minCameraFps (activated), not the format's maxFps ≥ 60")
+    func resolve_highMaxFpsCamera_planFpsMatchesActivatedCadence() {
+        let display = makeDisplay(pixelWidth: 1920, pixelHeight: 1080, refreshHz: 30.0)
+        // Announced maxFps=60 (e.g. Continuity Camera 1080p) — CameraSource still
+        // activates the device at config.minCameraFps (30), so the CFR grid must follow.
+        let camera = makeCamera(pixelWidth: 1920, pixelHeight: 1080, maxFps: 60.0)
+
+        let plan = CapabilityResolver.resolveStartProfile(
+            display: display,
+            cameraFormat: camera,
+            config: self.config
+        )
+
+        guard let cameraPlan = plan.cameraPlan else {
+            Issue.record("Expected a camera plan, but got nil")
+            return
+        }
+        #expect(cameraPlan.fps == self.config.minCameraFps)
+    }
+
+    @Test("Camera plan fps unaffected when maxFps already equals minCameraFps (no regression)")
+    func resolve_lowMaxFpsCamera_planFpsUnaffected() {
+        let display = makeDisplay(pixelWidth: 1920, pixelHeight: 1080, refreshHz: 30.0)
+        let camera = makeCamera(pixelWidth: 1920, pixelHeight: 1080, maxFps: 30.0)
+
+        let plan = CapabilityResolver.resolveStartProfile(
+            display: display,
+            cameraFormat: camera,
+            config: self.config
+        )
+
+        guard let cameraPlan = plan.cameraPlan else {
+            Issue.record("Expected a camera plan, but got nil")
+            return
+        }
+        #expect(cameraPlan.fps == 30)
+    }
 }
+
+// swiftlint:enable type_body_length

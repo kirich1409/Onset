@@ -10,9 +10,15 @@
 
 ---
 
-**Последнее обновление:** 2026-06-22 (v0.5)
+**Последнее обновление:** 2026-07-02 (v0.5)
 **Владелец:** @kirich1409
-**Статус критериев:** черновик (v0.5) — добавлен §3.7 критические сигналы записи (3 условия «пожара», таблица 9 порогов, заметка о L5-калибровке на MX Brio по AC-7); ранее (v0.4): §3.6 покрытие кода (L2, информационно), ярусная матрица устройств (Tier 0 / Tier 1), встроенный дисплей MacBook, graceful-поведение при отсутствии внешних устройств
+**Статус критериев:** черновик (v0.5) — §2.1/§5/§6: снят кэп «4K недостижимо через AVFoundation /
+требует CMIO/IOKit» ([#177](https://github.com/kirich1409/Onset/issues/177) superseded #265); record
+path пишет native 4K с MX Brio (L5 2026-07-02, ноль потерь под worst-case нагрузкой); 60fps остаётся
+недостижим (Brio hardware-constraint, [#178](https://github.com/kirich1409/Onset/issues/178)); добавлен
+§3.7 критические сигналы записи (3 условия «пожара», таблица 9 порогов, заметка о L5-калибровке на MX
+Brio по AC-7); ранее (v0.4): §3.6 покрытие кода (L2, информационно), ярусная матрица устройств
+(Tier 0 / Tier 1), встроенный дисплей MacBook, graceful-поведение при отсутствии внешних устройств
 
 ---
 
@@ -46,20 +52,21 @@
 | Устройство | Режим | Статус поддержки |
 |---|---|---|
 | Logitech MX Brio | **1080p** 16:9 (автовыбор; реально ~20 fps из-за AE-droop UVC) | ✅ функционально работает; критерии качества ❌ (#112). Brio рекламирует 60fps, AVFoundation доставляет ~20fps (L5-verified, [подробности](macos-avfoundation-camera-limits.md)) |
-| Logitech MX Brio | **4K30** | Future — [#177](https://github.com/kirich1409/Onset/issues/177) (требует CMIO/IOKit-стек; недостижимо через AVFoundation на macOS) |
-| Logitech MX Brio | **1080p60** | Future — [#178](https://github.com/kirich1409/Onset/issues/178) (требует CMIO/IOKit-стек; недостижимо через AVFoundation на macOS) |
+| Logitech MX Brio | **4K30** (record path — `allowAboveFullHD: true`) | ✅ достижимо через AVFoundation, hold-lock через `startRunning()` ([#265](https://github.com/kirich1409/Onset/issues/265)); [#177](https://github.com/kirich1409/Onset/issues/177) закрыт как superseded. L5 2026-07-02: camera 4K + экран 4K60 записаны с нулём потерь даже под полноэкранным движением ([подробности](macos-avfoundation-camera-limits.md)) |
+| Logitech MX Brio | **1080p60** | Future — [#178](https://github.com/kirich1409/Onset/issues/178) закрыт как hardware-constraint Brio (~24–25 fps на любом конфиге, не лимит AVFoundation/macOS, не фиксится сменой стека захвата) |
 
 > **Примечание:** MX Brio — опциональное внешнее устройство; его отсутствие не является ошибкой.
 > Приложение обязано корректно работать без него (нет краша, понятное состояние UI — §3.4).
 
-> **MVP-скоуп камеры (issue #145, #113 закрыт):** камера пишется в **16:9, макс. доставляемом
-> разрешении (1080p), авто-выбором, без ручного пикера режима**. `CameraFormatSelector.pickBestFormat`
-> выбирает наибольший 16:9-формат с `height ≤ 1080` и `maxFps ≥ 30`; при fps-равенстве — бо́льший fps.
-> Реальная доставка: встроенная FaceTime HD — 1080p30 (чисто); MX Brio — 1080p ~20 fps (рекламирует
-> 60, AVFoundation ограничивает; L5-verified). 4K30 и 1080p60 **недостижимы через AVFoundation на
-> macOS** — вынесены в [#177](https://github.com/kirich1409/Onset/issues/177) (4K) и
-> [#178](https://github.com/kirich1409/Onset/issues/178) (60fps), требуют смены стека захвата
-> (CMIO/IOKit). Подробности: [`docs/quality/macos-avfoundation-camera-limits.md`](macos-avfoundation-camera-limits.md).
+> **MVP-скоуп камеры (issue #145, #113 закрыт):** камера пишется в **16:9**, авто-выбором, без
+> ручного пикера режима. `CameraFormatSelector.pickBestFormat` выбирает наибольший 16:9-формат с
+> `maxFps ≥ 30`; на record-пути (`allowAboveFullHD: true`) — наибольшее доступное разрешение (4K,
+> когда камера его отдаёт); на preview/device-list пути (`allowAboveFullHD: false`, дефолт) — кэп
+> ≤ 1080p. При fps-равенстве — бо́льший fps. Реальная доставка: встроенная FaceTime HD — 1080p30
+> (чисто); MX Brio — record-путь пишет native 4K, ~26–30 fps (L5-verified 2026-07-02). 60fps
+> **недостижим через AVFoundation на macOS** ни на одной из этих камер (Brio hardware-constraint,
+> не лимит стека захвата) — отслеживается в [#178](https://github.com/kirich1409/Onset/issues/178).
+> Подробности: [`docs/quality/macos-avfoundation-camera-limits.md`](macos-avfoundation-camera-limits.md).
 
 ### 2.2 Экран
 
@@ -92,7 +99,7 @@
 | Критерий | Порог | Метод | Статус |
 |---|---|---|---|
 | Выживаемость enc_real | ≥ 95% поданных кадров | телеметрия `enc_real / capture` | ❌ ~84% (enc_real 20.0 / capture 23.8 при тихом прогоне, `cfr-clock-acceptance.md`) |
-| Fresh-content rate (mpdecimate) | ≥ 95% номинала (≥ 28.5 fps при 30) | `verify-cfr.sh` ассерт C + mpdecimate | ❌ **пайплайн чист** — CFR-сетка идеальна (ассерт B PASS, gap_count=0), ассерты A/B/D PASS в поле (2026-06-07). Ограничение — доставка самой камеры ~19–23 fps при комнатном освещении: AE поверх пиннинга frame duration снижает фактический fps устройства (платформенное ограничение AVFoundation на macOS; см. [`macos-avfoundation-camera-limits.md`](macos-avfoundation-camera-limits.md)). mpdecimate поле: 16.73 fps (утром: 12.4–13.5). Порог ≥ 28.5 fps не достигается на MVP-стеке (AVFoundation); исправление — post-MVP ([#177](https://github.com/kirich1409/Onset/issues/177)/[#178](https://github.com/kirich1409/Onset/issues/178), CMIO/IOKit). Ранее: ~43% номинала до фикса B-frames |
+| Fresh-content rate (mpdecimate) | ≥ 95% номинала (≥ 28.5 fps при 30) | `verify-cfr.sh` ассерт C + mpdecimate | ❌ **пайплайн чист** — CFR-сетка идеальна (ассерт B PASS, gap_count=0), ассерты A/B/D PASS в поле (2026-06-07). Ограничение — доставка самой камеры ~19–23 fps при комнатном освещении: AE поверх пиннинга frame duration снижает фактический fps устройства (платформенное ограничение AVFoundation на macOS; см. [`macos-avfoundation-camera-limits.md`](macos-avfoundation-camera-limits.md)). mpdecimate поле: 16.73 fps (утром: 12.4–13.5). Порог ≥ 28.5 fps не достигается при текущем освещении — hardware-constraint самой камеры (отслеживается в [#178](https://github.com/kirich1409/Onset/issues/178); не лимит AVFoundation, не фиксится сменой стека захвата). Ранее: ~43% номинала до фикса B-frames |
 | Capture overflow | ≈ 0/с | телеметрия `capture_overflow` | ✅ полевой прогон 2026-06-07 (владелец в кадре, реальный воркфлоу): encoder overflow 0, gate_drop 0, writer 30.14/с — полоса записи чиста. «12–15/с» из #112 переатрибуированы preview-CameraSource с непотребляемым стримом (телеметрия без тега роли; → [#119](https://github.com/kirich1409/Onset/issues/119)). Оговорка: метрика валидна только после тега роли (#119). |
 | tick_lag (camera-актор) | медиана ≤ 10 мс, max ≤ 50 мс | телеметрия `tick_lag_ms` | ✅ avg ≈ 2.3 мс, max ≈ 9 мс (стенд 2026-06-07 после #112). Под 10×CPU load: avg 2.0 / max 6.7 мс — критерий PASS и под нагрузкой. Исторические значения 33–40 мс avg / до 133 мс max — артефакт измерения: старая семантика `tick_lag` фиксировала ~slot-период (33 мс) на здоровом пайплайне; новая (wake-latency) — реальную задержку пробуждения актора |
 | Серии дублей — мода | ≤ 2 кадра | `verify-cfr.sh` ассерт D: `MAX_RUN_MODE=2` | ✅ закрыто #102 (до: ~13, после: ≤2) |
@@ -260,8 +267,8 @@ Baseline записи с багом (до #102): camera 2.88 fps fresh, screen 4
 | Разрыв | Issue | Приоритет | Суть |
 |---|---|---|---|
 | Потери кадров камеры — 43% номинала | [#112](https://github.com/kirich1409/Onset/issues/112) | ✅ пайплайн-часть закрыта (PR #118, стенд+поле); device-input (~20 fps доставка камеры при комнатном свете) — платформенное ограничение AVFoundation; preview-телеметрия/чёрный старт → [#119](https://github.com/kirich1409/Onset/issues/119) | Корень — B-frames (`AllowFrameReordering=true`): reorder window держал `NumberOfPendingFrames` ≥ 4, структурно достигая backpressure gate. Фикс: `allowFrameReordering=false` в `mvpDefault`. Полевой прогон (владелец в кадре): encoder overflow 0, gate_drop 0, writer 30.14/с, verify-cfr A/B/D PASS. «12–15/с» overflow переатрибуированы preview-CameraSource (#119). Остаточный fresh-дефицит: AE-ограничение камеры (~19–23 fps при комнатном свете) — платформенное ограничение, не дефект пайплайна |
-| Камера 4K30 | [#177](https://github.com/kirich1409/Onset/issues/177) | 🟡 post-MVP | Недостижимо через AVFoundation на macOS; требует CMIO/IOKit-стек |
-| Камера 60fps | [#178](https://github.com/kirich1409/Onset/issues/178) | 🟡 post-MVP | Недостижимо через AVFoundation на macOS; требует CMIO/IOKit-стек |
+| Камера 4K30 | [#177](https://github.com/kirich1409/Onset/issues/177) | ✅ закрыт (superseded #265) | Record path пишет native 4K (`allowAboveFullHD: true`); L5 2026-07-02 — ноль потерь под worst-case нагрузкой |
+| Камера 60fps | [#178](https://github.com/kirich1409/Onset/issues/178) | 🟡 отслеживается | Hardware-constraint Brio (~24–25 fps на любом конфиге) — не лимит AVFoundation/macOS, не фиксится сменой стека |
 | VT-потолок / кросс-полосная конкуренция | [#104](https://github.com/kirich1409/Onset/issues/104) | 🔴 блокер | Screen encoder ~20–42 fps (4K); camera страдает косвенно; #112 закрыт отдельно |
 | Конфляция источников дропов | [#100](https://github.com/kirich1409/Onset/issues/100) | ✅ закрыт | `DropCause` per-source тали + `sessionEverDegraded` latch реализованы; UI per-cause — post-MVP |
 | EngineBudgetCap требует калибровки | [#97](https://github.com/kirich1409/Onset/issues/97) / [#98](https://github.com/kirich1409/Onset/issues/98) | 🟡 | `EngineBudgetCap` (995M px/s) — плейсхолдер; `CapabilityResolver` молча применяет downscale без user-visible сигнала |
@@ -273,7 +280,7 @@ Baseline записи с багом (до #102): camera 2.88 fps fresh, screen 4
 
 **Baseline-набор** — только встроенное железо MacBook (камера FaceTime HD, встроенный микрофон, встроенный дисплей). Выполняется при **каждой приёмке**, независимо от подключённых внешних устройств.
 
-**Extended-набор** — конфигурации с внешними устройствами (MX Brio). Выполняется при наличии устройства; **обязателен для релизов, затрагивающих capture**. MVP-скоуп: Brio 1080p ~20fps (AVFoundation). 4K30 и 1080p60 — post-MVP ([#177](https://github.com/kirich1409/Onset/issues/177)/[#178](https://github.com/kirich1409/Onset/issues/178), требуют CMIO/IOKit-стек).
+**Extended-набор** — конфигурации с внешними устройствами (MX Brio). Выполняется при наличии устройства; **обязателен для релизов, затрагивающих capture**. Record path пишет native 4K с Brio ([#177](https://github.com/kirich1409/Onset/issues/177) — superseded #265; L5 2026-07-02, ноль потерь). 1080p60 остаётся недостижим — hardware-constraint Brio (отслеживается в [#178](https://github.com/kirich1409/Onset/issues/178)).
 
 ### 6.1 Конфигурации
 
@@ -315,6 +322,7 @@ Baseline записи с багом (до #102): camera 2.88 fps fresh, screen 4
 
 | Дата | Версия | Что изменилось |
 |---|---|---|
+| 2026-07-02 | v0.5 | §2.1/§5/§6: снят кэп «4K недостижимо через AVFoundation / требует CMIO/IOKit» — [#177](https://github.com/kirich1409/Onset/issues/177) закрыт как superseded [#265](https://github.com/kirich1409/Onset/issues/265) (hold-lock через `startRunning()`); record path теперь пишет native 4K с MX Brio, L5 2026-07-02 подтвердил ноль потерь под worst-case полноэкранным движением. 60fps остаётся недостижим — [#178](https://github.com/kirich1409/Onset/issues/178) закрыт как hardware-constraint Brio, не связано со снятием 4K-кэпа |
 | 2026-06-22 | v0.5 | Добавлен §3.7 «Критические сигналы записи»: 3 условия «пожара» (потеря камеры soft/hard, устойчивые потери, коллапс fps), таблица 9 порогов `RecordingConfiguration.mvpDefault` со значениями по умолчанию, заметка об обязательной L5-калибровке на MX Brio по AC-7 (затемнение не срабатывает, stall срабатывает) со ссылкой на §3.1 |
 | 2026-06-08 | v0.4 | Добавлен §3.6 «Покрытие кода»: L2-покрытие таргета `Onset` измеряется per-PR (job-summary + `.xcresult`-артефакт), report-only, порог `ONSET_COVERAGE_MIN` выключен |
 | 2026-06-07 | v0.3 | По ревью PR #114: §2.1 — ярусная матрица камер (Tier 0 baseline: встроенная FaceTime HD; Tier 1 extended: MX Brio), примечание об опциональности внешних устройств; §2.2 — добавлены строки встроенного дисплея MacBook (ProMotion fps — открытый вопрос), clamshell, оба дисплея; §3.4 — graceful-поведение при отсутствии/отключении внешней камеры; §6 — матрица верификации разделена на Baseline-набор (только встроенное железо, каждая приёмка) и Extended-набор (внешние устройства, при наличии / обязателен для capture-релизов) |

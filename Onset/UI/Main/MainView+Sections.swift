@@ -104,12 +104,15 @@ extension MainView {
                 // Live preview — always mounted when active so the NSView layer is warm.
                 // `.id(previewGeneration)` forces recreation when the camera device changes;
                 // until the handle arrives the layer paints black (covered by the overlay below).
-                CameraPreviewRepresentable(sessionHandle: self.model.previewHandle)
-                    .id(self.model.previewGeneration)
-                    .accessibilityLabel("Предварительный просмотр камеры")
-                    // Hide the black NSView layer from VoiceOver while the placeholder is shown
-                    // so the user only hears the status label, not both.
-                    .accessibilityHidden(pending)
+                CameraPreviewRepresentable(
+                    sessionHandle: self.model.previewHandle,
+                    cameraMirror: self.model.appSettings.cameraMirror
+                )
+                .id(self.model.previewGeneration)
+                .accessibilityLabel("Предварительный просмотр камеры")
+                // Hide the black NSView layer from VoiceOver while the placeholder is shown
+                // so the user only hears the status label, not both.
+                .accessibilityHidden(pending)
 
                 // Placeholder — shown while `previewHandle == nil` (source not yet started or failed).
                 // Fades in/out via the ZStack-level `.animation` driven by `cameraPlaceholderPending`.
@@ -120,7 +123,8 @@ extension MainView {
                 }
             }
             .aspectRatio(Metrics.previewAspectRatio, contentMode: .fit)
-            // Cap on maxWidth (concrete in ScrollView) so the card is ≤140pt tall.
+            // Cap on maxWidth (concrete in ScrollView) so the card is ≤180pt tall, close to the
+            // 392pt card inner width to minimize the pillarbox margins on either side (#267).
             // maxHeight is also set for documentation intent; maxWidth is the reliable
             // binding dimension since ScrollView propagates width, not height.
             .frame(
@@ -128,7 +132,7 @@ extension MainView {
                 maxHeight: Metrics.previewMaxHeight
             )
             .clipShape(RoundedRectangle(cornerRadius: Metrics.previewCornerRadius))
-            // Center the narrower card within the section's full width.
+            // Center the narrower (320pt) card within the section's full width, leaving ~36pt margin per side.
             .frame(maxWidth: .infinity)
             // Crossfade between placeholder and live states. Scoped to `cameraPlaceholderPending`
             // so it does NOT animate the `.id()`-driven NSView recreation.
@@ -145,12 +149,14 @@ extension MainView {
     }
 
     /// Visible and accessibility label for the camera placeholder — iPhone-specific when applicable.
+    ///
+    /// Thin wrapper over `CameraPreviewLabel.text` so the visible label and the VoiceOver
+    /// announcement (`previewAnnouncement`) read the SAME source (#256). `nil` only for `.live`,
+    /// where the placeholder is not shown; the connecting copy is the safe fallback.
     private var cameraPlaceholderLabel: String {
         let isPhone = self.model.activeCamera?.isContinuityCamera == true
-        if self.model.previewFailed {
-            return isPhone ? "Не удалось подключить iPhone" : "Не удалось подключить камеру"
-        }
-        return isPhone ? "Подключение iPhone…" : "Подключение камеры…"
+        return CameraPreviewLabel.text(for: self.model.previewState, isContinuity: isPhone)
+            ?? (isPhone ? "Подключение iPhone…" : "Подключение камеры…")
     }
 
     /// Placeholder shown while the preview session is starting or has failed.
@@ -175,38 +181,64 @@ extension MainView {
                     .foregroundStyle(.primary)
             }
         }
+        // `.accessibilityLabel` gives the on-demand current-state read; the frequent-updates
+        // trait was removed (#256) — it re-spoke the label for a focused user on top of the
+        // explicit VoiceOver announcement (double speech).
         .accessibilityLabel(self.cameraPlaceholderLabel)
-        .accessibilityAddTraits(.updatesFrequently)
     }
 
     // MARK: - Microphone section
 
     var microphoneSection: some View {
         SectionCard(title: "МИКРОФОН") {
-            if !self.model.isMicAvailable {
-                MicrophoneUnavailableRow()
-            } else if self.model.microphones.isEmpty {
-                Text("Микрофоны не найдены")
+            self.microphonePickerOrDenied
+        }
+    }
+
+    /// Shows either the TCC-denied row, the device picker, or the disconnected notice.
+    ///
+    /// Mirrors `cameraPickerOrDenied`'s branch structure (#261): a saved-but-vanished
+    /// microphone must be surfaced explicitly, not silently read as "Без микрофона" — that
+    /// would look like an intentional choice rather than an involuntary disconnect.
+    ///
+    /// Branch priority (top-to-bottom wins):
+    /// 1. TCC denied → `MicrophoneUnavailableRow`.
+    /// 2. Microphones available → device picker. When a disconnected notice is also present
+    ///    (`disconnectedMicName != nil`), `MicrophoneDisconnectedRow(hasAlternatives: true)` is
+    ///    appended below the picker.
+    /// 3. No microphones AND disconnected notice → `MicrophoneDisconnectedRow(hasAlternatives: false)`
+    ///    (no picker because there is nothing to pick from).
+    /// 4. No microphones AND no disconnected notice → non-interactive "Микрофоны не найдены" text.
+    @ViewBuilder
+    private var microphonePickerOrDenied: some View {
+        if !self.model.isMicAvailable {
+            MicrophoneUnavailableRow()
+        } else if !self.model.microphones.isEmpty {
+            HStack {
+                Text("Устройство")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-            } else {
-                HStack {
-                    Text("Устройство")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
-                    Picker("Устройство", selection: self.$model.selectedMicID) {
-                        Text("Без микрофона").tag(String?.none)
-                        ForEach(self.model.microphones, id: \.uniqueID) { mic in
-                            Text(self.model.microphoneLabel(for: mic))
-                                .tag(Optional(mic.uniqueID))
-                        }
+                Spacer(minLength: 0)
+                Picker("Устройство", selection: self.$model.selectedMicID) {
+                    Text("Без микрофона").tag(String?.none)
+                    ForEach(self.model.microphones, id: \.uniqueID) { mic in
+                        Text(self.model.microphoneLabel(for: mic))
+                            .tag(Optional(mic.uniqueID))
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .accessibilityLabel("Устройство микрофона")
                 }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .accessibilityLabel("Устройство микрофона")
             }
+            if let name = self.model.disconnectedMicName {
+                MicrophoneDisconnectedRow(microphoneName: name, hasAlternatives: true)
+            }
+        } else if let name = self.model.disconnectedMicName {
+            MicrophoneDisconnectedRow(microphoneName: name, hasAlternatives: false)
+        } else {
+            Text("Микрофоны не найдены")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -378,15 +410,25 @@ private struct CameraUnavailableRow: View {
                 .foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(self.rowText)
+        .accessibilityLabel(self.accessibilityLabelText)
     }
 
+    /// Text delegated to `DeviceDisconnectedNoticeMapper` — the single, testable source of the
+    /// copy shared with `MicrophoneDisconnectedRow` (#261).
     private var rowText: String {
-        if self.hasAlternatives {
-            "Камера «\(self.cameraName)» недоступна — выберите другую камеру"
-        } else {
-            "Камера «\(self.cameraName)» недоступна"
-        }
+        DeviceDisconnectedNoticeMapper.rowText(
+            kind: .camera,
+            name: self.cameraName,
+            hasAlternatives: self.hasAlternatives
+        )
+    }
+
+    private var accessibilityLabelText: String {
+        DeviceDisconnectedNoticeMapper.accessibilityLabel(
+            kind: .camera,
+            name: self.cameraName,
+            hasAlternatives: self.hasAlternatives
+        )
     }
 }
 
@@ -404,6 +446,52 @@ private struct MicrophoneUnavailableRow: View {
                 .foregroundStyle(.secondary)
         }
         .accessibilityLabel("Микрофон недоступен. Запись будет вестись без звука.")
+    }
+}
+
+// MARK: - MicrophoneDisconnectedRow
+
+/// Shown when `disconnectedMicName != nil`: the previously selected microphone has disappeared
+/// (e.g. unplugged) while a microphone was selected. Mirrors `CameraUnavailableRow` — distinguishes
+/// an involuntary disconnection from an explicit "Без микрофона" selection so the user is not
+/// confused into thinking they turned the microphone off themselves (#261).
+///
+/// Text is delegated to `DeviceDisconnectedNoticeMapper` — the single, testable source of the copy
+/// shared with the camera notice.
+private struct MicrophoneDisconnectedRow: View {
+    /// Display name of the missing microphone device — shown in UI only, never logged.
+    let microphoneName: String
+    /// When `true`, the hint "выберите другой микрофон" is appended to the row label.
+    let hasAlternatives: Bool
+
+    var body: some View {
+        HStack(spacing: MainView.Metrics.accessorySpacing) {
+            Image(systemName: "mic.slash.circle")
+                .foregroundStyle(.secondary)
+                .frame(width: MainView.Metrics.iconColumnWidth)
+                .accessibilityHidden(true)
+            Text(self.rowText)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(self.accessibilityLabelText)
+    }
+
+    private var rowText: String {
+        DeviceDisconnectedNoticeMapper.rowText(
+            kind: .microphone,
+            name: self.microphoneName,
+            hasAlternatives: self.hasAlternatives
+        )
+    }
+
+    private var accessibilityLabelText: String {
+        DeviceDisconnectedNoticeMapper.accessibilityLabel(
+            kind: .microphone,
+            name: self.microphoneName,
+            hasAlternatives: self.hasAlternatives
+        )
     }
 }
 

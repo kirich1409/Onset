@@ -10,9 +10,12 @@ import SwiftUI
 /// - **Recording / degraded** — yellow filled circle `●` + warning triangle `⚠` + elapsed timer.
 /// - **Recording / hard critical** — red filled octagon `⛔` + elapsed timer (spec: hard incident).
 ///
-/// Reads `coordinator.phase`, `coordinator.recordingState`, `coordinator.elapsed`, and
-/// `coordinator.liveCriticalView` (the de-escalating windowed-hard view); per-property `@Observable`
-/// tracking fires only on those changes.
+/// Reads `coordinator.phase`, `coordinator.recordingState`, `coordinator.elapsed`,
+/// `coordinator.liveCriticalView` (the de-escalating windowed-hard view), `coordinator.diskWarning`
+/// (AC-12a, T-8), and `appSettings.showMenuBarTimer` so the per-property `@Observable` tracking
+/// fires only on those changes — toggling «Показывать таймер» re-renders the label live, and a
+/// low-space warning shows/clears the same triangle used for `deviceLostWarning` / backpressure
+/// degradation.
 @MainActor
 struct MenuBarLabel: View {
     // MARK: - Metrics
@@ -24,20 +27,37 @@ struct MenuBarLabel: View {
 
     let coordinator: RecordingCoordinator
 
+    /// Shared settings model — read for `showMenuBarTimer` so the timer hides/shows live.
+    let appSettings: AppSettings
+
+    /// Maps the semantic dot token to a concrete `Color` (#154 — keeps the color decision in the
+    /// view layer so `MenuBarLabelMapper` stays free of SwiftUI). Mirrors the original logic exactly:
+    /// hollow → `.primary` (no recording), red → `.red`, yellow → `.yellow`.
+    private func color(for dot: MenuBarLabelDescriptor.DotStyle) -> Color {
+        switch dot {
+        case .hollow: .primary
+        case .red, .critical: .red
+        case .yellow: .yellow
+        }
+    }
+
     var body: some View {
-        // Resolve once per render so body reads exactly the coordinator properties the mapper needs.
+        // Resolve once per render so body reads exactly the tracked coordinator + settings props.
         let desc = MenuBarLabelMapper.descriptor(
             phase: self.coordinator.phase,
             recordingState: self.coordinator.recordingState,
             elapsed: self.coordinator.elapsed,
-            liveCriticalView: self.coordinator.liveCriticalView
+            showTimer: self.appSettings.showMenuBarTimer,
+            sourceLiveness: self.coordinator.sourceLiveness,
+            liveCriticalView: self.coordinator.liveCriticalView,
+            diskWarning: self.coordinator.diskWarning
         )
 
         HStack(spacing: Metrics.elementSpacing) {
             Image(systemName: desc.dot.systemName)
-                .foregroundStyle(desc.dot.color)
+                .foregroundStyle(self.color(for: desc.dot))
 
-            if desc.dot.showsWarning {
+            if desc.dot.showsWarning || desc.deviceLostWarning || desc.lowSpaceWarning {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(Color.yellow)
             }

@@ -17,10 +17,14 @@
 ///    Note: 29.97 NTSC formats are deliberately excluded by the strict ≥ comparison.
 /// 2. **Prefer 16:9.** A format is 16:9 when `pixelWidth * 9 == pixelHeight * 16`
 ///    (exact integer check; covers 1920×1080, 1280×720, 3840×2160, etc.).
-/// 3. **Target Full HD (1920×1080).** Among 16:9 qualifying formats, prefer the largest
-///    16:9 format whose height ≤ 1080 (so 1080p if offered, else 720p, etc.).
-///    If all 16:9 formats exceed 1080p, pick the smallest 16:9 (closest from above).
-///    Never pick above 1080p when a ≤ 1080p 16:9 option exists.
+/// 3. **Target resolution tier.**
+///    - Default (`allowAboveFullHD == false`): prefer the largest 16:9 format whose
+///      height ≤ 1080 (≤ 1080p cap). If all 16:9 formats exceed 1080p, pick the
+///      smallest 16:9 (closest from above). Never pick above 1080p when a ≤ 1080p
+///      16:9 option exists.
+///    - Record opt-in (`allowAboveFullHD == true`): the ≤ 1080p cap is lifted; among
+///      all qualifying 16:9 formats pick the one with the maximum pixel count (4K when
+///      available, otherwise the largest that exists).
 /// 4. On the chosen resolution, prefer the higher `maxFps` (60 over 30).
 /// 5. **Fallback:** if there are no 16:9 formats among the qualifying set, fall back to
 ///    the largest pixel count with a tie-break on `maxFps`, so cameras that only offer
@@ -49,15 +53,20 @@ nonisolated enum CameraFormatSelector {
     ///     Pass `CameraDevice.formats` directly.
     ///   - minFps: The minimum acceptable frame rate. Pass
     ///     `Double(config.minCameraFps)` (= 30 for the MVP default profile).
-    /// - Returns: The best 16:9 format targeting Full HD resolution (≤ 1080p) that
-    ///   supports `maxFps ≥ minFps`. On a tie in resolution, the format with the higher
-    ///   `maxFps` is returned. Falls back to largest pixel count (tie-break: higher
-    ///   `maxFps`) when no 16:9 format qualifies.
+    ///   - allowAboveFullHD: When `false` (default), caps the selected resolution at
+    ///     Full HD (≤ 1080p height). When `true`, lifts the cap and picks the maximum
+    ///     available 16:9 resolution (4K when offered). Use `true` for the record path;
+    ///     leave at default for preview / device-list enumeration.
+    /// - Returns: The best 16:9 format at the applicable resolution tier that supports
+    ///   `maxFps ≥ minFps`. On a tie in resolution, the format with the higher `maxFps`
+    ///   is returned. Falls back to largest pixel count (tie-break: higher `maxFps`) when
+    ///   no 16:9 format qualifies.
     /// - Throws: `RecordingError.noSuitableCameraFormat` when no format satisfies
     ///   `maxFps ≥ minFps`, or when `formats` is empty.
     nonisolated static func pickBestFormat(
         from formats: [CameraFormat],
-        minFps: Double
+        minFps: Double,
+        allowAboveFullHD: Bool = false
     ) throws
     -> CameraFormat {
         let qualified = formats.filter { $0.maxFps >= minFps }
@@ -73,7 +82,7 @@ nonisolated enum CameraFormatSelector {
             return self.bestByPixelCount(from: qualified)
         }
 
-        return self.bestSixteenByNineFormat(from: sixteenByNine)
+        return self.bestSixteenByNineFormat(from: sixteenByNine, allowAboveFullHD: allowAboveFullHD)
     }
 
     // MARK: - Helpers
@@ -84,13 +93,27 @@ nonisolated enum CameraFormatSelector {
         Int(format.pixelWidth) * self.aspectRatioHeight == Int(format.pixelHeight) * self.aspectRatioWidth
     }
 
-    /// Picks the best format from a non-empty 16:9 set, targeting Full HD (≤ 1080p height).
+    /// Picks the best format from a non-empty 16:9 set, targeting the applicable resolution tier.
     ///
+    /// When `allowAboveFullHD` is `false` (default):
     /// - If any format has `height ≤ fullHDMaxHeight`, picks the largest such format
     ///   (highest pixel count within the ≤ 1080p tier), tie-break on higher `maxFps`.
     /// - If all formats exceed 1080p (camera offers no ≤ 1080p 16:9 option), picks the
     ///   smallest format (closest to the target from above), tie-break on higher `maxFps`.
-    nonisolated private static func bestSixteenByNineFormat(from formats: [CameraFormat]) -> CameraFormat {
+    ///
+    /// When `allowAboveFullHD` is `true`:
+    /// - The ≤ 1080p cap is lifted; picks the format with the maximum pixel count among
+    ///   all qualifying 16:9 formats (4K when available), tie-break on higher `maxFps`.
+    nonisolated private static func bestSixteenByNineFormat(
+        from formats: [CameraFormat],
+        allowAboveFullHD: Bool
+    )
+    -> CameraFormat {
+        if allowAboveFullHD {
+            // Cap lifted — pick the highest-resolution 16:9 format available (e.g. 4K).
+            return self.bestByPixelCount(from: formats)
+        }
+
         let belowOrAtFullHD = formats.filter { Int($0.pixelHeight) <= self.fullHDMaxHeight }
 
         if !belowOrAtFullHD.isEmpty {
@@ -110,7 +133,9 @@ nonisolated enum CameraFormatSelector {
             // Int32 → Int: avoids overflow traps under STRICT_MEMORY_SAFETY for high-res dimensions.
             let bestPixels = Int(best.pixelWidth) * Int(best.pixelHeight)
             let candidatePixels = Int(candidate.pixelWidth) * Int(candidate.pixelHeight)
-            if candidatePixels != bestPixels { return candidatePixels > bestPixels ? candidate : best }
+            if candidatePixels != bestPixels {
+                return candidatePixels > bestPixels ? candidate : best
+            }
             return candidate.maxFps > best.maxFps ? candidate : best
         }
     }
@@ -123,7 +148,9 @@ nonisolated enum CameraFormatSelector {
             // Int32 → Int: avoids overflow traps under STRICT_MEMORY_SAFETY for high-res dimensions.
             let bestPixels = Int(best.pixelWidth) * Int(best.pixelHeight)
             let candidatePixels = Int(candidate.pixelWidth) * Int(candidate.pixelHeight)
-            if candidatePixels != bestPixels { return candidatePixels < bestPixels ? candidate : best }
+            if candidatePixels != bestPixels {
+                return candidatePixels < bestPixels ? candidate : best
+            }
             return candidate.maxFps > best.maxFps ? candidate : best
         }
     }

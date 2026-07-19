@@ -1,4 +1,5 @@
 // swiftlint:disable file_length
+import Accessibility
 import AppKit
 import AVFoundation
 import os
@@ -53,6 +54,13 @@ final class MainViewModel {
     @ObservationIgnored
     let coordinator: RecordingCoordinator
 
+    /// The shared settings model. `@ObservationIgnored` because the reference is constant — the
+    /// reactive value (`cameraMirror`) is observed through `AppSettings`'s own `@Observable`
+    /// tracking where it is read (the live preview), not through this property. Read at record
+    /// start to thread `cameraMirror` into the recording `RecordingConfiguration`.
+    @ObservationIgnored
+    let appSettings: AppSettings
+
     /// Closure seam for display discovery — injectable for tests.
     @ObservationIgnored
     let discoverDisplays: (Bool) async throws -> [Display]
@@ -106,6 +114,37 @@ final class MainViewModel {
     @ObservationIgnored
     var startSessionOverride: (@MainActor (RecordingRequest) async throws -> Void)?
 
+    /// Sleep seam for the preview soft-connect watchdog (#255) — injectable for tests.
+    ///
+    /// The live default sleeps for the requested `Duration`. Tests inject a closure that
+    /// blocks on a signal so the timeout-vs-build ordering in L2 is deterministic rather than
+    /// wall-clock dependent. A thrown `CancellationError` (structured cancellation) makes the
+    /// watchdog exit without flipping state.
+    @ObservationIgnored
+    let connectSleep: @Sendable (Duration) async throws -> Void
+
+    /// Connect seam for the preview build step (#255) — injectable for tests.
+    ///
+    /// The live default starts the source and reads back its `SessionHandle`. `CameraSource` is a
+    /// concrete `actor` whose `start()` needs hardware/TCC, so this seam lets L2 tests control the
+    /// build half of the connect race (the `.live` identity+attempt gate and `.failed` gate stay in
+    /// production unchanged). Throwing maps to the `.failed` path; a `nil` handle leaves the gate untouched.
+    @ObservationIgnored
+    let startPreviewSource: @Sendable (CameraSource) async throws -> SessionHandle?
+
+    /// Sink for VoiceOver announcements (#256) — injectable for tests.
+    ///
+    /// The live default posts via the Accessibility framework: builds an `AttributedString`, sets
+    /// `accessibilitySpeechAnnouncementPriority` (the supported priority route SwiftUI does not
+    /// surface — high interrupts current speech, normal queues), and calls
+    /// `AccessibilityNotification.Announcement(_:).post()`. `@MainActor` because the AX post runs on
+    /// the main actor (this type's default isolation) — bare `@Sendable` would strip that and move
+    /// where the post runs. The text is user-facing UI (== the visible label), never logged — no
+    /// device name reaches `os.Logger`. Tests inject a recorder to assert the policy deterministically
+    /// without VoiceOver.
+    @ObservationIgnored
+    let postAnnouncementSeam: @Sendable @MainActor (PreviewAnnouncement) -> Void
+
     // MARK: - Device lists
 
     // internal setters — must be settable from MainViewModel+Devices.swift extension
@@ -142,6 +181,14 @@ final class MainViewModel {
     /// Human-readable name of the previously selected microphone that is no longer available,
     /// or `nil` when the microphone is present or was never selected.
     var disconnectedMicName: String?
+
+    /// `true` once a selected camera has been observed present/active this session (#256).
+    ///
+    /// Gates the live-disconnect VoiceOver announcement so launching with a saved-but-absent
+    /// camera (flag still `false`) does not speak a spurious "…отключена". Set in
+    /// `loadCamerasAndMicrophones` where a camera is resolved present; never reset.
+    @ObservationIgnored
+    var hasObservedPresentCamera = false
 
     // MARK: - User selections (ID-typed for Hashable Picker compatibility)
 
@@ -334,16 +381,60 @@ final class MainViewModel {
 
     // MARK: - Preview state
 
+    /// Single source of truth for the camera preview connection progress.
+    /// Internal (not private) so `MainViewModel+Preview.swift`/`+Record.swift` extensions can write it.
+    /// Observed (no `@ObservationIgnored`) — the preview UI reacts to its changes.
+    var previewState: CameraPreviewState = .idle
+
     /// The `SessionHandle` for the live camera preview, or `nil` for placeholder.
-    /// Internal (not private) so `MainViewModel+Preview.swift` extension can write it.
-    var previewHandle: SessionHandle?
+    /// Get-only bridge over `previewState`; uses `if case` (the enum is not `Equatable`).
+    var previewHandle: SessionHandle? {
+        if case let .live(handle) = self.previewState {
+            handle
+        } else {
+            nil
+        }
+    }
 
     /// True when the last camera preview startup attempt failed terminally (no suitable format
     /// or `source.start()` threw). The spinner overlay is suppressed; a static error placeholder
-    /// is shown instead. Reset to `false` at the start of each new `managePreview` invocation
-    /// so re-selecting a different camera clears the prior failure.
-    /// Internal (not private) so `MainViewModel+Preview.swift` extension can write it.
-    var previewFailed = false
+    /// is shown instead.
+    /// Get-only bridge over `previewState`; uses `if case` (the enum is not `Equatable`).
+    var previewFailed: Bool {
+        if case .failed = self.previewState {
+            true
+        } else {
+            false
+        }
+    }
+
+    /// True while the preview is taking longer than the soft-connect threshold (#255) but is
+    /// still attempting. Lets the view distinguish the slow path from a plain `connecting`
+    /// (both otherwise collapse to `previewHandle == nil && !previewFailed`).
+    /// Get-only bridge over `previewState`; uses `if case` (the enum is not `Equatable`).
+    var previewIsConnectingSlow: Bool {
+        if case .connectingSlow = self.previewState {
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Soft-connect timeout for the preview watchdog (#255): Continuity (iPhone) cameras get a
+    /// longer grace period than built-in / USB. Delegates to the pure `CameraPreviewTimeout`.
+    /// `nonisolated` so the `@Sendable` watchdog skeleton can compute it without a MainActor hop.
+    nonisolated func connectTimeout(isContinuity: Bool) -> Duration {
+        CameraPreviewTimeout.threshold(isContinuity: isContinuity)
+    }
+
+    /// Monotonic per-attempt identity for the preview connect (#255). Bumped exactly once at
+    /// the start of each connect attempt (after the camera guards, before `.connecting`), then
+    /// captured locally with NO `await` in between. The watchdog and the `.live`/`.failed` writes
+    /// gate on `attempt == previewAttempt` so a stale watchdog/late continuation from a previous
+    /// attempt cannot mutate the current one. Distinct from `previewGeneration`: the latter has a
+    /// different bump cadence (`stopCurrentPreview` does not bump it) and drives `.id()`.
+    @ObservationIgnored
+    var previewAttempt = 0
 
     /// Bumped on each camera change; drives `.id()` on the `NSViewRepresentable` wrapper
     /// to force recreation of `CameraPreviewView` (its `init` wires the layer, `updateNSView` is no-op).
@@ -379,6 +470,57 @@ final class MainViewModel {
     /// Whether microphone is available (authorized) from permissions.
     var isMicAvailable: Bool {
         self.permissions.effectivePermissions.microphoneAvailable
+    }
+
+    // MARK: - No-permissions in-window grant flow (#277)
+
+    /// `true` while screen recording has been requested and the polling loop is in flight.
+    ///
+    /// Mirrors `OnboardingViewModel.isAwaitingScreen` (#61's screen-grant flow) so the
+    /// no-permissions empty state in the main window can show the same "Ожидание…" state
+    /// without leaving the window.
+    private(set) var isAwaitingScreen = false
+
+    /// Requests screen-recording access, opens System Settings, and enters the awaiting state.
+    ///
+    /// Mirrors `OnboardingViewModel.openScreenRecordingSettings()` exactly — same underlying
+    /// `PermissionsService` calls, so the granted edge auto-triggers `AppRelauncher` relaunch
+    /// (no new mechanics; see `PermissionsService.checkScreenStatusNow`/`startScreenPolling`).
+    func openScreenRecordingSettings() {
+        self.permissions.requestScreenRecording()
+        self.permissions.openScreenRecordingSettings()
+        mainViewModelLogger.info("Registered in TCC list; opened Screen Recording settings; awaiting state")
+        self.isAwaitingScreen = true
+    }
+
+    /// Triggers an immediate one-shot status check (the explicit "Проверить снова" button).
+    ///
+    /// Mirrors `OnboardingViewModel.checkNow()`.
+    func checkScreenStatusNow() {
+        self.permissions.checkScreenStatusNow()
+        mainViewModelLogger.info("Manual check triggered from no-permissions state")
+    }
+
+    /// Starts the background screen-status polling loop.
+    ///
+    /// Mirrors `OnboardingViewModel.startPolling()`. The caller must cancel the returned
+    /// `Task` when polling is no longer needed — use `.task { … }` for structured cancellation
+    /// so the loop stops when the no-permissions view disappears.
+    func startScreenPolling() -> Task<Void, Never> {
+        mainViewModelLogger.info("Starting screen polling from no-permissions state")
+        return self.permissions.startScreenPolling()
+    }
+
+    /// Clears the transient awaiting flag when the user leaves the no-permissions state
+    /// via the demoted "Вернуться к разрешениям" fallback.
+    ///
+    /// `MainViewModel` is app-lifetime (owned by the window scene, not re-created per
+    /// presentation), so `isAwaitingScreen` would otherwise stay latched `true` across a
+    /// round trip: open Settings → leave without granting → deny stays → re-enter this
+    /// state later still shows the stale "Ожидание…" spinner with no way back to
+    /// "Открыть настройки" via a fresh request. Call before navigating away.
+    func leaveNoPermissionsState() {
+        self.isAwaitingScreen = false
     }
 
     // MARK: - Computed properties — selected devices (resolved from ID)
@@ -442,6 +584,60 @@ final class MainViewModel {
         return "Выберите аудио-вход, чтобы начать запись"
     }
 
+    // MARK: - Disk-space idle estimate (AC-1, T-7)
+
+    /// Displayed pre-flight disk-space headline — «≈ N мин» / «> 60 мин» / «оценка недоступна».
+    ///
+    /// Read-only projection of `coordinator.idleDiskEstimate` (the coordinator owns the disk-space
+    /// monitor and computes it off-main via `refreshIdleDiskEstimate()`); this property only
+    /// FORMATS the already-computed value — it never reads disk state itself. `nil` before the
+    /// first refresh completes (nothing to show yet, mirrors `recordDisabledReason`'s `nil`-means-
+    /// "don't show a footer line" convention).
+    var diskSpaceEstimateDisplay: String? {
+        guard let estimate = self.coordinator.idleDiskEstimate else { return nil }
+        guard estimate.isEstimateAvailable, let secondsRemaining = estimate.secondsRemaining else {
+            return "Оценка недоступна"
+        }
+        // The estimator already floors `secondsRemaining` to a whole-minute multiple (AC-1) — just
+        // truncate to `Int` here rather than rounding again, which would occasionally add back a
+        // minute the estimator deliberately floored away.
+        let secondsPerMinute = 60.0
+        let displayCapMinutes = 60
+        let minutes = Int(secondsRemaining / secondsPerMinute)
+        return minutes > displayCapMinutes ? "> 60 мин" : "≈ \(minutes) мин"
+    }
+
+    /// Recomputes the idle disk-space estimate (AC-1). Builds the same kind of `ResolvedRecordingPlan`
+    /// `startRecording` resolves for the actual session, but is a no-op when no display is selected
+    /// yet — there is nothing to estimate before `loadDevices()` resolves one (AC-1 auto-select).
+    ///
+    /// Cadence (T-7): called once from `MainView`'s `.task` after `loadDevices()` resolves the
+    /// display (main-screen appear), and again from `record()` (record initiation) — no idle
+    /// polling; staleness between those two points is accepted.
+    func refreshIdleDiskEstimate() async {
+        guard let display = self.selectedDisplay else { return }
+        let config = RecordingConfiguration.makeMVPDefault(
+            baseDirectory: self.outputDirectoryURL,
+            cameraMirror: self.appSettings.cameraMirror
+        )
+        // Best-effort camera format resolution: unlike `resolveCameraFormat()` (the record path),
+        // this must never surface `recordError` — a camera whose format can't be picked simply
+        // estimates without the camera's contribution, it does not block the idle headline.
+        let cameraFormat = self.activeCamera.flatMap { camera in
+            try? CameraFormatSelector.pickBestFormat(
+                from: camera.formats,
+                minFps: Double(RecordingConfiguration.mvpDefault.minCameraFps),
+                allowAboveFullHD: true
+            )
+        }
+        let plan = CapabilityResolver.resolveStartProfile(
+            display: display,
+            cameraFormat: cameraFormat,
+            config: config
+        )
+        await self.coordinator.refreshIdleDiskEstimate(plan: plan, config: config)
+    }
+
     // MARK: - Device display names (resolved at UI layer via AVCaptureDevice)
 
     /// Human-readable label for a camera device.
@@ -501,6 +697,7 @@ final class MainViewModel {
 
     init(
         permissions: any PermissionsProviding,
+        appSettings: AppSettings,
         coordinator: RecordingCoordinator,
         discoverDisplays: @escaping (Bool) async throws -> [Display] = { authorized in
             try await DeviceDiscovery.displays(screenAuthorized: authorized)
@@ -539,10 +736,26 @@ final class MainViewModel {
                 }
                 continuation.onTermination = { _ in task.cancel() }
             }
+        },
+        connectSleep: @escaping @Sendable (Duration) async throws -> Void = { duration in
+            try await Task.sleep(for: duration)
+        },
+        startPreviewSource: @escaping @Sendable (CameraSource) async throws -> SessionHandle? = { source in
+            try await source.start(anchoredTo: HostTimeAnchor.now())
+            return source.sessionHandle()
+        },
+        postAnnouncementSeam: @escaping @Sendable @MainActor (PreviewAnnouncement) -> Void = { announcement in
+            // Live default: post via the Accessibility framework. Priority uses
+            // `accessibilitySpeechAnnouncementPriority` (the supported route SwiftUI does not surface);
+            // high interrupts current speech, normal queues. Text is user-facing UI, never logged.
+            var attributed = AttributedString(announcement.text)
+            attributed.accessibilitySpeechAnnouncementPriority = announcement.isHighPriority ? .high : .default
+            AccessibilityNotification.Announcement(attributed).post()
         }
     ) {
         self.permissions = permissions
         self.coordinator = coordinator
+        self.appSettings = appSettings
         self.discoverDisplays = discoverDisplays
         self.discoverCameras = discoverCameras
         self.discoverMicrophones = discoverMicrophones
@@ -550,6 +763,9 @@ final class MainViewModel {
         self.makeCameraSource = makeCameraSource
         self.makeStore = makeStore
         self.screenChangeEvents = screenChangeEvents
+        self.connectSleep = connectSleep
+        self.startPreviewSource = startPreviewSource
+        self.postAnnouncementSeam = postAnnouncementSeam
 
         // Create the store once; the same instance is reused in outputDirectoryURL.didSet.
         self.outputFolderStore = makeOutputFolderStore()

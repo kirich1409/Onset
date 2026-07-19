@@ -13,7 +13,13 @@ import AVFoundation
 /// dark placeholder background with no preview layer.
 @MainActor
 final class CameraPreviewView: NSView {
-    private var previewLayer: AVCaptureVideoPreviewLayer?
+    /// The hosted preview layer, or `nil` when constructed without a session (placeholder).
+    ///
+    /// Exposed (with a private setter) so `CameraPreviewRepresentable.updateNSView` — the SOLE
+    /// writer — can set `connection?.isVideoMirrored` reactively. The connection's
+    /// `automaticallyAdjustsVideoMirroring` is disabled here at wiring time so that reactive set
+    /// is authoritative (some cameras auto-mirror the preview by default otherwise).
+    private(set) var previewLayer: AVCaptureVideoPreviewLayer?
 
     init(sessionHandle: SessionHandle?) {
         super.init(frame: .zero)
@@ -21,6 +27,7 @@ final class CameraPreviewView: NSView {
         if let handle = sessionHandle {
             let layer = AVCaptureVideoPreviewLayer(session: handle.session)
             layer.videoGravity = .resizeAspectFill
+            layer.connection?.automaticallyAdjustsVideoMirroring = false
             self.layer?.addSublayer(layer)
             self.previewLayer = layer
         } else {

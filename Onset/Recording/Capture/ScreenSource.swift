@@ -82,6 +82,22 @@ nonisolated private let screenSourceLogger = Logger(
     category: "ScreenSource"
 )
 
+/// Builds the SCContentFilter for a display, excluding all Onset windows by app identity so the
+/// on-demand recording window (#244) never appears in captured video. Falls back to no exclusion
+/// if Onset's own `SCRunningApplication` is absent from shareable content — defensive; should not
+/// happen in practice, but the SCShareableContent query may race at startup.
+nonisolated private func makeScreenContentFilter(
+    display: SCDisplay,
+    onsetApp: SCRunningApplication?
+)
+-> SCContentFilter {
+    guard let onsetApp else {
+        screenSourceLogger.warning("Onset app not in SCShareableContent — skipping app exclusion filter")
+        return SCContentFilter(display: display, excludingWindows: [])
+    }
+    return SCContentFilter(display: display, excludingApplications: [onsetApp], exceptingWindows: [])
+}
+
 // MARK: - CaptureState
 
 /// Lifecycle state of a `ScreenSource` actor.
@@ -156,21 +172,26 @@ actor ScreenSource: VideoFrameSource {
     init(plan: ResolvedRecordingPlan, config: RecordingConfiguration) {
         self.plan = plan
         self.config = config
-        var capturedFrames: AsyncStream<VideoFrame>.Continuation!
-        var capturedEvents: AsyncStream<SourceEvent>.Continuation!
-        var capturedDrops: AsyncStream<DropEvent>.Continuation!
-        self.frames = AsyncStream(VideoFrame.self, bufferingPolicy: .bufferingNewest(Self.framesBufferDepth)) {
-            capturedFrames = $0
-        }
-        self.events = AsyncStream(SourceEvent.self, bufferingPolicy: .bufferingNewest(Self.eventsBufferDepth)) {
-            capturedEvents = $0
-        }
-        self.drops = AsyncStream(DropEvent.self, bufferingPolicy: .bufferingNewest(Self.dropsBufferDepth)) {
-            capturedDrops = $0
-        }
-        self.framesContinuation = capturedFrames
-        self.eventsContinuation = capturedEvents
-        self.dropsContinuation = capturedDrops
+        let (frames, framesContinuation) = AsyncStream.makeStream(
+            of: VideoFrame.self,
+            bufferingPolicy: .bufferingNewest(Self.framesBufferDepth)
+        )
+        self.frames = frames
+        self.framesContinuation = framesContinuation
+
+        let (events, eventsContinuation) = AsyncStream.makeStream(
+            of: SourceEvent.self,
+            bufferingPolicy: .bufferingNewest(Self.eventsBufferDepth)
+        )
+        self.events = events
+        self.eventsContinuation = eventsContinuation
+
+        let (drops, dropsContinuation) = AsyncStream.makeStream(
+            of: DropEvent.self,
+            bufferingPolicy: .bufferingNewest(Self.dropsBufferDepth)
+        )
+        self.drops = drops
+        self.dropsContinuation = dropsContinuation
 
         self.captureRateLock = OSAllocatedUnfairLock(
             initialState: StageRateAggregator(lane: "screen", stage: .capture, nominalFps: plan.screenFps)
@@ -199,8 +220,9 @@ actor ScreenSource: VideoFrameSource {
             }
 
         let scDisplay: SCDisplay
+        let onsetApp: SCRunningApplication?
         do {
-            scDisplay = try await self.discoverDisplay()
+            (scDisplay, onsetApp) = try await self.discoverDisplay()
         } catch {
             self.captureState = .idle
             throw error
@@ -209,7 +231,7 @@ actor ScreenSource: VideoFrameSource {
         let shim = self.makeShim(sessionStart: sessionStart, onTerminalStop: onTerminalStop)
         let captureStarted: Bool
         do {
-            captureStarted = try await self.startSCStream(display: scDisplay, shim: shim)
+            captureStarted = try await self.startSCStream(display: scDisplay, onsetApp: onsetApp, shim: shim)
         } catch {
             self.captureState = .idle
             throw error
@@ -219,7 +241,7 @@ actor ScreenSource: VideoFrameSource {
         }
     }
 
-    private func discoverDisplay() async throws -> SCDisplay {
+    private func discoverDisplay() async throws -> (SCDisplay, SCRunningApplication?) {
         let content: SCShareableContent
         do {
             content = try await SCShareableContent.current
@@ -235,7 +257,10 @@ actor ScreenSource: VideoFrameSource {
         screenSourceLogger.info(
             "Display found — count: \(content.displays.count), dims: \(self.plan.screenWidth)×\(self.plan.screenHeight)"
         )
-        return scDisplay
+        // Resolve Onset's own SCRunningApplication from the same content fetch to exclude
+        // the on-demand recording window from capture (#244). Avoids a second SCShareableContent call.
+        let onsetApp = content.applications.first { $0.bundleIdentifier == Bundle.main.bundleIdentifier }
+        return (scDisplay, onsetApp)
     }
 
     private func makeShim(
@@ -257,9 +282,15 @@ actor ScreenSource: VideoFrameSource {
     /// Returns `true` when capture reached the `.running` state, `false` when the
     /// stop()-during-startup abort path was taken (stop() raced and already ran).
     /// Callers must gate any post-start work (e.g. telemetry) on the return value.
-    private func startSCStream(display: SCDisplay, shim: StreamOutputShim) async throws -> Bool {
+    private func startSCStream(
+        display: SCDisplay,
+        onsetApp: SCRunningApplication?,
+        shim: StreamOutputShim
+    ) async throws
+    -> Bool {
         let streamConfig = ScreenStreamConfigurationBuilder.makeConfiguration(plan: self.plan, config: self.config)
-        let filter = SCContentFilter(display: display, excludingWindows: [])
+        // Static filter — no live SCStream.updateContentFilter.
+        let filter = makeScreenContentFilter(display: display, onsetApp: onsetApp)
         let scStream = SCStream(filter: filter, configuration: streamConfig, delegate: shim)
         do {
             try scStream.addStreamOutput(shim, type: .screen, sampleHandlerQueue: self.sampleHandlerQueue)

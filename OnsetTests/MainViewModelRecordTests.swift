@@ -63,15 +63,18 @@ struct MainViewModelRecordTests {
         displays: [Display] = [Self.makeDisplay()],
         cameras: [CameraDevice] = [],
         microphones: [MicrophoneDevice] = [],
-        startBehavior: @escaping StartSpy = { _ in }
+        startBehavior: @escaping StartSpy = { _ in },
+        defaults: InMemoryUserDefaults
     ) async
         -> MainViewModel
     { // swiftlint:disable:this opening_brace
         let perms = FakePermissionsService(screen: screen, camera: camera, microphone: microphone)
-        let defaults = InMemoryUserDefaults()
         let sut = MainViewModel(
             permissions: perms,
-            coordinator: RecordingCoordinator(),
+            appSettings: AppSettings(store: InMemorySettingsStore()),
+            coordinator: RecordingCoordinator(
+                makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: defaults) }
+            ),
             discoverDisplays: { _ in displays },
             discoverCameras: { _ in cameras },
             discoverMicrophones: { _ in microphones },
@@ -87,139 +90,158 @@ struct MainViewModelRecordTests {
 
     @Test("record() — screen denied → returns early, no coordinator start (AC-2d)")
     func record_screenDenied_returnsEarly() async {
-        var startCalled = false
-        let sut = await self.makeSUT(
-            screen: .notDetermined,
-            startBehavior: { _ in startCalled = true }
-        )
+        await withScopedDefaults { defaults in
+            var startCalled = false
+            let sut = await self.makeSUT(
+                screen: .notDetermined,
+                startBehavior: { _ in startCalled = true },
+                defaults: defaults
+            )
 
-        await sut.record()
+            await sut.record()
 
-        #expect(!startCalled, "coordinator.start must NOT be called when screen is denied")
-        #expect(sut.recordError == nil, "recordError must stay nil — screen-denied is a silent guard")
+            #expect(!startCalled, "coordinator.start must NOT be called when screen is denied")
+            #expect(sut.recordError == nil, "recordError must stay nil — screen-denied is a silent guard")
+        }
     }
 
     // MARK: - AC-2(b): Mic available but unselected → recordError, no start
 
     @Test("record() — mic available but unselected → recordError set, no coordinator start (AC-2b)")
     func record_micUnselected_errorSet() async {
-        var startCalled = false
-        let sut = await self.makeSUT(
-            microphone: .authorized,
-            microphones: [Self.makeMic()],
-            startBehavior: { _ in startCalled = true }
-        )
-        // selectedMicID is nil — no mic auto-select per spec
+        await withScopedDefaults { defaults in
+            var startCalled = false
+            let sut = await self.makeSUT(
+                microphone: .authorized,
+                microphones: [Self.makeMic()],
+                startBehavior: { _ in startCalled = true },
+                defaults: defaults
+            )
+            // selectedMicID is nil — no mic auto-select per spec
 
-        await sut.record()
+            await sut.record()
 
-        #expect(!startCalled, "coordinator.start must NOT be called when mic is available but unselected")
-        #expect(sut.recordError != nil, "recordError must be set to prompt mic selection (AC-2b)")
+            #expect(!startCalled, "coordinator.start must NOT be called when mic is available but unselected")
+            #expect(sut.recordError != nil, "recordError must be set to prompt mic selection (AC-2b)")
+        }
     }
 
     // MARK: - Valid path
 
     @Test("record() — valid state → coordinator.start invoked exactly once")
     func record_validState_startCalledOnce() async {
-        var startCount = 0
-        // One display → auto-selected by loadDevices (AC-1); no mic → AC-2c (record without audio).
-        let sut = await self.makeSUT(
-            startBehavior: { _ in startCount += 1 }
-        )
+        await withScopedDefaults { defaults in
+            var startCount = 0
+            // One display → auto-selected by loadDevices (AC-1); no mic → AC-2c (record without audio).
+            let sut = await self.makeSUT(
+                startBehavior: { _ in startCount += 1 },
+                defaults: defaults
+            )
 
-        await sut.record()
+            await sut.record()
 
-        #expect(startCount == 1, "coordinator.start must be called exactly once for a valid record()")
+            #expect(startCount == 1, "coordinator.start must be called exactly once for a valid record()")
+        }
     }
 
     @Test("record() — coordinator.start throws → recordError set")
     func record_coordinatorThrows_errorSet() async {
-        struct FakeError: Error {}
-        let sut = await self.makeSUT(
-            startBehavior: { _ in throw FakeError() }
-        )
+        await withScopedDefaults { defaults in
+            struct FakeError: Error {}
+            let sut = await self.makeSUT(
+                startBehavior: { _ in throw FakeError() },
+                defaults: defaults
+            )
 
-        await sut.record()
+            await sut.record()
 
-        #expect(sut.recordError != nil, "recordError must be set when coordinator.start throws")
+            #expect(sut.recordError != nil, "recordError must be set when coordinator.start throws")
+        }
     }
 
     // MARK: - Re-entrancy guard
 
     @Test("record() — isStartingRecording guard prevents concurrent starts")
     func record_reentrancyGuard_onlyOneStart() async {
-        var startCount = 0
-        // Park the first call inside startBehavior so the second can enter record() and hit the guard.
-        let (firstCallEntered, resumeFirst) = AsyncStream<Void>.makeStream()
-        let (allowFirst, resumeAllow) = AsyncStream<Void>.makeStream()
+        await withScopedDefaults { defaults in
+            var startCount = 0
+            // Park the first call inside startBehavior so the second can enter record() and hit the guard.
+            let (firstCallEntered, resumeFirst) = AsyncStream<Void>.makeStream()
+            let (allowFirst, resumeAllow) = AsyncStream<Void>.makeStream()
 
-        let sut = await self.makeSUT(
-            startBehavior: { _ in
-                startCount += 1
-                resumeFirst.yield(()) // signal: first call is inside start
-                for await _ in allowFirst {
-                    break
-                }
-            }
-        )
+            let sut = await self.makeSUT(
+                startBehavior: { _ in
+                    startCount += 1
+                    resumeFirst.yield(()) // signal: first call is inside start
+                    for await _ in allowFirst {
+                        break
+                    }
+                },
+                defaults: defaults
+            )
 
-        async let first: Void = sut.record() // parks inside startBehavior
-        for await _ in firstCallEntered {
-            break
-        } // wait until first is inside start
-        await sut.record() // hits isStartingRecording guard → no-op
-        resumeAllow.yield(()) // release first call
-        await first
+            async let first: Void = sut.record() // parks inside startBehavior
+            for await _ in firstCallEntered {
+                break
+            } // wait until first is inside start
+            await sut.record() // hits isStartingRecording guard → no-op
+            resumeAllow.yield(()) // release first call
+            await first
 
-        #expect(startCount == 1, "only one coordinator.start must be invoked under concurrent record() calls")
+            #expect(startCount == 1, "only one coordinator.start must be invoked under concurrent record() calls")
+        }
     }
 
     // MARK: - Output-directory validation
 
     @Test("record() — non-existent output directory → outputDirectoryError set, no coordinator start")
     func record_nonExistentOutputDirectory_errorSet() async {
-        var startCalled = false
-        let sut = await self.makeSUT(startBehavior: { _ in startCalled = true })
-        // Point to a path that cannot exist at test runtime.
-        sut.outputDirectoryURL = URL(
-            filePath: "/tmp/onset-nonexistent-\(UUID().uuidString)",
-            directoryHint: .isDirectory
-        )
+        await withScopedDefaults { defaults in
+            var startCalled = false
+            let sut = await self.makeSUT(startBehavior: { _ in startCalled = true }, defaults: defaults)
+            // Point to a path that cannot exist at test runtime.
+            sut.outputDirectoryURL = URL(
+                filePath: "/tmp/onset-nonexistent-\(UUID().uuidString)",
+                directoryHint: .isDirectory
+            )
 
-        await sut.record()
+            await sut.record()
 
-        #expect(
-            !startCalled,
-            "coordinator.start must NOT be called when the output directory does not exist"
-        )
-        #expect(
-            sut.outputDirectoryError != nil,
-            "outputDirectoryError must be set for a missing output directory"
-        )
+            #expect(
+                !startCalled,
+                "coordinator.start must NOT be called when the output directory does not exist"
+            )
+            #expect(
+                sut.outputDirectoryError != nil,
+                "outputDirectoryError must be set for a missing output directory"
+            )
+        }
     }
 
     @Test("record() — outputDirectoryError reset and re-set on second call after external clear")
     func record_secondCallAfterExternalClear_errorReSet() async {
-        let sut = await self.makeSUT()
-        let missingURL = URL(
-            filePath: "/tmp/onset-nonexistent-\(UUID().uuidString)",
-            directoryHint: .isDirectory
-        )
-        sut.outputDirectoryURL = missingURL
+        await withScopedDefaults { defaults in
+            let sut = await self.makeSUT(defaults: defaults)
+            let missingURL = URL(
+                filePath: "/tmp/onset-nonexistent-\(UUID().uuidString)",
+                directoryHint: .isDirectory
+            )
+            sut.outputDirectoryURL = missingURL
 
-        // First call: error is set.
-        await sut.record()
-        #expect(sut.outputDirectoryError != nil, "outputDirectoryError must be set on first call")
+            // First call: error is set.
+            await sut.record()
+            #expect(sut.outputDirectoryError != nil, "outputDirectoryError must be set on first call")
 
-        // Simulate alert dismissal resetting the error (what the view's Binding does on OK tap).
-        sut.outputDirectoryError = nil
+            // Simulate alert dismissal resetting the error (what the view's Binding does on OK tap).
+            sut.outputDirectoryError = nil
 
-        // Second call with the same missing directory: error must be set again.
-        await sut.record()
-        #expect(
-            sut.outputDirectoryError != nil,
-            "outputDirectoryError must be re-set on a second call after external clear"
-        )
+            // Second call with the same missing directory: error must be set again.
+            await sut.record()
+            #expect(
+                sut.outputDirectoryError != nil,
+                "outputDirectoryError must be re-set on a second call after external clear"
+            )
+        }
     }
 }
 
