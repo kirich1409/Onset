@@ -2,6 +2,15 @@
 
 > Plan: ./plan.md · Tasks: ./tasks.md
 
+## Execution status: 🧊 FROZEN (declared) — PR #341
+T-1..T-5 done + verified (local preflight 1073 green + CI green). Frozen on the single remaining
+gate **T-6a** (L5 AC-Q4 calibration), which physically requires the owner's idle-machine window
+(~1h camera/screen hold + a temporary 5K→4K-scaled display switch, restored after). Not run on an
+active desktop / with other HW agents live. **Unblock:** owner frees a window → run T-6a
+(4K-scaled, build-load, verify-cfr, detector-smoke) → update `m3Max`/evidence → PR to ready.
+Not closed (needed + realistic) and not merged (L5 gate — would ship an unvalidated encoder-budget
+guard). Native-5K ceiling = #287.
+
 ## Status
 - [x] T-1 — ChipTier pure enum
 - [x] T-2 — ChipTierDetector (pure parse + impure sysctl)
