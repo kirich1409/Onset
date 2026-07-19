@@ -74,6 +74,10 @@ ALLOWED_LIST=(
   # Microphone / audio-input access (required for voice recording into video track)
   # Hardened Runtime key is com.apple.security.device.audio-input (not .microphone)
   "com.apple.security.device.audio-input"
+  # Time Sensitive notifications: lets hard-tier critical/post-stop alerts break through Focus
+  # (UNNotificationInterruptionLevel.timeSensitive). Boolean entitlement, no Apple approval needed
+  # (unlike critical-alert). Not a network capability — check-no-network.sh is unaffected.
+  "com.apple.developer.usernotifications.time-sensitive"
 )
 
 # Extract entitlement keys from plist XML for unknown-key detection.

@@ -176,7 +176,10 @@ Full type-level map (Russian): `docs/architecture.md`.
 
 ## Workflow
 
-- Docs describe `main`: update affected `docs/` in the same PR that changes behavior.
+- **Docs revision is part of EVERY change (non-negotiable).** Any implementation —
+  feature, bug fix, refactor, config/scope/research decision — includes a docs pass:
+  review and refresh/update/delete affected `docs/` AND relevant CLAUDE.md so they
+  match `main`, in the SAME PR. Stale docs are a defect; never defer.
 - **Verify the Apple API against Apple docs before coding it.** Framework behavior
   drifts across macOS versions and differs from iOS — training data misleads; a search
   may surface an identically-named symbol that behaves differently on macOS. Check the

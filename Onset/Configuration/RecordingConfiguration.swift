@@ -1,5 +1,10 @@
 import Foundation
 
+// swiftlint:disable file_length
+// Rationale: this is a single flat policy value type — its length is the sum of one documented
+// `nonisolated let` per recording-policy knob plus the manual `nonisolated ==` witness. Splitting
+// it across files would scatter the contract; the count grows with the policy surface, not with logic.
+
 // swiftlint:disable no_magic_numbers
 // Rationale: the numeric literals in this file are calibration-placeholder values for
 // VBR bitrate targets and the engine-throughput budget cap. They are not "magic" — each
@@ -168,6 +173,54 @@ nonisolated struct RecordingConfiguration {
     /// **Placeholder** — calibrate post-MVP against real hardware drop rates.
     nonisolated let postStopDropWarningThreshold: Int
 
+    // MARK: - Critical Recording Signals
+
+    /// Continuous duration (seconds) the session must stay `.degraded` before it escalates to a
+    /// live `hard` `sustainedDrops` incident. A transient (< this) stays yellow / disk-only.
+    /// Spec §2 "Live"; AC-3(a).
+    /// calibrate post-MVP via L5 (MX Brio); future: expose in Settings
+    nonisolated let criticalSustainSeconds = 10.0
+
+    /// Post-stop normalized drop intensity (drops/min) at or above which a session is reported as a
+    /// `hard` post-stop incident, gated by `criticalDropRateMinSessionSeconds`. Spec §2 "Пост-стоп"; AC-4.
+    /// calibrate post-MVP via L5 (MX Brio); future: expose in Settings
+    nonisolated let criticalDropRatePerMin = 600
+
+    /// Session-duration floor (seconds) below which the post-stop drop-rate criterion does NOT apply.
+    /// Guards against a short clip (e.g. a 2 s capture with a high count) producing a false rate. Spec §2; AC-4.
+    /// calibrate post-MVP via L5 (MX Brio); future: expose in Settings
+    nonisolated let criticalDropRateMinSessionSeconds = 10.0
+
+    /// Fraction of the measured baseline below which delivered fps becomes a collapse candidate
+    /// (`delivered < ratio × baseline`). Spec §3 "срабатывание".
+    /// calibrate post-MVP via L5 (MX Brio); future: expose in Settings
+    nonisolated let fpsCollapseRatio = 0.5
+
+    /// Continuous duration (seconds) the dip must hold below `fpsCollapseRatio × baseline` to fire a
+    /// collapse, given a corroborating drop/gap signal. Spec §3 "срабатывание"; AC-5.
+    /// calibrate post-MVP via L5 (MX Brio); future: expose in Settings
+    nonisolated let fpsCollapseWindowSeconds = 5.0
+
+    /// `gap_ms_max` threshold (milliseconds) above which a frame gap corroborates a collapse candidate
+    /// (alternative to a nonzero drop/overflow rate). Spec §3 "срабатывание".
+    /// calibrate post-MVP via L5 (MX Brio); future: expose in Settings
+    nonisolated let fpsCollapseGapMsThreshold = 250
+
+    /// Window (seconds) over which the adaptive camera-fps baseline is averaged. Chosen `>>`
+    /// `fpsCollapseWindowSeconds` so a short collapse barely moves the baseline. Spec §3 "baseline".
+    /// calibrate post-MVP via L5 (MX Brio); future: expose in Settings
+    nonisolated let cameraBaselineWindowSeconds = 30.0
+
+    /// Cold-start ramp (seconds) discarded from the start of capture before samples feed the baseline,
+    /// so the warm-up ramp does not depress the average. Spec §3 "baseline".
+    /// calibrate post-MVP via L5 (MX Brio); future: expose in Settings
+    nonisolated let cameraBaselineSkipSeconds = 2.0
+
+    /// Dedupe window (seconds) for live critical notifications: the first notification in the window
+    /// suppresses later same-or-lower-tier ones (higher tier always breaks through). Spec "Дедуп".
+    /// calibrate post-MVP via L5 (MX Brio); future: expose in Settings
+    nonisolated let criticalNotificationDedupeSeconds = 10.0
+
     // MARK: - Engine Budget Cap
 
     /// Throughput ceiling for the encode engine. Used by CapabilityProbe pre-flight.
@@ -323,6 +376,8 @@ nonisolated struct RecordingConfiguration {
             degradedBackpressureThreshold: 30,
             degradedWindowSeconds: 2.0,
             postStopDropWarningThreshold: 5,
+            // Critical-recording-signals placeholders live as property defaults on the stored
+            // properties themselves (single source of truth) — calibrate post-MVP via L5 (MX Brio).
             budgetCap: budgetCap,
             diskThresholds: diskThresholds,
             baseOutputDirectory: baseOutputDirectory
@@ -390,6 +445,15 @@ extension RecordingConfiguration: Equatable {
             && lhs.degradedBackpressureThreshold == rhs.degradedBackpressureThreshold
             && lhs.degradedWindowSeconds == rhs.degradedWindowSeconds
             && lhs.postStopDropWarningThreshold == rhs.postStopDropWarningThreshold
+            && lhs.criticalSustainSeconds == rhs.criticalSustainSeconds
+            && lhs.criticalDropRatePerMin == rhs.criticalDropRatePerMin
+            && lhs.criticalDropRateMinSessionSeconds == rhs.criticalDropRateMinSessionSeconds
+            && lhs.fpsCollapseRatio == rhs.fpsCollapseRatio
+            && lhs.fpsCollapseWindowSeconds == rhs.fpsCollapseWindowSeconds
+            && lhs.fpsCollapseGapMsThreshold == rhs.fpsCollapseGapMsThreshold
+            && lhs.cameraBaselineWindowSeconds == rhs.cameraBaselineWindowSeconds
+            && lhs.cameraBaselineSkipSeconds == rhs.cameraBaselineSkipSeconds
+            && lhs.criticalNotificationDedupeSeconds == rhs.criticalNotificationDedupeSeconds
             && lhs.budgetCap == rhs.budgetCap
             && lhs.baseOutputDirectory == rhs.baseOutputDirectory
             && lhs.diskThresholds == rhs.diskThresholds

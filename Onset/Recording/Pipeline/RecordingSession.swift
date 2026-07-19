@@ -1,4 +1,5 @@
 import CoreMedia
+import os
 import OSLog
 
 // type_body_length / file_length are disabled file-wide: the start sequence, per-pipeline
@@ -178,6 +179,13 @@ actor RecordingSession {
     private var sessionState: SessionState = .idle
     private var stopTask: Task<RecordingResult, Never>?
 
+    /// Session T0 in host-clock seconds (`CMTimeGetSeconds(anchor.anchorTime)`), published once when
+    /// `start()` captures the anchor. Stored behind a lock so the `nonisolated`
+    /// `currentSessionElapsedSeconds()` can read it without an actor hop (the coordinator pulls it on a
+    /// 1 Hz tick). `nil` before `start()` and after the anchor is captured stays set — the value never
+    /// changes within a session (single T0 epoch). Critical-recording-signals, Phase C.
+    private let anchorSecondsLock = OSAllocatedUnfairLock<Double?>(initialState: nil)
+
     // MARK: - Init
 
     /// - Parameters:
@@ -326,6 +334,9 @@ actor RecordingSession {
 
         // 3. The single T0 epoch (AC-7). Captured ONCE, here, before anything else runs.
         let anchor = HostTimeAnchor.now()
+        // Publish T0 in seconds so the nonisolated `currentSessionElapsedSeconds()` can serve the
+        // coordinator's detector clock in the same frame as the camera snapshot stamp (Phase C).
+        self.anchorSecondsLock.withLock { $0 = CMTimeGetSeconds(anchor.anchorTime) }
         let stage = self.makeStage(startPlan: startPlan, sessionT0: anchor.anchorTime) // 4.
         self.startStateForwarding() // forward dropMonitor.state → recordingStateStream (UI).
 
@@ -499,6 +510,31 @@ actor RecordingSession {
                 sessionEverDegraded: false,
                 dominantCause: .notDegraded
             )
+    }
+
+    /// The camera lane's latest rate snapshot, polled ~1 Hz by the coordinator (Phase C) to feed
+    /// `FpsCollapseDetector` (critical-recording-signals, T-B.2). Parallels `currentDrops()`: a
+    /// pure on-demand PULL, no stream / subscriber. Reads the source's own `captureRateLock` via the
+    /// `nonisolated currentRateSnapshot()` accessor — no second lock, no actor hop on the source.
+    ///
+    /// Returns `nil` before the first camera flush, when there is no camera pipeline (screen-only),
+    /// or after teardown. Only the camera lane is plumbed — encoder/writer snapshots feed no detector
+    /// (spec §Architecture). The snapshot's freshness stamp is seconds-since-session-T0 (the same
+    /// frame as the detector's tick clock), so the coordinator passes it straight in as
+    /// `FpsCollapseSample.sampleElapsedSeconds` to discard a frozen-camera reading.
+    func currentRates() -> CameraRateSnapshot? {
+        self.cameraPipeline?.source.currentRateSnapshot()
+    }
+
+    /// Monotonic session-relative elapsed seconds (`host_now − sessionT0`), the SAME clock frame as
+    /// `CameraRateSnapshot.monotonicStampSeconds` (see `CameraSource:284`). The coordinator passes this
+    /// straight to the pure detectors as `elapsedSeconds` (critical-recording-signals, Phase C).
+    ///
+    /// `nonisolated` and synchronous: reads the once-published anchor under its lock, keeping CoreMedia
+    /// inside the session. Returns `0` before `start()` captures the anchor or after teardown clears it.
+    func currentSessionElapsedSeconds() -> Double {
+        guard let anchorSeconds = self.anchorSecondsLock.withLock({ $0 }) else { return 0 }
+        return CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock())) - anchorSeconds
     }
 
     // MARK: - Pipeline construction

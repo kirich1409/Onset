@@ -717,3 +717,173 @@ extension CaptureRole {
         lhs.rawValue == rhs.rawValue
     }
 }
+
+// MARK: - CriticalIncidentScope
+
+/// Which tracks a camera-loss incident affected, distinguishing the two `cameraLost` outcomes.
+///
+/// Drives the severity tier (see `CriticalIncident.severity`): camera-only loss stops the whole
+/// session (`hard`), whereas a loss while the screen keeps recording is recoverable (`soft`).
+/// Spec "Критерии «пожара» §1".
+///
+/// `Equatable` / `Hashable` declared on the primary definition with manual `nonisolated` witnesses
+/// (same reasoning as `RecordingState`) so the conformances are usable off the main actor — required
+/// because `CriticalIncident.hash(into:)` calls `hasher.combine(scope)` from a nonisolated context.
+nonisolated enum CriticalIncidentScope: Equatable, Hashable {
+    /// The camera was the only video source; its loss stopped the session entirely (`hard`).
+    case cameraOnly
+
+    /// The camera was lost while the screen continued recording normally (`soft`).
+    case cameraAndScreen
+}
+
+extension CriticalIncidentScope {
+    /// Manual `nonisolated` `==` witness (overrides the `@MainActor` synthesis under
+    /// `InferIsolatedConformances` — same pattern as `RecordingState`).
+    nonisolated static func == (lhs: CriticalIncidentScope, rhs: CriticalIncidentScope) -> Bool {
+        switch (lhs, rhs) {
+        case (.cameraOnly, .cameraOnly),
+             (.cameraAndScreen, .cameraAndScreen):
+            true
+
+        default:
+            false
+        }
+    }
+}
+
+extension CriticalIncidentScope {
+    /// Manual `nonisolated` `hash(into:)` witness (overrides the `@MainActor`-inferred implicit
+    /// synthesis for payload-free enums — same pattern as `RecordingState`).
+    nonisolated func hash(into hasher: inout Hasher) {
+        switch self {
+        case .cameraOnly:
+            hasher.combine(0)
+
+        case .cameraAndScreen:
+            hasher.combine(1)
+        }
+    }
+}
+
+// MARK: - CriticalSeverity
+
+/// The two-tier severity model that drives ALL critical-signal behavior (indicator, notification
+/// level, latch, dedupe). Spec "Severity-модель".
+///
+/// `hard > soft`: a `hard` incident always overrides a previously shown `soft` one. NO `Comparable`
+/// conformance is provided in this phase — ordering logic lives in later phases.
+///
+/// `Equatable` / `Hashable` declared on the primary definition with manual `nonisolated` witnesses
+/// (same reasoning as `RecordingState`).
+nonisolated enum CriticalSeverity: Equatable, Hashable {
+    /// Recoverable problem; the primary (screen) track is intact. Notification level `active`.
+    case soft
+
+    /// Serious problem: recording stopped or sustained loss. Notification level `timeSensitive`.
+    case hard
+}
+
+extension CriticalSeverity {
+    /// Manual `nonisolated` `==` witness (same pattern as `RecordingState`).
+    nonisolated static func == (lhs: CriticalSeverity, rhs: CriticalSeverity) -> Bool {
+        switch (lhs, rhs) {
+        case (.soft, .soft),
+             (.hard, .hard):
+            true
+
+        default:
+            false
+        }
+    }
+}
+
+extension CriticalSeverity {
+    /// Manual `nonisolated` `hash(into:)` witness (same pattern as `RecordingState`).
+    nonisolated func hash(into hasher: inout Hasher) {
+        switch self {
+        case .soft:
+            hasher.combine(0)
+
+        case .hard:
+            hasher.combine(1)
+        }
+    }
+}
+
+// MARK: - CriticalIncident
+
+/// A discrete "fire" detected during recording: a problem serious enough to warrant an active signal
+/// to the user (menu-bar indicator + notification), beyond the disk-only path for minor drops.
+/// Spec "Критерии «пожара»".
+///
+/// HAS an associated value (`cameraLost(scope:)`), so it needs BOTH a manual `nonisolated static func ==`
+/// and a manual `nonisolated func hash(into:)` — same as `SourceEvent` — to stay usable off the main
+/// actor under `InferIsolatedConformances`. The `hash(into:)` threads `scope` through for the
+/// associated-value case.
+nonisolated enum CriticalIncident: Equatable, Hashable {
+    /// The camera was lost mid-session. `scope` distinguishes a session-stopping camera-only loss
+    /// (`hard`) from a loss while the screen kept recording (`soft`). Spec §1.
+    case cameraLost(scope: CriticalIncidentScope)
+
+    /// Degradation held continuously past the sustain threshold, or post-stop drop intensity exceeded
+    /// the normalized rate floor. Always `hard`. Spec §2.
+    case sustainedDrops
+
+    /// Delivered camera fps collapsed below a fraction of its measured baseline, corroborated by a
+    /// drop/overflow rate or an excessive frame gap. Always `hard`. Spec §3.
+    case fpsCollapse
+
+    /// The severity tier of this incident, per the spec Severity-модель table.
+    ///
+    /// `.cameraLost(.cameraAndScreen)` is `soft` (screen track intact); everything else — camera-only
+    /// loss, sustained drops, fps collapse — is `hard`.
+    nonisolated var severity: CriticalSeverity {
+        switch self {
+        case .cameraLost(.cameraAndScreen):
+            .soft
+
+        case .cameraLost(.cameraOnly), .sustainedDrops, .fpsCollapse:
+            .hard
+        }
+    }
+}
+
+extension CriticalIncident {
+    /// Manual `nonisolated` `==` witness (associated-value enum — same pattern as `SourceEvent`).
+    nonisolated static func == (lhs: CriticalIncident, rhs: CriticalIncident) -> Bool {
+        switch (lhs, rhs) {
+        case let (.cameraLost(lhsScope), .cameraLost(rhsScope)):
+            lhsScope == rhsScope
+
+        case (.sustainedDrops, .sustainedDrops),
+             (.fpsCollapse, .fpsCollapse):
+            true
+
+        default:
+            false
+        }
+    }
+}
+
+extension CriticalIncident {
+    /// Manual `nonisolated` `hash(into:)` witness.
+    ///
+    /// Combines a per-case discriminant; for `.cameraLost` it also combines `scope` so two incidents
+    /// that differ only by scope hash differently (and stay consistent with `==`).
+    nonisolated func hash(into hasher: inout Hasher) {
+        switch self {
+        case let .cameraLost(scope):
+            hasher.combine(0)
+            hasher.combine(scope)
+
+        case .sustainedDrops:
+            hasher.combine(1)
+
+        case .fpsCollapse:
+            // Ordinal tag for the third enum case; 2 is not in no_magic_numbers' exempt list.
+            // swiftlint:disable:next no_magic_numbers
+            hasher.combine(2)
+        }
+    }
+}

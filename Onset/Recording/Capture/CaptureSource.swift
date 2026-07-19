@@ -79,6 +79,21 @@ nonisolated protocol VideoFrameSource: Sendable {
     /// buffered elements and then terminate. Calling `stop()` on an already-stopped
     /// source is a no-op.
     func stop() async
+
+    /// The latest per-window camera rate snapshot, or `nil` when the source produces none.
+    ///
+    /// Pulled on demand (~1 Hz) by `RecordingSession.currentRates()` to feed `FpsCollapseDetector`
+    /// (critical-recording-signals, T-B.2). `nonisolated` so the pull reads under the source's own
+    /// synchronization point with no actor hop and no second lock. Only the camera source returns a
+    /// value; every other source uses the default `nil` (fps-collapse is camera-only — spec §Не-цели).
+    nonisolated func currentRateSnapshot() -> CameraRateSnapshot?
+}
+
+extension VideoFrameSource {
+    /// Default: a source produces no camera rate snapshot. Overridden by `CameraSource`.
+    nonisolated func currentRateSnapshot() -> CameraRateSnapshot? {
+        nil
+    }
 }
 
 // MARK: - AudioSampleSource

@@ -46,6 +46,42 @@ nonisolated private struct DurationAccumulator {
     }
 }
 
+// MARK: - CameraRateSnapshot
+
+/// Numeric latest-flush snapshot of the camera capture lane, pulled on demand by the
+/// `RecordingCoordinator` 1 Hz tick (critical-recording-signals, T-B.1 / spec §Architecture
+/// "Live-seam fps-снимка").
+///
+/// Distinct from the telemetry log line: the line is parsed by humans and reset every window,
+/// whereas this struct is the machine-readable input to `FpsCollapseDetector`. Its fields map
+/// 1:1 onto `FpsCollapseSample` (`deliveredFps` → `deliveredFps`, `dropOverflowRate` →
+/// `dropOverflowRate`, `gapMsMax` → `gapMsMax`, `monotonicStampSeconds` → `sampleElapsedSeconds`).
+///
+/// ### Freshness clock contract (cross-phase)
+/// `monotonicStampSeconds` is SECONDS SINCE SESSION T0 (`host_now − anchor.anchorTime`), captured
+/// by the camera telemetry task at the moment of flush. This is the SAME session-relative frame as
+/// `FpsCollapseDetector.elapsedSeconds` (zero at session start) — so the Phase-C coordinator passes
+/// `snapshot.monotonicStampSeconds` straight in as `FpsCollapseSample.sampleElapsedSeconds`, and its
+/// own tick clock (also `host_now − T0`) as `elapsedSeconds`, with NO conversion. The detector's
+/// staleness gate (`elapsedSeconds − sampleElapsedSeconds > staleMax`) and warmup skip
+/// (`elapsedSeconds >= cameraBaselineSkipSeconds`) only hold because both operands share this origin.
+/// A frozen camera stops flushing, so the stamp ages out and the detector discards the input.
+nonisolated struct CameraRateSnapshot {
+    /// Delivered (measured) camera fps over the last flush window.
+    nonisolated let deliveredFps: Double
+
+    /// Combined AVCapture-drop + AsyncStream-overflow rate over the last flush window
+    /// (per second). Any value `> 0` corroborates a collapse in `FpsCollapseDetector`.
+    nonisolated let dropOverflowRate: Double
+
+    /// Largest inter-frame delivery gap (milliseconds) observed in the last flush window.
+    nonisolated let gapMsMax: Double
+
+    /// Absolute host-clock time (seconds) at which the flush that produced this snapshot ran.
+    /// See the freshness clock contract above.
+    nonisolated let monotonicStampSeconds: Double
+}
+
 // MARK: - StageRateAggregator
 
 /// Pure value-type accumulator for per-stage cadence telemetry.
@@ -121,6 +157,21 @@ nonisolated struct StageRateAggregator {
 
     /// Camera inter-arrival gap (host-time delta between consecutive captureOutput callbacks).
     private var gapMs = DurationAccumulator()
+
+    // MARK: - Camera latest-snapshot (capture stage, camera lane only)
+
+    /// Latest fully-formed camera snapshot pulled by the coordinator (T-B.1). `nil` until the
+    /// first `flush` + `stampSnapshot` pair runs. Deliberately NOT cleared by `reset()` — the
+    /// log-line accumulators reset every window, but the snapshot must survive so a pull between
+    /// flushes still returns the last-known rates.
+    private(set) var latestCameraSnapshot: CameraRateSnapshot?
+
+    /// Numeric part of the next snapshot, computed by `flush` before `reset()` and re-stamped with
+    /// the host-clock freshness in `stampSnapshot`. Holding the numerics here keeps `flush`'s
+    /// signature unchanged (no clock argument) while `stampSnapshot` supplies the freshness from the
+    /// caller's clock reading — so `latestCameraSnapshot` is only ever exposed fully formed. The
+    /// `monotonicStampSeconds` carried here is a placeholder (`0`); it is never published as-is.
+    private var pendingCameraNumerics: CameraRateSnapshot?
 
     // MARK: - Init
 
@@ -329,8 +380,38 @@ nonisolated struct StageRateAggregator {
         case .writer:
             self.writerFlushLine(elapsedSeconds: elapsedSeconds)
         }
+        // Capture the camera lane's numeric rates before reset; the host-clock stamp is supplied
+        // separately by `stampSnapshot` (same lock acquisition at the call-site). Only the camera
+        // capture lane feeds `FpsCollapseDetector`; screen / encoder / writer never populate it.
+        if self.stage == .capture, self.lane == "camera" {
+            self.pendingCameraNumerics = CameraRateSnapshot(
+                deliveredFps: self.rate(self.fresh, over: elapsedSeconds),
+                dropOverflowRate: self.rate(self.didDrop + self.overflow, over: elapsedSeconds),
+                gapMsMax: self.gapMs.maxMs,
+                monotonicStampSeconds: 0 // placeholder, overwritten by stampSnapshot
+            )
+        }
         self.reset()
         return line
+    }
+
+    /// Combines the numerics captured by the most recent `flush` with `monotonicSeconds` into
+    /// `latestCameraSnapshot`. No-op until a camera-capture `flush` has run. Called inside the same
+    /// lock acquisition as `flush` (camera call-site only) so the snapshot is published atomically.
+    ///
+    /// - Parameter monotonicSeconds: Absolute host-clock seconds of this flush (freshness stamp).
+    ///   See `CameraRateSnapshot`'s clock contract.
+    mutating func stampSnapshot(monotonicSeconds: Double) {
+        guard let numerics = self.pendingCameraNumerics else { return }
+        self.latestCameraSnapshot = CameraRateSnapshot(
+            deliveredFps: numerics.deliveredFps,
+            dropOverflowRate: numerics.dropOverflowRate,
+            gapMsMax: numerics.gapMsMax,
+            monotonicStampSeconds: monotonicSeconds
+        )
+        // Consume the pending numerics so a stray second stamp in the same window cannot re-publish
+        // a stale snapshot with a newer timestamp (freshness must track the flush, not the pull).
+        self.pendingCameraNumerics = nil
     }
 
     private func captureFlushLine(elapsedSeconds: Double) -> String {

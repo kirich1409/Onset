@@ -4,16 +4,18 @@ import SwiftUI
 
 /// Reactive status-item label for the menu bar (#38).
 ///
-/// Three visual states driven by `RecordingCoordinator`:
+/// Visual states driven by `RecordingCoordinator`:
 /// - **Idle** — hollow circle `○`.
 /// - **Recording / normal** — red filled circle `●` + elapsed timer (e.g. `04:17`).
 /// - **Recording / degraded** — yellow filled circle `●` + warning triangle `⚠` + elapsed timer.
+/// - **Recording / hard critical** — red filled octagon `⛔` + elapsed timer (spec: hard incident).
 ///
 /// Reads `coordinator.phase`, `coordinator.recordingState`, `coordinator.elapsed`,
-/// `coordinator.diskWarning` (AC-12a, T-8), and `appSettings.showMenuBarTimer` so the
-/// per-property `@Observable` tracking fires only on those changes — toggling «Показывать
-/// таймер» re-renders the label live, and a low-space warning shows/clears the same triangle
-/// used for `deviceLostWarning` / backpressure degradation.
+/// `coordinator.liveCriticalView` (the de-escalating windowed-hard view), `coordinator.diskWarning`
+/// (AC-12a, T-8), and `appSettings.showMenuBarTimer` so the per-property `@Observable` tracking
+/// fires only on those changes — toggling «Показывать таймер» re-renders the label live, and a
+/// low-space warning shows/clears the same triangle used for `deviceLostWarning` / backpressure
+/// degradation.
 @MainActor
 struct MenuBarLabel: View {
     // MARK: - Metrics
@@ -34,7 +36,7 @@ struct MenuBarLabel: View {
     private func color(for dot: MenuBarLabelDescriptor.DotStyle) -> Color {
         switch dot {
         case .hollow: .primary
-        case .red: .red
+        case .red, .critical: .red
         case .yellow: .yellow
         }
     }
@@ -47,6 +49,7 @@ struct MenuBarLabel: View {
             elapsed: self.coordinator.elapsed,
             showTimer: self.appSettings.showMenuBarTimer,
             sourceLiveness: self.coordinator.sourceLiveness,
+            liveCriticalView: self.coordinator.liveCriticalView,
             diskWarning: self.coordinator.diskWarning
         )
 
