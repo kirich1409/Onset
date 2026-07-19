@@ -302,7 +302,10 @@ nonisolated struct RecordingConfiguration {
     ///
     /// Codec/container/color settings are fixed (AC-4). Numeric bitrate values are
     /// calibration placeholders (see type-level doc). The default profile targets ≤4K60
-    /// per AC-5 and uses the engine throughput cap from the spec (995M px/s, AC-5).
+    /// per AC-5. Its `budgetCap` is the flat 995M px/s AC-5 value, retained only for
+    /// consumers that don't route through per-chip-tier budgeting — coupled-quality (AC-Q9)
+    /// supersedes plain AC-5 for the device-budget cap: prefer `makeDefault(chipTier:)`,
+    /// which sources `budgetCap` from `EngineBudgetCap.budgetCap(for:codec:)` instead.
     ///
     /// Bitrate table placeholder values (bits per second):
     /// - 4K (3840×2160) @ 60 fps  : 60 Mbps average  (industry reference: ~50–80 Mbps HEVC)
@@ -328,7 +331,16 @@ nonisolated struct RecordingConfiguration {
     ///     `~/Movies/Onset/` is used as the default.
     ///   - cameraMirror: Whether the recorded camera image is horizontally mirrored. Default
     ///     `false` so `static let mvpDefault` and existing callers compile unchanged.
-    nonisolated static func makeMVPDefault(baseDirectory: URL? = nil, cameraMirror: Bool = false) -> Self {
+    ///   - budgetCap: The engine throughput cap. Defaults to the 995M px/s MVP placeholder
+    ///     (4K120, spec "CapabilityProbe и pre-flight бюджет") so `static let mvpDefault` and
+    ///     existing callers compile unchanged. `makeDefault(chipTier:)` overrides this with the
+    ///     per-tier calibrated cap from `EngineBudgetCap.budgetCap(for:codec:)`.
+    nonisolated static func makeMVPDefault(
+        baseDirectory: URL? = nil,
+        cameraMirror: Bool = false,
+        budgetCap: EngineBudgetCap = EngineBudgetCap(maxPixelsPerSecond: 995_000_000)
+    )
+    -> Self {
         // `RecordingOutput.directory()` is the single authoritative source for `~/Movies/Onset/`.
         // It uses `NSHomeDirectory()` internally — a plain Foundation free function with no actor
         // isolation — so it is safe to call from this `nonisolated` context.
@@ -342,10 +354,6 @@ nonisolated struct RecordingConfiguration {
             (key: BitrateKey(width: 1920, height: 1080, fps: 60), value: 18_000_000),
             (key: BitrateKey(width: 1920, height: 1080, fps: 30), value: 12_000_000),
         ]
-
-        // Engine throughput cap: 4K120 ≈ 995M px/s.
-        // Source: spec "CapabilityProbe и pre-flight бюджет": "один движок ≈ 4K120 ≈ ~995M px/s"
-        let budgetCap = EngineBudgetCap(maxPixelsPerSecond: 995_000_000)
 
         let movieFragmentIntervalSeconds = 4.0
         let diskThresholds = Self.makeDefaultDiskThresholds(movieFragmentIntervalSeconds: movieFragmentIntervalSeconds)
@@ -381,6 +389,27 @@ nonisolated struct RecordingConfiguration {
             budgetCap: budgetCap,
             diskThresholds: diskThresholds,
             baseOutputDirectory: baseOutputDirectory
+        )
+    }
+
+    /// Builds the MVP default configuration with the engine budget cap set from the detected
+    /// chip tier (AC-Q9 injection seam), instead of the static 995M MVP placeholder.
+    ///
+    /// - Parameters:
+    ///   - chipTier: The detected Apple Silicon chip tier driving the throughput cap
+    ///     (`EngineBudgetCap.budgetCap(for:codec:)`).
+    ///   - baseDirectory: Forwarded to `makeMVPDefault`.
+    ///   - cameraMirror: Forwarded to `makeMVPDefault`.
+    nonisolated static func makeDefault(
+        chipTier: ChipTier,
+        baseDirectory: URL? = nil,
+        cameraMirror: Bool = false
+    )
+    -> Self {
+        self.makeMVPDefault(
+            baseDirectory: baseDirectory,
+            cameraMirror: cameraMirror,
+            budgetCap: EngineBudgetCap.budgetCap(for: chipTier, codec: .hevc)
         )
     }
 

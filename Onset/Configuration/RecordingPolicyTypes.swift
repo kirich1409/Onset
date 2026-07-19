@@ -1,3 +1,9 @@
+// swiftlint:disable file_length
+// Rationale: this file is a set of small, documented, single-purpose policy value types
+// (Container, VideoCodec, BitrateKey, SourceDimensions, DiskThresholds, DiskVerdict family,
+// EngineBudgetCap) plus their `nonisolated` witnesses. Length grows with the policy surface,
+// not with logic complexity — splitting it would scatter a tightly related contract.
+
 // MARK: - Container
 
 /// Output file container format.
@@ -371,21 +377,22 @@ nonisolated struct ETAEstimate: Equatable {
 
 // MARK: - EngineBudgetCap
 
-/// The throughput ceiling of a single Apple Silicon encode engine.
+/// The throughput ceiling applied as a preflight cap before a recording session starts.
 ///
-/// Source: spec section "CapabilityProbe и pre-flight бюджет":
-///     "один движок ≈ 4K120 ≈ ~995M px/s"
-///
-/// 4K (3840 × 2160) × 120 fps = 995,328,000 ≈ 995M px/s.
-/// The default recording profile caps at ≤4K60, which is ~49.8% of this ceiling.
-/// The cap is applied by CapabilityProbe before starting the session; it is NOT
-/// a runtime throttle (post-MVP).
+/// Coupled-quality (AC-Q9) supersedes the original single-value AC-5 placeholder: the cap is
+/// no longer one static number for every chip, but produced per-`ChipTier` by
+/// `budgetCap(for:codec:)` below. `mvpDefault` still carries the flat 995M px/s value (spec
+/// anchor "один движок ≈ 4K120 ≈ ~995M px/s") only for non-budget-aware consumers that
+/// construct `RecordingConfiguration` without a chip tier — see `makeMVPDefault`'s doc-comment.
+/// The cap is applied by `CapabilityProbe`/`fits(screen:camera:)` before starting the session;
+/// it is NOT a runtime throttle (post-MVP).
 nonisolated struct EngineBudgetCap: Equatable {
     /// Maximum pixel-rate (pixels/second) the encode engine supports.
     ///
-    /// Value: 995_000_000 — anchored to "4K120 ≈ ~995M px/s" in the spec.
-    /// This is a placeholder to be re-validated against measurements on production hardware
-    /// (M1 Air through M3 Max range).
+    /// Populated either from the flat 995_000_000 MVP default (non-budget-aware construction
+    /// path, see type-level doc) or from `budgetCap(for:codec:)`'s per-tier value (622_080_000
+    /// validated floor for `.m3Max` pending AC-Q4 calibration by T-6, 248_832_000 safe-low for
+    /// `.uncalibrated`).
     nonisolated let maxPixelsPerSecond: Int
 
     /// Returns `true` when the given screen+camera combined pixel-rate fits within this cap.
@@ -397,3 +404,35 @@ nonisolated struct EngineBudgetCap: Equatable {
         screen.pixelRate + camera.pixelRate <= self.maxPixelsPerSecond
     }
 }
+
+// swiftlint:disable no_magic_numbers
+// Rationale: same as `RecordingConfiguration`'s file-wide disable — these are documented,
+// spec-anchored calibration values (validated floor / safe-low), not arbitrary literals.
+extension EngineBudgetCap {
+    /// Returns the per-chip-tier throughput ceiling (AC-Q9 device-budget coupling).
+    ///
+    /// Exhaustive `switch` over `ChipTier` — deliberately NOT a `[ChipTier: EngineBudgetCap]`
+    /// dictionary, so a future `ChipTier` case fails to compile here until handled (the switch
+    /// is the true completeness guard, not `CaseIterable`).
+    ///
+    /// - Parameters:
+    ///   - tier: The AC-Q4 calibration tier of the host chip.
+    ///   - codec: Reserved for a future per-codec throughput correction. Media-engine pixel-rate
+    ///     throughput is codec-agnostic today (HEVC-only; AV1 is not HW-accelerated on Apple
+    ///     Silicon ≤ M3), so this parameter is currently unused — Swift does not warn on unused
+    ///     parameters.
+    nonisolated static func budgetCap(for tier: ChipTier, codec: VideoCodec) -> EngineBudgetCap {
+        switch tier {
+        case .m3Max:
+            // UNCALIBRATED floor (non-worst-case #281 seed), NOT AC-Q4 — Phase B MUST NOT wire
+            // until T-6 sets the calibrated ceiling
+            EngineBudgetCap(maxPixelsPerSecond: 622_080_000)
+
+        case .uncalibrated:
+            // safe-low, uncalibrated — never inherits the m3Max floor (AC-Q9)
+            EngineBudgetCap(maxPixelsPerSecond: 248_832_000)
+        }
+    }
+}
+
+// swiftlint:enable no_magic_numbers
