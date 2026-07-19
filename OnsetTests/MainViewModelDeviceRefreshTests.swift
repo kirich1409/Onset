@@ -324,7 +324,9 @@ struct MainViewModelDeviceRefreshTests {
 private func eventuallyMainActor(timeoutMs: Int = 8000, _ condition: () -> Bool) async -> Bool {
     let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
     while Date() < deadline {
-        if condition() { return true }
+        if condition() {
+            return true
+        }
         try? await Task.sleep(nanoseconds: 5_000_000) // 5 ms
     }
     return condition()

@@ -105,6 +105,21 @@ struct RecordingRequest {
     let config: RecordingConfiguration
 }
 
+// MARK: - DiskStopReason+IdleWarning
+
+extension DiskStopReason {
+    /// Maps a critical disk-stop reason to its equivalent warning reason (T-7): at idle there is
+    /// no session to auto-stop, so a `.critical` verdict is surfaced through the same
+    /// `diskWarning` badge the in-recording path uses, one severity down.
+    fileprivate var idleWarningReason: DiskWarningReason {
+        switch self {
+        case .outputEta: .outputEta
+        case .outputFree: .outputFree
+        case .systemFree: .systemFree
+        }
+    }
+}
+
 // MARK: - RecordingCoordinator
 
 /// The single owner of app recording state, shared by the main window, recording window, and menu
@@ -222,6 +237,25 @@ final class RecordingCoordinator {
         self.lastWriteError != nil
     }
 
+    /// The active low-space warning reason, or `nil` when no warning is active (AC-3/AC-11/AC-12).
+    /// Equatable-guarded by the tick loop — set once per NEW crossing, not re-posted on every tick
+    /// the warning stays active; cleared once the monitor's cached verdict recovers to `.none`.
+    private(set) var diskWarning: DiskWarningReason?
+
+    /// `true` when the most recently finished session was auto-stopped by a `.critical` disk-space
+    /// verdict (AC-9/spec #88) — the files were saved gracefully; this is NOT an error.
+    ///
+    /// Deliberately SEPARATE from `hasPendingAlert`/`lastWriteError`: those force-open the main
+    /// window on a menu-bar-origin stop (#131), which is correct for a write ERROR but wrong here
+    /// — a graceful low-space stop is surfaced out-of-window via the `UNNotification` (AC-9), not
+    /// by forcing a window open. Reset on `start()`.
+    private(set) var stoppedDueToLowSpace = false
+
+    /// The pre-flight "≈ N мин" idle disk-space estimate (AC-1, T-7), or `nil` before the first
+    /// `refreshIdleDiskEstimate` call completes. `MainViewModel` only DISPLAYS this — it never
+    /// reads disk state itself; this coordinator owns `diskSpaceMonitor` and computes it off-main.
+    private(set) var idleDiskEstimate: ETAEstimate?
+
     // MARK: - Dependencies (injected)
 
     /// Builds a `RecordingControlling` for a request. Live = `RecordingSession`; tests inject a fake.
@@ -241,6 +275,16 @@ final class RecordingCoordinator {
     /// Tests inject `FakeRecordingStartNotifier` to assert the call without posting a real notification.
     @ObservationIgnored
     private let notifier: any RecordingStartNotifying
+
+    /// Prevents display/system idle sleep for the duration of a recording (#87). Tests inject a fake
+    /// to assert begin/end calls without touching the real `ProcessInfo` activity assertion.
+    @ObservationIgnored
+    private let sleepPreventer: any DisplaySleepPreventing
+
+    /// Posts disk-space warning / auto-stop notifications (spec #88, T-5). Tests inject a fake to
+    /// assert the calls without posting a real `UNNotification`.
+    @ObservationIgnored
+    private let diskWarningNotifier: any DiskSpaceWarningNotifying
 
     /// Opens the recording window. Bound from the SwiftUI scene via `bindWindowActions` (env
     /// `openWindow` is not available in a plain class). Defaults to a no-op so unit tests need not
@@ -303,6 +347,21 @@ final class RecordingCoordinator {
     @ObservationIgnored
     private var tickTask: Task<Void, Never>?
 
+    /// Owns the `readEvery` XPC-read throttle, EWMA smoothing, and cached disk-space verdict
+    /// (spec #88, T-4). Reused across sessions: `reset()` clears its rolling state and bumps its
+    /// generation token in `activateRecording()` so a stale in-flight refresh from a prior session
+    /// cannot contaminate the new one.
+    @ObservationIgnored
+    private let diskSpaceMonitor: DiskSpaceMonitor
+
+    /// The `DiskStopReason` that triggered the CURRENT teardown, set by the tick loop just before
+    /// handing off to `stop()` on a `.critical` verdict; consumed (and cleared) at the end of
+    /// `performStopTeardown` to decide whether to set `stoppedDueToLowSpace` and fire
+    /// `notifyAutoStopped` (AC-9). `nil` for every other stop path (button/hotkey/menu,
+    /// `.allVideoSourcesLost`, termination) — those must NOT be mis-attributed to low disk space.
+    @ObservationIgnored
+    private var pendingDiskStopReason: DiskStopReason?
+
     /// Re-entrancy guard for `start()`. Flipped synchronously before the first `await` so a concurrent
     /// call (e.g. double-click on the Record button) is a no-op and cannot leak a second session.
     @ObservationIgnored
@@ -349,6 +408,12 @@ final class RecordingCoordinator {
     ///     (default: `UserDefaults.standard`).
     ///   - sessionFactory: Builds the session for a request (live = `RecordingSession`).
     ///   - notifier: Posts a transient start confirmation (#242). Tests inject a fake.
+    ///   - diskSpaceProvider: Reads free-space snapshots for the disk-space monitor (spec #88,
+    ///     T-2). Live default reads real volumes; tests inject `FakeDiskSpaceProvider`.
+    ///   - diskWarningNotifier: Posts low-space warning / auto-stop notifications (spec #88, T-5).
+    ///     Tests inject a fake.
+    ///   - diskSpaceClock: Monotonic time seam for the monitor's `readEvery` throttle. Tests inject
+    ///     `FakeMonotonicClock` to advance it deterministically without wall-clock sleep.
     ///   - activationTimeoutSeconds: Seconds to bound the first-frame wait (default: 30 s).
     ///     Pass a small value in unit tests to exercise the timeout path without wall-clock delay.
     ///   - revealInFinder: Reveals files (defaults to the live `NSWorkspace` call).
@@ -384,6 +449,10 @@ final class RecordingCoordinator {
                 )
             },
         notifier: any RecordingStartNotifying = LiveRecordingStartNotifier(),
+        sleepPreventer: any DisplaySleepPreventing = LiveDisplaySleepPreventer(),
+        diskSpaceProvider: any DiskSpaceProviding = LiveDiskSpaceProvider(),
+        diskWarningNotifier: any DiskSpaceWarningNotifying = LiveDiskSpaceWarningNotifier(),
+        diskSpaceClock: any MonotonicClock = SystemMonotonicClock(),
         activationTimeoutSeconds: Double = 30,
         revealInFinder: @escaping ([URL]) -> Void = { urls in
             // Open the session folder itself in Finder (AC-9 #225): `activateFileViewerSelecting`
@@ -400,6 +469,13 @@ final class RecordingCoordinator {
         self.makeBackendStore = makeBackendStore
         self.sessionFactory = sessionFactory
         self.notifier = notifier
+        self.sleepPreventer = sleepPreventer
+        self.diskWarningNotifier = diskWarningNotifier
+        self.diskSpaceMonitor = DiskSpaceMonitor(
+            provider: diskSpaceProvider,
+            configuration: .mvpDefault,
+            clock: diskSpaceClock
+        )
         self.activationTimeoutSeconds = activationTimeoutSeconds
         self.openRecordingWindow = {}
         self.dismissMainWindow = {}
@@ -592,6 +668,17 @@ final class RecordingCoordinator {
         self.lastDroppedFrames = 0
         self.dominantCause = .notDegraded
         self.lastWriteError = nil
+        // Disk-space state (spec #88): clear the prior session's warning/stop attribution and
+        // reset the monitor's rolling state so a stale in-flight refresh from that session cannot
+        // contaminate this one (AC-1 clear).
+        self.diskWarning = nil
+        self.stoppedDueToLowSpace = false
+        self.pendingDiskStopReason = nil
+        // The idle headline (T-7) is meaningless once a session exists — the tick loop's own
+        // verdict/warning take over; clearing avoids a stale idle number surviving into a future
+        // idle re-appear before the next `refreshIdleDiskEstimate` call lands.
+        self.idleDiskEstimate = nil
+        self.diskSpaceMonitor.reset()
         self.phase = .recording
 
         self.startStateSubscription(session)
@@ -603,6 +690,9 @@ final class RecordingCoordinator {
         // Start notifier fires below to confirm the recording has begun.
         self.dismissMainWindow()
         self.notifier.notifyRecordingStarted()
+        // Keep the display/system awake for the whole recording (#87) — released in the single
+        // stop-teardown path below.
+        self.sleepPreventer.beginPreventingSleep()
     }
 
     /// Awaits the first element from `session.captureActiveStream` with a bounded timeout.
@@ -693,8 +783,17 @@ final class RecordingCoordinator {
         }
     }
 
-    /// One ~1 Hz loop: bumps `elapsed` from `startedAt` and polls the session's drop health. Both
-    /// readouts tick at the same cadence, so they share one task (one cancel point).
+    /// One ~1 Hz loop: bumps `elapsed` from `startedAt`, polls the session's drop health, and
+    /// drives the disk-space monitor (spec #88, AC-2). All three readouts tick at the same
+    /// cadence, so they share one task (one cancel point).
+    ///
+    /// ### Disk-space integration (AC-2)
+    /// `monitor.tickRefresh` is NOT awaited — the monitor throttles the actual XPC read to
+    /// `readEvery` and single-flights it internally, so a slow provider read never delays this
+    /// loop's elapsed/drops readout. `monitor.currentVerdict` is then read synchronously (the
+    /// cached value from the last completed refresh) and acted on by `applyDiskVerdict` — ALL
+    /// disk-space DECISIONS (warning post, critical auto-stop) live here on the MainActor-serial
+    /// tick, never inside the monitor's own refresh task.
     private func startTickLoop(_ session: any RecordingControlling) {
         self.tickTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -703,8 +802,91 @@ final class RecordingCoordinator {
                     self.elapsed = Int(Date().timeIntervalSince(startedAt))
                 }
                 self.drops = await session.currentDrops().counters
+
+                self.diskSpaceMonitor.tickRefresh(outputURL: session.sessionDirectory)
+                if self.applyDiskVerdict(self.diskSpaceMonitor.currentVerdict) == .stop {
+                    break
+                }
+
                 try? await Task.sleep(for: .seconds(1))
             }
+        }
+    }
+
+    // MARK: - Disk-space monitoring (spec #88, AC-2/AC-3/AC-4/AC-11)
+
+    /// Idle pre-flight disk-space read (AC-1/AC-3, T-7): computes the "≈ N мин" headline plus the
+    /// idle disk verdict from ONE fresh snapshot, before any recording session exists. THIS
+    /// coordinator owns `diskSpaceMonitor` (and thus the provider) and reads off-main —
+    /// `MainViewModel` only displays `idleDiskEstimate`, it never reads disk state itself.
+    ///
+    /// Cadence (spec #88 T-7): called once when the main screen appears
+    /// (`MainViewModel.refreshIdleDiskEstimate()`, via `MainView`'s `.task`) and again when a new
+    /// recording is initiated (`MainViewModel.record()`) — there is no idle polling; staleness
+    /// between those two points is accepted (plan.md "Idle-оценка владелец/каденция").
+    ///
+    /// A no-op while a recording is active: once a session exists, the tick loop
+    /// (`applyDiskVerdict`) is the sole owner of `diskWarning` and auto-stop decisions.
+    func refreshIdleDiskEstimate(plan: ResolvedRecordingPlan, config: RecordingConfiguration) async {
+        guard self.phase != .recording else { return }
+        let snapshot = await self.diskSpaceMonitor.idleEstimate(
+            outputURL: config.baseOutputDirectory,
+            plan: plan
+        )
+        self.idleDiskEstimate = snapshot.estimate
+        switch snapshot.verdict {
+        case .none:
+            self.diskWarning = nil
+
+        case let .warning(reason):
+            self.diskWarning = reason
+
+        case let .critical(reason):
+            // No session exists to auto-stop (AC-4 doesn't apply at idle) and Start is NOT
+            // blocked (Open Question → option A) — still surface the same warning/badge the
+            // in-recording path uses (AC-3) so a critically-low volume is visible before Record.
+            self.diskWarning = reason.idleWarningReason
+        }
+    }
+
+    /// What the tick loop must do after applying one disk-space verdict.
+    private enum DiskVerdictAction: Equatable {
+        /// Recording continues (verdict is `.none` or `.warning`).
+        case `continue`
+        /// Verdict is `.critical` — the tick loop must break; a stop has been handed off.
+        case stop
+    }
+
+    /// Applies the disk-space monitor's cached verdict on one tick — the sole place disk-space
+    /// DECISIONS are made (the monitor's own refresh task only updates the cache).
+    private func applyDiskVerdict(_ verdict: DiskVerdict) -> DiskVerdictAction {
+        switch verdict {
+        case .none:
+            // De-escalation (AC-11): the monitor/estimator (T-3/T-4) only returns `.none` once its
+            // own hysteresis + debounce has decided the metric recovered — simply mirror that here.
+            if self.diskWarning != nil {
+                self.diskWarning = nil
+            }
+            return .continue
+
+        case let .warning(reason):
+            // Equatable-guard (AC-12): post once per NEW crossing, not on every tick the warning
+            // stays active.
+            if self.diskWarning != reason {
+                self.diskWarning = reason
+                self.diskWarningNotifier.notifyLowSpaceWarning(reason: reason)
+            }
+            return .continue
+
+        case let .critical(reason):
+            // AC-4/AC-8: hand off via an UN-AWAITED Task — inline `await self.stop()` here would
+            // self-deadlock: `performStopTeardown` awaits `tick?.value` (:774), and this tick IS
+            // that same task. Precedent for the un-awaited form: `handleHotKey()` (:956).
+            coordinatorLogger.error("Disk-space critical verdict — auto-stopping recording (AC-4)")
+            self.diskWarning = nil
+            self.pendingDiskStopReason = reason
+            Task { await self.stop() }
+            return .stop
         }
     }
 
@@ -734,7 +916,9 @@ final class RecordingCoordinator {
     /// non-nil `stopTask` and awaits the SAME handle. Returns `nil` when there is nothing to stop
     /// (not recording, or already fully stopped) so callers await nothing.
     private func sharedStopTask() -> Task<Void, Never>? {
-        if let stopTask { return stopTask }
+        if let stopTask {
+            return stopTask
+        }
         guard self.phase == .recording, !self.isStopping, let session = self.session else { return nil }
         self.isStopping = true
         let task = Task { await self.performStopTeardown(session) }
@@ -773,8 +957,24 @@ final class RecordingCoordinator {
         self.lastDroppedFrames = result.drops.encoderBackpressureDrops
         self.dominantCause = result.dominantCause
         self.lastWriteError = result.writeFailureReason
+        // Disk-stop attribution (AC-9): `pendingDiskStopReason` is set by the tick loop only when
+        // THIS teardown was triggered by a `.critical` disk-space verdict — every other stop path
+        // (button/hotkey/menu, `.allVideoSourcesLost`, termination) leaves it `nil`. Consume it
+        // exactly once here; it must not survive into the next session's stop.
+        let diskStopReason = self.pendingDiskStopReason
+        self.pendingDiskStopReason = nil
+        self.stoppedDueToLowSpace = diskStopReason != nil
+        if let diskStopReason {
+            self.diskWarningNotifier.notifyAutoStopped(
+                reason: diskStopReason,
+                filesSaved: DiskSpaceSavedFiles(screenURL: result.screen?.url, cameraURL: result.camera?.url)
+            )
+        }
         self.session = nil
         self.startedAt = nil
+        // End the sleep-prevention hold started in activateRecording() — the sole release point,
+        // covering both a user-initiated stop() and finalizeForTermination()'s teardown.
+        self.sleepPreventer.endPreventingSleep()
 
         // Transient finished phase, then return to the origin (spec lifecycle).
         self.phase = .finished
@@ -947,6 +1147,17 @@ final class RecordingCoordinator {
             self.openMainWindow()
             coordinatorLogger.info("Hotkey ⌘⌥⌃R — no intent installed, opening main window")
         }
+    }
+
+    // MARK: - Dock reopen (#272)
+
+    /// Handles a Dock-icon reopen (macOS `applicationShouldHandleReopen`). While recording,
+    /// focus the recording window and suppress SwiftUI's default main-window reopen; otherwise
+    /// let the default proceed. Returns whether the system should perform its default handling.
+    func handleReopen() -> Bool {
+        guard self.phase == .recording else { return true }
+        self.openRecordingWindow()
+        return false
     }
 }
 

@@ -275,7 +275,9 @@ nonisolated private func collectVideoFrames(
             var collected: [VideoFrame] = []
             for await frame in videoStream {
                 collected.append(frame)
-                if collected.count >= targetCount { break }
+                if collected.count >= targetCount {
+                    break
+                }
             }
             return collected
         }

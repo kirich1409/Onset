@@ -133,7 +133,9 @@ nonisolated enum CameraFormatSelector {
             // Int32 → Int: avoids overflow traps under STRICT_MEMORY_SAFETY for high-res dimensions.
             let bestPixels = Int(best.pixelWidth) * Int(best.pixelHeight)
             let candidatePixels = Int(candidate.pixelWidth) * Int(candidate.pixelHeight)
-            if candidatePixels != bestPixels { return candidatePixels > bestPixels ? candidate : best }
+            if candidatePixels != bestPixels {
+                return candidatePixels > bestPixels ? candidate : best
+            }
             return candidate.maxFps > best.maxFps ? candidate : best
         }
     }
@@ -146,7 +148,9 @@ nonisolated enum CameraFormatSelector {
             // Int32 → Int: avoids overflow traps under STRICT_MEMORY_SAFETY for high-res dimensions.
             let bestPixels = Int(best.pixelWidth) * Int(best.pixelHeight)
             let candidatePixels = Int(candidate.pixelWidth) * Int(candidate.pixelHeight)
-            if candidatePixels != bestPixels { return candidatePixels < bestPixels ? candidate : best }
+            if candidatePixels != bestPixels {
+                return candidatePixels < bestPixels ? candidate : best
+            }
             return candidate.maxFps > best.maxFps ? candidate : best
         }
     }
