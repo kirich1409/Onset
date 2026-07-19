@@ -2282,7 +2282,11 @@ struct RecordingCoordinatorCriticalTests {
     func tickLoop_feedsMonotonicElapsed() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
         fake.liveSessionElapsedSeconds = 42 // injected monotonic clock, distinct from Date()-elapsed
-        let coordinator = RecordingCoordinator { _, _ in fake }
+        // Labelled, not trailing: `sessionFactory` is not the LAST init parameter (revealInFinder
+        // is) — an unlabelled trailing closure here would bind to the wrong parameter (see file
+        // header rationale).
+        // swiftlint:disable:next trailing_closure
+        let coordinator = RecordingCoordinator(sessionFactory: { _, _ in fake })
 
         try await coordinator.start(CoordinatorFixtures.request())
         let threaded = await eventuallyMain { coordinator.lastMonotonicElapsedSeconds == 42 }
@@ -2301,7 +2305,7 @@ struct RecordingCoordinatorPostStopTests {
     func postStop_softOnly_softSummary() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
         let notifier = FakeRecordingStartNotifier()
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake }, notifier: notifier)
+        let coordinator = RecordingCoordinator(sessionFactory: { _, _ in fake }, notifier: notifier)
 
         try await coordinator.start(CoordinatorFixtures.request())
         // Soft camera loss during the session, no hard incident.
@@ -2318,7 +2322,7 @@ struct RecordingCoordinatorPostStopTests {
     func postStop_carriesReportURL() async throws {
         let fake = FakeRecordingControlling(result: CoordinatorFixtures.result())
         let notifier = FakeRecordingStartNotifier()
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake }, notifier: notifier)
+        let coordinator = RecordingCoordinator(sessionFactory: { _, _ in fake }, notifier: notifier)
 
         try await coordinator.start(CoordinatorFixtures.request())
         fake.emitRevocation(.sourceRevoked(.camera))
@@ -2349,7 +2353,7 @@ struct RecordingCoordinatorPostStopTests {
         )
         fake.liveSessionElapsedSeconds = 600 // long session; 1 drop / 10 min ≪ 600/min floor
         let notifier = FakeRecordingStartNotifier()
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake }, notifier: notifier)
+        let coordinator = RecordingCoordinator(sessionFactory: { _, _ in fake }, notifier: notifier)
 
         try await coordinator.start(CoordinatorFixtures.request())
         _ = await eventuallyMain { coordinator.lastMonotonicElapsedSeconds == 600 }
@@ -2368,7 +2372,7 @@ struct RecordingCoordinatorPostStopTests {
         )
         fake.liveSessionElapsedSeconds = 60
         let notifier = FakeRecordingStartNotifier()
-        let coordinator = RecordingCoordinator(sessionFactory: { _ in fake }, notifier: notifier)
+        let coordinator = RecordingCoordinator(sessionFactory: { _, _ in fake }, notifier: notifier)
 
         try await coordinator.start(CoordinatorFixtures.request())
         _ = await eventuallyMain { coordinator.lastMonotonicElapsedSeconds == 60 }
