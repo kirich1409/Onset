@@ -135,6 +135,28 @@ struct RecordingConfigurationTests {
         #expect(self.sut.budgetCap.maxPixelsPerSecond == 995_000_000)
     }
 
+    @Test("makeDefault(.m3Max).budgetCap.maxPixelsPerSecond is the calibrated-floor 622_080_000")
+    func makeDefault_m3Max_budgetCapValue() {
+        #expect(RecordingConfiguration.makeDefault(chipTier: .m3Max).budgetCap.maxPixelsPerSecond == 622_080_000)
+    }
+
+    @Test("makeDefault(.uncalibrated).budgetCap.maxPixelsPerSecond is the safe-low 248_832_000")
+    func makeDefault_uncalibrated_budgetCapValue() {
+        #expect(
+            RecordingConfiguration.makeDefault(chipTier: .uncalibrated).budgetCap.maxPixelsPerSecond == 248_832_000
+        )
+    }
+
+    @Test("makeDefault(chipTier:) differs from mvpDefault only in budgetCap")
+    func makeDefault_onlyBudgetCapDiffersFromMVPDefault() {
+        let m3Config = RecordingConfiguration.makeDefault(chipTier: .m3Max)
+        let ref = RecordingConfiguration.makeMVPDefault(budgetCap: m3Config.budgetCap)
+        #expect(m3Config == ref)
+        #expect(
+            RecordingConfiguration.mvpDefault.budgetCap.maxPixelsPerSecond != m3Config.budgetCap.maxPixelsPerSecond
+        )
+    }
+
     @Test("budgetCap — 4K60 screen + 1080p30 camera fits within cap")
     func budgetCap_4K60_1080p30_fits() {
         // 4K60: 3840 × 2160 × 60 = 497,664,000
