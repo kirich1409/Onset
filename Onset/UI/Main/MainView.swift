@@ -93,6 +93,9 @@ struct MainView: View {
         .frame(width: WindowDefaults.width, height: WindowDefaults.height)
         .task {
             await self.model.loadDevices()
+            // One-shot idle disk-space estimate (AC-1, T-7): computed once here, after
+            // `loadDevices()` resolves the display — no idle polling (see `refreshIdleDiskEstimate`).
+            await self.model.refreshIdleDiskEstimate()
             // Parks here until the view disappears: SwiftUI cancels the task, which
             // terminates the device-change stream and tears down its observer.
             await self.model.observeDeviceChanges()
@@ -207,6 +210,13 @@ struct MainView: View {
 
     @ViewBuilder
     private var recordFooter: some View {
+        if let diskEstimate = self.model.diskSpaceEstimateDisplay {
+            Text(diskEstimate)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .accessibilityLabel(diskEstimate)
+        }
         if let reason = self.model.recordDisabledReason {
             Text(reason)
                 .font(.caption)

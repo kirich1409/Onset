@@ -176,6 +176,13 @@ nonisolated struct RecordingConfiguration {
     /// AC-5: screen resolution is capped so combined pixel-rate stays within this budget.
     nonisolated let budgetCap: EngineBudgetCap
 
+    // MARK: - Disk Space Monitoring (#88)
+
+    /// Thresholds and cadence for proactive disk-space monitoring during recording.
+    ///
+    /// **Placeholders** — reasoned defaults pending L5 calibration (AC-10). See `DiskThresholds`.
+    nonisolated let diskThresholds: DiskThresholds
+
     // MARK: - Output Directory
 
     /// Base directory under which session subdirectories are created (`~/Movies/Onset/` by default).
@@ -287,6 +294,9 @@ nonisolated struct RecordingConfiguration {
         // Source: spec "CapabilityProbe и pre-flight бюджет": "один движок ≈ 4K120 ≈ ~995M px/s"
         let budgetCap = EngineBudgetCap(maxPixelsPerSecond: 995_000_000)
 
+        let movieFragmentIntervalSeconds = 4.0
+        let diskThresholds = Self.makeDefaultDiskThresholds(movieFragmentIntervalSeconds: movieFragmentIntervalSeconds)
+
         return Self(
             container: .mp4,
             codec: .hevc,
@@ -308,13 +318,43 @@ nonisolated struct RecordingConfiguration {
             audioSampleRate: 48000,
             audioChannelCount: 1,
             audioBitrate: 128_000,
-            movieFragmentInterval: 4.0,
+            movieFragmentInterval: movieFragmentIntervalSeconds,
             // Degraded-state policy placeholders — калибруется post-MVP against real drop rates.
             degradedBackpressureThreshold: 30,
             degradedWindowSeconds: 2.0,
             postStopDropWarningThreshold: 5,
             budgetCap: budgetCap,
+            diskThresholds: diskThresholds,
             baseOutputDirectory: baseOutputDirectory
+        )
+    }
+
+    /// Builds the default disk-space monitoring thresholds (#88).
+    ///
+    /// Reasoned defaults, not yet calibrated (AC-10/L5). Split out of `makeMVPDefault` purely to
+    /// keep that function's body under the strict `function_body_length` budget.
+    ///
+    /// - Parameter movieFragmentIntervalSeconds: Sizes `ewmaTimeConstantSeconds` (≥ 4×) and
+    ///   `readEverySeconds` (≈ 1×).
+    nonisolated static func makeDefaultDiskThresholds(movieFragmentIntervalSeconds: Double) -> DiskThresholds {
+        let bytesPerGB: Int64 = 1_000_000_000
+        // EWMA window ≥ 4× movieFragmentInterval (~16s): the smoothed slope reflects ≥ 4 reads.
+        let ewmaTimeConstantSeconds = 4.0 * movieFragmentIntervalSeconds
+        return DiskThresholds(
+            // System warn ≤10GB / stop ≤5GB; output warn ETA≤10min|≤10GB / stop ETA≤2min|≤2GB.
+            systemWarnBytes: 10 * bytesPerGB,
+            systemStopBytes: 5 * bytesPerGB,
+            outputWarnBytes: 10 * bytesPerGB,
+            outputStopBytes: 2 * bytesPerGB,
+            outputWarnEtaSeconds: 10 * 60,
+            outputStopEtaSeconds: 2 * 60,
+            ewmaTimeConstantSeconds: ewmaTimeConstantSeconds,
+            readEverySeconds: movieFragmentIntervalSeconds,
+            // Warmup spans the full smoothing window before the EWMA slope is trusted.
+            warmupSeconds: ewmaTimeConstantSeconds,
+            // Hysteresis release margin (0.5 GB) + de-escalation debounce (~2 read cycles).
+            hysteresisReleaseBytes: bytesPerGB / 2,
+            deescalationDebounceSeconds: 2 * movieFragmentIntervalSeconds
         )
     }
 }
@@ -352,6 +392,7 @@ extension RecordingConfiguration: Equatable {
             && lhs.postStopDropWarningThreshold == rhs.postStopDropWarningThreshold
             && lhs.budgetCap == rhs.budgetCap
             && lhs.baseOutputDirectory == rhs.baseOutputDirectory
+            && lhs.diskThresholds == rhs.diskThresholds
     }
 }
 

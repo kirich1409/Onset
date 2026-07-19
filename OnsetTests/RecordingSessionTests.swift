@@ -1268,6 +1268,7 @@ struct RecordingSessionOutputDirectoryTests {
             degradedWindowSeconds: mvp.degradedWindowSeconds,
             postStopDropWarningThreshold: mvp.postStopDropWarningThreshold,
             budgetCap: mvp.budgetCap,
+            diskThresholds: mvp.diskThresholds,
             baseOutputDirectory: tempDir
         )
 
@@ -1346,6 +1347,7 @@ struct RecordingSessionOutputDirectoryTests {
             degradedWindowSeconds: mvp.degradedWindowSeconds,
             postStopDropWarningThreshold: mvp.postStopDropWarningThreshold,
             budgetCap: mvp.budgetCap,
+            diskThresholds: mvp.diskThresholds,
             baseOutputDirectory: base
         )
 

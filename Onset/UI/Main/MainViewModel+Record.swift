@@ -14,6 +14,11 @@ extension MainViewModel {
         self.recordError = nil
         self.outputDirectoryError = nil
 
+        // T-7 (AC-1): recompute the idle disk-space headline on every record initiation, so the
+        // main screen never shows a stale-by-one-appear number if `start()` fails validation and
+        // the user stays on this screen.
+        await self.refreshIdleDiskEstimate()
+
         guard self.validateRecordGuards() else { return }
         guard self.validateOutputDirectory() else { return }
         guard let display = self.validateDisplaySelection() else { return }

@@ -9,9 +9,11 @@ import SwiftUI
 /// - **Recording / normal** — red filled circle `●` + elapsed timer (e.g. `04:17`).
 /// - **Recording / degraded** — yellow filled circle `●` + warning triangle `⚠` + elapsed timer.
 ///
-/// Reads `coordinator.phase`, `coordinator.recordingState`, `coordinator.elapsed`, and
-/// `appSettings.showMenuBarTimer` so the per-property `@Observable` tracking fires only on those
-/// changes — toggling «Показывать таймер» re-renders the label live.
+/// Reads `coordinator.phase`, `coordinator.recordingState`, `coordinator.elapsed`,
+/// `coordinator.diskWarning` (AC-12a, T-8), and `appSettings.showMenuBarTimer` so the
+/// per-property `@Observable` tracking fires only on those changes — toggling «Показывать
+/// таймер» re-renders the label live, and a low-space warning shows/clears the same triangle
+/// used for `deviceLostWarning` / backpressure degradation.
 @MainActor
 struct MenuBarLabel: View {
     // MARK: - Metrics
@@ -44,14 +46,15 @@ struct MenuBarLabel: View {
             recordingState: self.coordinator.recordingState,
             elapsed: self.coordinator.elapsed,
             showTimer: self.appSettings.showMenuBarTimer,
-            sourceLiveness: self.coordinator.sourceLiveness
+            sourceLiveness: self.coordinator.sourceLiveness,
+            diskWarning: self.coordinator.diskWarning
         )
 
         HStack(spacing: Metrics.elementSpacing) {
             Image(systemName: desc.dot.systemName)
                 .foregroundStyle(self.color(for: desc.dot))
 
-            if desc.dot.showsWarning || desc.deviceLostWarning {
+            if desc.dot.showsWarning || desc.deviceLostWarning || desc.lowSpaceWarning {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(Color.yellow)
             }
