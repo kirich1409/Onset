@@ -45,6 +45,12 @@ struct MenuBarLabelDescriptor: Equatable {
     /// (recording window not open). The view shows the same warning triangle as backpressure
     /// degradation when either this or `dot.showsWarning` is `true`.
     let deviceLostWarning: Bool
+    /// `true` when a low-disk-space warning is active mid-recording (AC-12a, #88, T-8). Mirrors
+    /// `deviceLostWarning`'s independence from `dot`/`DotStyle.showsWarning`: free space can drop
+    /// below the warn threshold while the encoder is still keeping up, so this is the ONLY visible
+    /// signal in menu-bar-only mode. The view shows the same warning triangle for either flag or
+    /// `dot.showsWarning`. Clears (de-escalates) as soon as the coordinator's `diskWarning` clears.
+    let lowSpaceWarning: Bool
     /// VoiceOver label for the status-item button (#242). Describes the current recording state
     /// and elapsed time so screen-reader users receive the same information as sighted users.
     let accessibilityLabel: String
@@ -80,12 +86,16 @@ nonisolated enum MenuBarLabelMapper {
     ///     drives `deviceLostWarning` regardless of `recordingState`, since a device loss does not
     ///     necessarily produce encoder backpressure. Defaults to `.allLive` so idle/main/finished
     ///     callers and existing call sites need not pass it explicitly.
+    ///   - diskWarning: The coordinator's `diskWarning` state (T-6, AC-12a). Non-`nil` while a
+    ///     low-space warning is active mid-recording; `nil` once it de-escalates. Defaults to
+    ///     `nil` so idle/main/finished callers and existing call sites need not pass it explicitly.
     static func descriptor(
         phase: AppPhase,
         recordingState: RecordingState,
         elapsed: Int,
         showTimer: Bool,
-        sourceLiveness: SourceLiveness = .allLive
+        sourceLiveness: SourceLiveness = .allLive,
+        diskWarning: DiskWarningReason? = nil
     )
     -> MenuBarLabelDescriptor {
         switch phase {
@@ -94,13 +104,16 @@ nonisolated enum MenuBarLabelMapper {
             let elapsedField = showTimer ? elapsed : nil
             let deviceLost = !sourceLiveness.screen || !sourceLiveness.camera || !sourceLiveness.microphone
             let deviceLostSuffix = deviceLost ? ", устройство отключено" : ""
+            let lowSpace = diskWarning != nil
+            let lowSpaceSuffix = lowSpace ? ", мало места на диске" : ""
             switch recordingState {
             case .normal:
                 return MenuBarLabelDescriptor(
                     dot: .red,
                     elapsed: elapsedField,
                     deviceLostWarning: deviceLost,
-                    accessibilityLabel: "Onset, идёт запись\(deviceLostSuffix), \(elapsedString)"
+                    lowSpaceWarning: lowSpace,
+                    accessibilityLabel: "Onset, идёт запись\(deviceLostSuffix)\(lowSpaceSuffix), \(elapsedString)"
                 )
 
             case .degraded:
@@ -108,7 +121,9 @@ nonisolated enum MenuBarLabelMapper {
                     dot: .yellow,
                     elapsed: elapsedField,
                     deviceLostWarning: deviceLost,
-                    accessibilityLabel: "Onset, запись деградирована\(deviceLostSuffix), \(elapsedString)"
+                    lowSpaceWarning: lowSpace,
+                    accessibilityLabel:
+                    "Onset, запись деградирована\(deviceLostSuffix)\(lowSpaceSuffix), \(elapsedString)"
                 )
             }
 
@@ -117,6 +132,7 @@ nonisolated enum MenuBarLabelMapper {
                 dot: .hollow,
                 elapsed: nil,
                 deviceLostWarning: false,
+                lowSpaceWarning: false,
                 accessibilityLabel: "Onset"
             )
         }

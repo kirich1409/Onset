@@ -39,7 +39,11 @@ extension CameraSource {
         // `.record` hand-off to teardown. The defer fires only if neither happened (an error
         // before either point) → exactly one unlock on every path, including preview-throw.
         var locked = true
-        defer { if locked { device.unlockForConfiguration() } }
+        defer {
+            if locked {
+                device.unlockForConfiguration()
+            }
+        }
 
         try self.configureSession(session, device: device)
 

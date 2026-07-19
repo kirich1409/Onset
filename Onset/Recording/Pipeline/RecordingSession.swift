@@ -388,8 +388,12 @@ actor RecordingSession {
     /// Builds the `DropMonitor` + `DualFileOutputStage` (writers created lazily on first sample).
     private func makeStage(startPlan: RecordingStartPlan, sessionT0: CMTime) -> DualFileOutputStage {
         var expectedKinds: Set<RecordingPipelineKind> = []
-        if startPlan.includeScreen { expectedKinds.insert(.screen) }
-        if startPlan.includeCamera { expectedKinds.insert(.camera) }
+        if startPlan.includeScreen {
+            expectedKinds.insert(.screen)
+        }
+        if startPlan.includeCamera {
+            expectedKinds.insert(.camera)
+        }
 
         let monitor = DropMonitor(
             windowSeconds: self.config.degradedWindowSeconds,
@@ -772,7 +776,9 @@ actor RecordingSession {
         // Memoized-task idempotency guard (AC-9). `self.stopTask = task` is assigned synchronously
         // on the actor before the first suspension point, so a concurrent second caller entering
         // stop() always sees the non-nil task and awaits its result — no double teardown.
-        if let stopTask { return await stopTask.value }
+        if let stopTask {
+            return await stopTask.value
+        }
         // Stop-before-start guard: if the session never entered .running, no teardown is needed.
         // Return .empty immediately without memoizing into stopTask so a subsequent start()→stop()
         // is not poisoned by this no-op.

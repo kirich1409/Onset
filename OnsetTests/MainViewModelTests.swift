@@ -36,13 +36,15 @@ struct MainViewModelTests {
         displays: [Display] = [],
         cameras: [CameraDevice] = [],
         microphones: [MicrophoneDevice] = [],
+        diskSpaceProvider: any DiskSpaceProviding = FakeDiskSpaceProvider(),
         defaults: InMemoryUserDefaults
     )
     -> (sut: MainViewModel, perms: FakePermissionsService) {
         let perms = FakePermissionsService(screen: screen, camera: camera, microphone: microphone)
-        let coordinator = RecordingCoordinator {
-            UserDefaultsBackendSelectionStore(defaults: defaults)
-        }
+        let coordinator = RecordingCoordinator(
+            makeBackendStore: { UserDefaultsBackendSelectionStore(defaults: defaults) },
+            diskSpaceProvider: diskSpaceProvider
+        )
         let sut = MainViewModel(
             permissions: perms,
             appSettings: AppSettings(store: InMemorySettingsStore()),
@@ -246,6 +248,99 @@ struct MainViewModelTests {
         }
     }
 
+    // MARK: - Disk-space idle estimate (AC-1, T-7)
+
+    @Test("Before the first refresh, the idle disk-space headline is nil (nothing computed yet)")
+    func diskSpaceEstimateDisplay_nilBeforeRefresh() async {
+        await withScopedDefaults { defaults in
+            let display = Self.makeDisplay()
+            let (sut, _) = self.makeSUT(displays: [display], defaults: defaults)
+
+            #expect(sut.diskSpaceEstimateDisplay == nil)
+        }
+    }
+
+    @Test("Volume read failure → «Оценка недоступна», never a fabricated number (AC-1)")
+    func diskSpaceEstimateDisplay_unavailable_onReadFailure() async {
+        await withScopedDefaults { defaults in
+            let display = Self.makeDisplay()
+            let provider = FakeDiskSpaceProvider()
+            await provider.configure(outputFreeBytes: nil, systemFreeBytes: nil)
+            let (sut, _) = self.makeSUT(displays: [display], diskSpaceProvider: provider, defaults: defaults)
+            await sut.loadDevices()
+
+            await sut.refreshIdleDiskEstimate()
+
+            #expect(sut.diskSpaceEstimateDisplay == "Оценка недоступна")
+        }
+    }
+
+    @Test("Available free space → «≈ N мин» headline (AC-1)")
+    func diskSpaceEstimateDisplay_showsApproxMinutes_whenAvailable() async {
+        await withScopedDefaults { defaults in
+            let display = Self.makeDisplay()
+            let provider = FakeDiskSpaceProvider()
+            // 5 GB at the 1080p60 MVP-default bitrate (18 Mbps + 128 kbps audio, ~2.27 MB/s)
+            // resolves to ≈37 min — comfortably under the 60-min display cap. 50 GB (the prior
+            // value) actually resolves to ≈368 min, which correctly routes to the "> 60 мин"
+            // branch instead of exercising the "≈ N мин" branch this test targets.
+            await provider.configure(outputFreeBytes: 5_000_000_000, systemFreeBytes: 500_000_000_000)
+            let (sut, _) = self.makeSUT(displays: [display], diskSpaceProvider: provider, defaults: defaults)
+            await sut.loadDevices()
+
+            await sut.refreshIdleDiskEstimate()
+
+            let headline = sut.diskSpaceEstimateDisplay
+            #expect(headline?.hasPrefix("≈ ") == true)
+            #expect(headline?.hasSuffix(" мин") == true)
+        }
+    }
+
+    @Test("Enormous free space → «> 60 мин» headline, not an overly precise number (AC-1)")
+    func diskSpaceEstimateDisplay_showsGreaterThan60_whenPlentiful() async {
+        await withScopedDefaults { defaults in
+            let display = Self.makeDisplay()
+            let provider = FakeDiskSpaceProvider()
+            await provider.configure(outputFreeBytes: 100_000_000_000_000, systemFreeBytes: 100_000_000_000_000)
+            let (sut, _) = self.makeSUT(displays: [display], diskSpaceProvider: provider, defaults: defaults)
+            await sut.loadDevices()
+
+            await sut.refreshIdleDiskEstimate()
+
+            #expect(sut.diskSpaceEstimateDisplay == "> 60 мин")
+        }
+    }
+
+    @Test("record() recomputes the idle estimate and clears a stale idle disk warning (T-7)")
+    func record_recomputesIdleEstimate_clearsStaleWarning() async {
+        await withScopedDefaults { defaults in
+            let display = Self.makeDisplay()
+            let provider = FakeDiskSpaceProvider()
+            // Below `outputStopBytes` (2 GB) — the idle read yields a `.critical` verdict,
+            // surfaced as `diskWarning` (T-7 maps it down since there is no session to auto-stop).
+            await provider.configure(outputFreeBytes: 1_000_000_000, systemFreeBytes: 500_000_000_000)
+            let (sut, _) = self.makeSUT(
+                microphone: .denied, // AC-2(c): avoids the AC-2(b) mic-unselected guard
+                displays: [display],
+                diskSpaceProvider: provider,
+                defaults: defaults
+            )
+            await sut.loadDevices()
+            await sut.refreshIdleDiskEstimate()
+            #expect(sut.coordinator.diskWarning != nil)
+
+            // Disk space recovers before the user presses Record.
+            await provider.configure(outputFreeBytes: 500_000_000_000, systemFreeBytes: 500_000_000_000)
+            // Intercept the actual session start — this test only exercises the pre-start
+            // recompute, not a real recording.
+            sut.startSessionOverride = { _ in }
+
+            await sut.record()
+
+            #expect(sut.coordinator.diskWarning == nil)
+        }
+    }
+
     // MARK: - AC-2(d): No video permission → empty state
 
     @Test("No video permissions → showNoPermissionsState true, canRecord false (AC-2d)")
@@ -280,6 +375,100 @@ struct MainViewModelTests {
 
             #expect(sut.showNoPermissionsState)
         }
+    }
+
+    // MARK: - #277: in-window screen-grant action available from the no-permissions state
+
+    @Test("Screen denied → in-window grant action available, not only return-to-onboarding (#277)")
+    func screenDenied_inWindowGrantActionAvailable() {
+        let (sut, perms) = self.makeSUT(
+            screen: .notDetermined,
+            camera: .notDetermined,
+            microphone: .notDetermined,
+            defaults: InMemoryUserDefaults()
+        )
+
+        // The dead-end contract this test guards: screen denied must expose a working
+        // in-window grant seam (request + open Settings + awaiting), mirroring
+        // OnboardingViewModel.openScreenRecordingSettings() — not just the return-to-onboarding
+        // escape hatch that used to be the only action.
+        #expect(sut.showNoPermissionsState)
+        #expect(!sut.isAwaitingScreen)
+
+        sut.openScreenRecordingSettings()
+
+        #expect(perms.requestScreenRecordingCallCount == 1)
+        #expect(perms.openScreenRecordingSettingsCallCount == 1)
+        #expect(sut.isAwaitingScreen)
+    }
+
+    @Test("checkScreenStatusNow() from the no-permissions state delegates to PermissionsService (#277)")
+    func noPermissionsState_checkScreenStatusNow_delegates() {
+        let (sut, perms) = self.makeSUT(
+            screen: .notDetermined,
+            camera: .notDetermined,
+            microphone: .notDetermined,
+            defaults: InMemoryUserDefaults()
+        )
+        #expect(sut.showNoPermissionsState)
+
+        sut.checkScreenStatusNow()
+
+        #expect(perms.checkScreenStatusNowCallCount == 1)
+    }
+
+    @Test("startScreenPolling() from the no-permissions state delegates to PermissionsService (#277)")
+    func noPermissionsState_startScreenPolling_delegates() {
+        let (sut, perms) = self.makeSUT(
+            screen: .notDetermined,
+            camera: .notDetermined,
+            microphone: .notDetermined,
+            defaults: InMemoryUserDefaults()
+        )
+        #expect(sut.showNoPermissionsState)
+
+        let task = sut.startScreenPolling()
+        task.cancel()
+
+        #expect(perms.startScreenPollingCallCount == 1)
+    }
+
+    @Test("Screen grant while awaiting → showNoPermissionsState resolves false, reaching a recordable state (#277)")
+    func noPermissionsState_screenGranted_leavesEmptyState() {
+        let (sut, perms) = self.makeSUT(
+            screen: .notDetermined,
+            camera: .notDetermined,
+            microphone: .notDetermined,
+            defaults: InMemoryUserDefaults()
+        )
+        #expect(sut.showNoPermissionsState)
+
+        sut.openScreenRecordingSettings()
+        // Simulates the OS-level grant that PermissionsService's real polling would observe —
+        // exercising the second half of the #277 contract: the in-window action must actually
+        // reach a recordable state, not just flip the awaiting flag (L2, no hardware).
+        perms.screenStatus = PermissionStatus.authorized
+
+        #expect(!sut.showNoPermissionsState)
+    }
+
+    @Test("Leaving the no-permissions state resets isAwaitingScreen (#277)")
+    func noPermissionsState_leave_resetsAwaitingScreen() {
+        let (sut, _) = self.makeSUT(
+            screen: .notDetermined,
+            camera: .notDetermined,
+            microphone: .notDetermined,
+            defaults: InMemoryUserDefaults()
+        )
+        sut.openScreenRecordingSettings()
+        #expect(sut.isAwaitingScreen)
+
+        // Regression for the stale-awaiting strand: opening Settings then leaving via the
+        // demoted "Вернуться к разрешениям" fallback without granting must not leave a later
+        // re-entry into this state showing a stuck spinner (MainViewModel is app-lifetime).
+        sut.leaveNoPermissionsState()
+
+        #expect(!sut.isAwaitingScreen)
     }
 
     // MARK: - Screen denied state

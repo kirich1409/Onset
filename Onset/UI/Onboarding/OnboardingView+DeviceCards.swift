@@ -23,7 +23,9 @@ extension OnboardingView {
     }
 
     var cameraCardStatus: PermissionCardStatus {
-        if viewModel.isRequestingCamera { return .awaiting }
+        if viewModel.isRequestingCamera {
+            return .awaiting
+        }
         switch viewModel.cameraStatus {
         case .notDetermined:
             return .required
@@ -88,7 +90,9 @@ extension OnboardingView {
     }
 
     var microphoneCardStatus: PermissionCardStatus {
-        if viewModel.isRequestingMicrophone { return .awaiting }
+        if viewModel.isRequestingMicrophone {
+            return .awaiting
+        }
         switch viewModel.microphoneStatus {
         case .notDetermined:
             return .required

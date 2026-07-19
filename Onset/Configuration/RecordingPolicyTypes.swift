@@ -223,6 +223,152 @@ nonisolated struct SourceDimensions {
     }
 }
 
+// MARK: - DiskThresholds
+
+/// Thresholds and cadence for proactive disk-space monitoring during recording (spec #88).
+///
+/// Pure data, no framework dependency; values live on `RecordingConfiguration.mvpDefault` — no
+/// threshold literal is hardcoded elsewhere in the pipeline. Byte thresholds are the PRIMARY
+/// stop signal (fire regardless of estimated time-to-full, incl. slope ≤ 0); ETA thresholds are
+/// SECONDARY, gated on `slopeConfidence` (`...ImportantUsage` includes purgeable space whose
+/// recompute swings can dwarf the true write-speed slope near a full volume).
+///
+/// `ewmaTimeConstantSeconds` MUST be ≥ 4× `RecordingConfiguration.movieFragmentInterval` — at
+/// `readEverySeconds` ≈ `movieFragmentInterval` the EWMA window then reflects ≥ 4 reads, enough
+/// to damp a flush burst without smoothing away a real sustained drain.
+nonisolated struct DiskThresholds: Equatable {
+    /// System volume free-bytes warning floor → `.warning(.systemFree)` (recording continues).
+    nonisolated let systemWarnBytes: Int64
+    /// System volume free-bytes critical floor → `.critical(.systemFree)` (auto-stop).
+    nonisolated let systemStopBytes: Int64
+    /// Output volume free-bytes warning floor → `.warning(.outputFree)`.
+    nonisolated let outputWarnBytes: Int64
+    /// Output volume free-bytes critical floor → `.critical(.outputFree)` — the PRIMARY stop signal.
+    nonisolated let outputStopBytes: Int64
+    /// Output volume warning ETA threshold in seconds. Secondary, gated on `slopeConfidence`.
+    nonisolated let outputWarnEtaSeconds: Double
+    /// Output volume critical ETA threshold in seconds. Secondary, gated on `slopeConfidence`.
+    nonisolated let outputStopEtaSeconds: Double
+    /// EWMA time-constant (seconds) smoothing `−Δ(free bytes)/Δt`. MUST be
+    /// ≥ 4× `RecordingConfiguration.movieFragmentInterval` — see type-level doc.
+    nonisolated let ewmaTimeConstantSeconds: Double
+    /// Cadence (seconds) `DiskSpaceMonitor` throttles the provider read to, independent of the
+    /// ~1 Hz tick driving it. Approximately `RecordingConfiguration.movieFragmentInterval`.
+    nonisolated let readEverySeconds: Double
+    /// Duration (seconds) after monitoring starts during which the estimator falls back to the
+    /// table bitrate sum instead of the not-yet-trusted EWMA slope.
+    nonisolated let warmupSeconds: Double
+    /// Byte margin a free-byte metric must recover past its warn threshold before a `.warning`
+    /// is eligible to clear (hysteresis — AC-11).
+    nonisolated let hysteresisReleaseBytes: Int64
+    /// Minimum duration (seconds) recovered past the release margin before clearing (AC-11).
+    nonisolated let deescalationDebounceSeconds: Double
+}
+
+// MARK: - DiskWarningReason
+
+/// Reason a `.warning` disk verdict was raised (AC-3: the warning must be actionable).
+enum DiskWarningReason {
+    /// Output volume's estimated time-to-full crossed the warn ETA threshold.
+    case outputEta
+    /// Output volume's free bytes crossed the warn byte threshold.
+    case outputFree
+    /// System volume's free bytes crossed the warn byte threshold.
+    case systemFree
+}
+
+extension DiskWarningReason: Equatable {
+    /// Explicit `nonisolated` operator — `InferIsolatedConformances` would otherwise infer a
+    /// `@MainActor`-isolated synthesized `==` even on this `nonisolated` enum.
+    nonisolated static func == (lhs: DiskWarningReason, rhs: DiskWarningReason) -> Bool {
+        switch (lhs, rhs) {
+        case (.outputEta, .outputEta), (.outputFree, .outputFree), (.systemFree, .systemFree):
+            true
+
+        default:
+            false
+        }
+    }
+}
+
+// MARK: - DiskStopReason
+
+/// Reason a `.critical` disk verdict was raised (drives the auto-stop cause surfaced by AC-9).
+enum DiskStopReason {
+    /// Output volume's estimated time-to-full crossed the critical ETA threshold.
+    case outputEta
+    /// Output volume's free bytes crossed the critical byte threshold (byte-floor, primary signal).
+    case outputFree
+    /// System volume's free bytes crossed the critical byte threshold.
+    case systemFree
+}
+
+extension DiskStopReason: Equatable {
+    /// Explicit `nonisolated` operator — see `DiskWarningReason.==` rationale.
+    nonisolated static func == (lhs: DiskStopReason, rhs: DiskStopReason) -> Bool {
+        switch (lhs, rhs) {
+        case (.outputEta, .outputEta), (.outputFree, .outputFree), (.systemFree, .systemFree):
+            true
+
+        default:
+            false
+        }
+    }
+}
+
+// MARK: - DiskVerdict
+
+/// The disk-space monitoring verdict for the current tick (AC-2/AC-3/AC-4).
+enum DiskVerdict {
+    // swiftlint:disable discouraged_none_name
+    /// No disk-space concern; recording proceeds normally. Spec-defined case name (#88); never
+    /// optional-typed, so no confusion with `Optional<T>.none`.
+    case none
+    // swiftlint:enable discouraged_none_name
+    /// An actionable, non-blocking warning; recording continues (AC-3).
+    case warning(DiskWarningReason)
+    /// A critical condition; the coordinator MUST auto-stop recording gracefully (AC-4).
+    case critical(DiskStopReason)
+}
+
+extension DiskVerdict: Equatable {
+    /// Explicit `nonisolated` operator — required under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`.
+    /// The #1 gotcha for this feature: both payload enums (`DiskWarningReason`/`DiskStopReason`)
+    /// need the same treatment, or this witness fails to compile for `nonisolated` call sites.
+    nonisolated static func == (lhs: DiskVerdict, rhs: DiskVerdict) -> Bool {
+        switch (lhs, rhs) {
+        case (.none, .none):
+            true
+
+        case let (.warning(lhsReason), .warning(rhsReason)):
+            lhsReason == rhsReason
+
+        case let (.critical(lhsReason), .critical(rhsReason)):
+            lhsReason == rhsReason
+
+        default:
+            false
+        }
+    }
+}
+
+// MARK: - ETAEstimate
+
+/// A time-to-full estimate for a volume: produced by `DiskSpaceEstimator` for the idle
+/// pre-flight headline (AC-1) and the ETA-gated in-recording verdict path.
+nonisolated struct ETAEstimate: Equatable {
+    /// Estimated seconds remaining until the volume is full, or `nil` when unavailable (bad
+    /// data, no free-space reading, or zero/negative estimated speed with no byte-floor signal).
+    nonisolated let secondsRemaining: Double?
+    /// Whether `secondsRemaining` reflects a usable estimate. `false` means the caller should
+    /// display "оценка недоступна" rather than a fabricated number.
+    nonisolated let isEstimateAvailable: Bool
+    /// SNR-proxy confidence in the estimated slope: `|ewmaSpeed| / max(ε, stddev(recentΔ))`.
+    /// Below the calibrated cutoff, ETA-derived thresholds are suppressed and the byte-floor
+    /// becomes the sole critical signal (see `DiskThresholds` type-level doc).
+    nonisolated let slopeConfidence: Double
+}
+
 // MARK: - EngineBudgetCap
 
 /// The throughput ceiling of a single Apple Silicon encode engine.

@@ -18,10 +18,13 @@ nonisolated private let mainViewLogger = Logger(
 /// and a footer with a brief summary. Delegates all logic to `MainViewModel`.
 ///
 /// View states:
-/// - No permissions (AC-2d): empty state with return-to-onboarding button
+/// - No permissions (AC-2d): in-window screen-grant flow (#277), mirroring onboarding's
+///   request/open-settings/awaiting/auto-relaunch machinery, with a demoted
+///   return-to-onboarding fallback
 /// - Normal: section cards + Record button
 ///
 /// Section sub-views live in `MainView+Sections.swift`.
+/// No-permissions empty-state sub-views live in `MainView+NoPermissions.swift`.
 /// Preview doubles and `#Preview` blocks live in `MainView+Previews.swift`.
 @MainActor
 struct MainView: View {
@@ -33,7 +36,7 @@ struct MainView: View {
         static let sectionSpacing: CGFloat = 12
         /// Aspect ratio for the camera preview card (16:9 landscape).
         static let previewAspectRatio: CGFloat = 16.0 / 9.0 // swiftlint:disable:this no_magic_numbers
-        /// Maximum height for the camera preview card: still compact inside the fixed 460×560 window (#74),
+        /// Maximum height for the camera preview card: still compact inside the fixed 460×660 window (#74/#316),
         /// but tall enough that the 16:9 preview nearly fills the 392pt card inner width, minimizing the
         /// pillarbox margins on either side (#267). At 180pt the preview is 320pt wide → ~36pt margin per side.
         static let previewMaxHeight: CGFloat = 180
@@ -90,6 +93,9 @@ struct MainView: View {
         .frame(width: WindowDefaults.width, height: WindowDefaults.height)
         .task {
             await self.model.loadDevices()
+            // One-shot idle disk-space estimate (AC-1, T-7): computed once here, after
+            // `loadDevices()` resolves the display — no idle polling (see `refreshIdleDiskEstimate`).
+            await self.model.refreshIdleDiskEstimate()
             // Parks here until the view disappears: SwiftUI cancels the task, which
             // terminates the device-change stream and tears down its observer.
             await self.model.observeDeviceChanges()
@@ -140,7 +146,11 @@ struct MainView: View {
             "Папка для записи недоступна",
             isPresented: Binding(
                 get: { self.model.outputDirectoryError != nil },
-                set: { if !$0 { self.model.outputDirectoryError = nil } }
+                set: {
+                    if !$0 {
+                        self.model.outputDirectoryError = nil
+                    }
+                }
             )
         ) {
             Button("ОК") { self.model.outputDirectoryError = nil }
@@ -149,33 +159,6 @@ struct MainView: View {
                 Text(message)
             }
         }
-    }
-
-    // MARK: - No permissions empty state (AC-2d)
-
-    private var noPermissionsView: some View {
-        VStack(spacing: Metrics.noPermissionsSpacing) {
-            Spacer()
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: Metrics.emptyIconSize))
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
-            Text("Запись недоступна")
-                .font(.title3)
-                .fontWeight(.semibold)
-            Text("Выдайте разрешения на запись экрана или камеру, чтобы начать.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, Metrics.noPermissionsTextPaddingH)
-            Button("Вернуться к разрешениям") {
-                self.onReturnToOnboarding()
-            }
-            .buttonStyle(.borderedProminent)
-            .accessibilityLabel("Вернуться к разрешениям")
-            Spacer()
-        }
-        .padding(.horizontal, Metrics.outerPaddingH)
     }
 
     // MARK: - Main content
@@ -227,6 +210,13 @@ struct MainView: View {
 
     @ViewBuilder
     private var recordFooter: some View {
+        if let diskEstimate = self.model.diskSpaceEstimateDisplay {
+            Text(diskEstimate)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .accessibilityLabel(diskEstimate)
+        }
         if let reason = self.model.recordDisabledReason {
             Text(reason)
                 .font(.caption)
