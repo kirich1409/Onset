@@ -19,6 +19,8 @@ L5 requires a SIGNED build: drop `CODE_SIGNING_ALLOWED=NO` for build-for-testing
 
 Personal Team provisions camera + audio entitlements fine; only time-sensitive entitlements need a paid Apple Developer Program. Camera/screen L5 is therefore always feasible on this machine.
 
+Screen-Recording TCC is keyed to the signing identity, not the build path: after the signing team changes, macOS treats the app as new and the grant is GONE — the app then shows the onboarding «Запись экрана — Требуется» gate. Rebuilding into another DerivedData path does NOT restore it (verified 2026-07-19). There is no workaround: the app hard-gates recording on screen access, and «Продолжить без экрана» leads to a dead end, so not even a camera-only run is possible. This is a one-time TCC grant — one of the few things only the owner can do: open the Privacy → Screen Recording pane (the app's «Открыть настройки» button does it), ask them to enable Onset, then relaunch. Never run `tccutil` to self-heal.
+
 ## Step 2 — invoke via test plan, never env prefix
 
 ```bash

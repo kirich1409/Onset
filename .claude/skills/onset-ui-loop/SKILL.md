@@ -29,8 +29,8 @@ The autonomous UI verification loop: build → launch .app → drive → `screen
 ## Loop skeleton
 
 1. Build (background if long), locate YOUR worktree's `.app` (mtime check — see onset-l5-run Step 3).
-2. `hw-lock acquire`.
+2. `scripts/hw-lock.sh acquire`.
 3. `open <path>/Onset.app`, wait for the window by polling (`until` loop with a bound), never a bare `sleep`.
 4. Drive per recipes above; `screencapture -R` after each meaningful state change.
 5. Compare, record per-step verdicts; on mismatch — fix code, rebuild, repeat.
-6. Quit the app, `hw-lock release`, report with screenshot evidence.
+6. Quit the app, `scripts/hw-lock.sh release`, report with screenshot evidence.
