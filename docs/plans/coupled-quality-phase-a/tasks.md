@@ -49,6 +49,13 @@
 - check: grep confirms `ChipTier`, `budgetCap`, `safe-low`/`validated floor`, `#262`/`критическ` present in `docs/architecture.md`; grep confirms no surviving "placeholder"/"MUST be re-calibrated"/"AC-5" language in the `mvpDefault` / `EngineBudgetCap` docstrings that is now false; the doc's type-map / references sections stay internally consistent. (docs-revision non-negotiable — CLAUDE.md workflow)
 
 ## T-6 — L5 M3 Max worst-case budget calibration (AC-Q4)
+
+> **Resource-constrained decomposition (owner: ~1h idle night window, shared machine).** Split into:
+> - **T-6a (fits ~1h, closes Phase A):** detector smoke (`detectChipTier()==.m3Max`) + **worst-case-validate the max offerable combo** on the 4K reference — 4K60 screen + 1080p60 camera = 622.08M — over 2–3 runs of ≥10 min to thermal plateau under the pinned concurrent-load harness, **0** per-lane backpressure drops, verify-cfr + PTS. On 0-drop, `m3Max` STAYS 622.08M but is now a **worst-case-validated floor** (AC-Q4 satisfied for the combo Phase B actually offers on a 4K display); update the inline comment from "UNCALIBRATED floor" to "worst-case-validated @4K". If drops appear, `m3Max` drops below 622.08M and the max combo is greyed in Phase B (a real finding).
+> - **T-6b (deferred → #287):** the upward ceiling-search ABOVE 622.08M. Only meaningful for **>4K displays** (5K/6K), where screen+camera px/s can exceed 622.08M; needs such a display + a longer window. NOT a Phase-A blocker — on a 4K setup nothing above 622.08M is offerable.
+> - **MUST run on a genuinely idle machine** — concurrent agents driving camera/screen/VideoToolbox corrupt the measurement (uncontrolled contention ≠ the pinned representative load); hw-lock prevents crashes, not measurement noise. Enter via `hw-lock --wait`; abort if other HW agents are active.
+> The full spec below is the T-6b/complete methodology; T-6a is the 622.08M-validation subset of it.
+
 - after: T-4
 - files: `Onset/Configuration/RecordingPolicyTypes.swift` (update `.m3Max` to calibrated ceiling), `docs/plans/coupled-quality-phase-a/calibration-l5.md` (durable evidence), `OnsetTests/*` (sweep harness if needed — gate on the EXISTING `ONSET_RUN_L5_CAPTURE`/`ONSET_RUN_L5_ENCODE`, not a new gate; the `Onset-L5.xctestplan` includes the whole `OnsetTests` target so a new file is picked up automatically but must be env-gated or it leaks into CI which does not gate L5)
 - interface: consumes T-3 `.m3Max` floor (622_080_000), `DropBreakdown.bpEncodeScreen`/`.bpEncodeCamera` (`DropMonitor.swift:102–104`) · produces the calibrated-ceiling `maxPixelsPerSecond` for `.m3Max` (0.85 × worst observed 0-drop, or a recorded more-conservative factor) + the durable evidence file

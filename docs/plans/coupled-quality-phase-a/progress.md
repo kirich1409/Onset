@@ -8,7 +8,8 @@
 - [x] T-3 — Per-tier budget switch + safe-low
 - [x] T-4 — makeDefault(chipTier:) seam
 - [x] T-5 — Document ChipTier / budget flow + refresh stale inline docs
-- [ ] T-6 — L5 M3 Max worst-case budget calibration (AC-Q4) — remaining hardware gate
+- [ ] T-6a — L5 worst-case validate 622.08M @4K (~1h idle night window) — closes Phase A / AC-Q4
+- [ ] T-6b — upward ceiling-search >4K displays — DEFERRED to #287 (not a Phase-A blocker)
 
 ## Learnings
 <!-- Append one line per completed task: surprises, gotchas, decisions taken during implementation. -->
