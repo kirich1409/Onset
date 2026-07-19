@@ -851,7 +851,9 @@ nonisolated private func collectVideoFrames(
     var collected: [VideoFrame] = []
     for await frame in stream {
         collected.append(frame)
-        if collected.count >= count { break }
+        if collected.count >= count {
+            break
+        }
     }
     return collected
 }
@@ -864,7 +866,9 @@ nonisolated private func collectAudioSamples(
     var collected: [AudioSample] = []
     for await sample in stream {
         collected.append(sample)
-        if collected.count >= count { break }
+        if collected.count >= count {
+            break
+        }
     }
     return collected
 }

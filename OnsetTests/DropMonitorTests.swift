@@ -523,7 +523,9 @@ struct DropMonitorHealthTests {
     /// on a wiring regression). Mirrors `waitForBackpressureCount` in `DropMonitorTransitionTests`.
     private func waitForLatch(_ monitor: DropMonitor) async {
         for _ in 0..<200 {
-            if await monitor.snapshot().sessionEverDegraded { return }
+            if await monitor.snapshot().sessionEverDegraded {
+                return
+            }
             await Task.yield()
         }
     }
@@ -895,7 +897,9 @@ struct DropMonitorCaptureBackpressureTests {
 
         // Poll until the latch is set (actor processes the event asynchronously).
         for _ in 0..<200 {
-            if await monitor.snapshot().sessionEverDegraded { break }
+            if await monitor.snapshot().sessionEverDegraded {
+                break
+            }
             await Task.yield()
         }
         await monitor.stop()
@@ -935,7 +939,9 @@ struct DropMonitorCaptureBackpressureTests {
         continuation.finish()
 
         for _ in 0..<200 {
-            if await monitor.snapshot().sessionEverDegraded { break }
+            if await monitor.snapshot().sessionEverDegraded {
+                break
+            }
             await Task.yield()
         }
         await monitor.stop()
@@ -1029,7 +1035,9 @@ struct DropMonitorHoldDropsTests {
         continuation.finish()
 
         for _ in 0..<200 {
-            if await monitor.snapshot().sessionEverDegraded { break }
+            if await monitor.snapshot().sessionEverDegraded {
+                break
+            }
             await Task.yield()
         }
         await monitor.stop()

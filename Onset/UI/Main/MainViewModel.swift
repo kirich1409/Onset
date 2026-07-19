@@ -389,7 +389,11 @@ final class MainViewModel {
     /// The `SessionHandle` for the live camera preview, or `nil` for placeholder.
     /// Get-only bridge over `previewState`; uses `if case` (the enum is not `Equatable`).
     var previewHandle: SessionHandle? {
-        if case let .live(handle) = self.previewState { handle } else { nil }
+        if case let .live(handle) = self.previewState {
+            handle
+        } else {
+            nil
+        }
     }
 
     /// True when the last camera preview startup attempt failed terminally (no suitable format
@@ -397,7 +401,11 @@ final class MainViewModel {
     /// is shown instead.
     /// Get-only bridge over `previewState`; uses `if case` (the enum is not `Equatable`).
     var previewFailed: Bool {
-        if case .failed = self.previewState { true } else { false }
+        if case .failed = self.previewState {
+            true
+        } else {
+            false
+        }
     }
 
     /// True while the preview is taking longer than the soft-connect threshold (#255) but is
@@ -405,7 +413,11 @@ final class MainViewModel {
     /// (both otherwise collapse to `previewHandle == nil && !previewFailed`).
     /// Get-only bridge over `previewState`; uses `if case` (the enum is not `Equatable`).
     var previewIsConnectingSlow: Bool {
-        if case .connectingSlow = self.previewState { true } else { false }
+        if case .connectingSlow = self.previewState {
+            true
+        } else {
+            false
+        }
     }
 
     /// Soft-connect timeout for the preview watchdog (#255): Continuity (iPhone) cameras get a
@@ -458,6 +470,57 @@ final class MainViewModel {
     /// Whether microphone is available (authorized) from permissions.
     var isMicAvailable: Bool {
         self.permissions.effectivePermissions.microphoneAvailable
+    }
+
+    // MARK: - No-permissions in-window grant flow (#277)
+
+    /// `true` while screen recording has been requested and the polling loop is in flight.
+    ///
+    /// Mirrors `OnboardingViewModel.isAwaitingScreen` (#61's screen-grant flow) so the
+    /// no-permissions empty state in the main window can show the same "Ожидание…" state
+    /// without leaving the window.
+    private(set) var isAwaitingScreen = false
+
+    /// Requests screen-recording access, opens System Settings, and enters the awaiting state.
+    ///
+    /// Mirrors `OnboardingViewModel.openScreenRecordingSettings()` exactly — same underlying
+    /// `PermissionsService` calls, so the granted edge auto-triggers `AppRelauncher` relaunch
+    /// (no new mechanics; see `PermissionsService.checkScreenStatusNow`/`startScreenPolling`).
+    func openScreenRecordingSettings() {
+        self.permissions.requestScreenRecording()
+        self.permissions.openScreenRecordingSettings()
+        mainViewModelLogger.info("Registered in TCC list; opened Screen Recording settings; awaiting state")
+        self.isAwaitingScreen = true
+    }
+
+    /// Triggers an immediate one-shot status check (the explicit "Проверить снова" button).
+    ///
+    /// Mirrors `OnboardingViewModel.checkNow()`.
+    func checkScreenStatusNow() {
+        self.permissions.checkScreenStatusNow()
+        mainViewModelLogger.info("Manual check triggered from no-permissions state")
+    }
+
+    /// Starts the background screen-status polling loop.
+    ///
+    /// Mirrors `OnboardingViewModel.startPolling()`. The caller must cancel the returned
+    /// `Task` when polling is no longer needed — use `.task { … }` for structured cancellation
+    /// so the loop stops when the no-permissions view disappears.
+    func startScreenPolling() -> Task<Void, Never> {
+        mainViewModelLogger.info("Starting screen polling from no-permissions state")
+        return self.permissions.startScreenPolling()
+    }
+
+    /// Clears the transient awaiting flag when the user leaves the no-permissions state
+    /// via the demoted "Вернуться к разрешениям" fallback.
+    ///
+    /// `MainViewModel` is app-lifetime (owned by the window scene, not re-created per
+    /// presentation), so `isAwaitingScreen` would otherwise stay latched `true` across a
+    /// round trip: open Settings → leave without granting → deny stays → re-enter this
+    /// state later still shows the stale "Ожидание…" spinner with no way back to
+    /// "Открыть настройки" via a fresh request. Call before navigating away.
+    func leaveNoPermissionsState() {
+        self.isAwaitingScreen = false
     }
 
     // MARK: - Computed properties — selected devices (resolved from ID)
@@ -519,6 +582,60 @@ final class MainViewModel {
     var recordDisabledReason: String? {
         guard self.hasVideoSource, self.isMicAvailableButUnselected else { return nil }
         return "Выберите аудио-вход, чтобы начать запись"
+    }
+
+    // MARK: - Disk-space idle estimate (AC-1, T-7)
+
+    /// Displayed pre-flight disk-space headline — «≈ N мин» / «> 60 мин» / «оценка недоступна».
+    ///
+    /// Read-only projection of `coordinator.idleDiskEstimate` (the coordinator owns the disk-space
+    /// monitor and computes it off-main via `refreshIdleDiskEstimate()`); this property only
+    /// FORMATS the already-computed value — it never reads disk state itself. `nil` before the
+    /// first refresh completes (nothing to show yet, mirrors `recordDisabledReason`'s `nil`-means-
+    /// "don't show a footer line" convention).
+    var diskSpaceEstimateDisplay: String? {
+        guard let estimate = self.coordinator.idleDiskEstimate else { return nil }
+        guard estimate.isEstimateAvailable, let secondsRemaining = estimate.secondsRemaining else {
+            return "Оценка недоступна"
+        }
+        // The estimator already floors `secondsRemaining` to a whole-minute multiple (AC-1) — just
+        // truncate to `Int` here rather than rounding again, which would occasionally add back a
+        // minute the estimator deliberately floored away.
+        let secondsPerMinute = 60.0
+        let displayCapMinutes = 60
+        let minutes = Int(secondsRemaining / secondsPerMinute)
+        return minutes > displayCapMinutes ? "> 60 мин" : "≈ \(minutes) мин"
+    }
+
+    /// Recomputes the idle disk-space estimate (AC-1). Builds the same kind of `ResolvedRecordingPlan`
+    /// `startRecording` resolves for the actual session, but is a no-op when no display is selected
+    /// yet — there is nothing to estimate before `loadDevices()` resolves one (AC-1 auto-select).
+    ///
+    /// Cadence (T-7): called once from `MainView`'s `.task` after `loadDevices()` resolves the
+    /// display (main-screen appear), and again from `record()` (record initiation) — no idle
+    /// polling; staleness between those two points is accepted.
+    func refreshIdleDiskEstimate() async {
+        guard let display = self.selectedDisplay else { return }
+        let config = RecordingConfiguration.makeMVPDefault(
+            baseDirectory: self.outputDirectoryURL,
+            cameraMirror: self.appSettings.cameraMirror
+        )
+        // Best-effort camera format resolution: unlike `resolveCameraFormat()` (the record path),
+        // this must never surface `recordError` — a camera whose format can't be picked simply
+        // estimates without the camera's contribution, it does not block the idle headline.
+        let cameraFormat = self.activeCamera.flatMap { camera in
+            try? CameraFormatSelector.pickBestFormat(
+                from: camera.formats,
+                minFps: Double(RecordingConfiguration.mvpDefault.minCameraFps),
+                allowAboveFullHD: true
+            )
+        }
+        let plan = CapabilityResolver.resolveStartProfile(
+            display: display,
+            cameraFormat: cameraFormat,
+            config: config
+        )
+        await self.coordinator.refreshIdleDiskEstimate(plan: plan, config: config)
     }
 
     // MARK: - Device display names (resolved at UI layer via AVCaptureDevice)

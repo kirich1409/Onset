@@ -1339,7 +1339,9 @@ struct VideoEncoderTests {
         // Match via switch: the InferIsolatedConformances trap makes DropReason's Equatable
         // conformance unusable from the nonisolated context (mirrors the backpressure test).
         let cfrDropCount = reasons.count { reason in
-            if case .cfrNormalizationDrops = reason { return true }
+            if case .cfrNormalizationDrops = reason {
+                return true
+            }
             return false
         }
         #expect(cfrDropCount == 1)

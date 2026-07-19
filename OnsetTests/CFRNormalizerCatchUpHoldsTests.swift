@@ -315,7 +315,9 @@ struct CFRNormalizerCatchUpMonotonicityTests {
                 anchorSeconds: self.anchor,
                 fps: self.fps
             )
-            if case let .encode(slotIndex, _, _) = decision { allEmitted.append(slotIndex) }
+            if case let .encode(slotIndex, _, _) = decision {
+                allEmitted.append(slotIndex)
+            }
         }
 
         // Real frame at slot 5 → holds 2,3,4 then real 5.

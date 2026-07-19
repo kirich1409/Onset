@@ -1,0 +1,36 @@
+# Progress: disk-space-management (#88)
+
+Spec: `docs/specs/2026-07-18-disk-space-management.md` · Plan: `plan.md` · Tasks: `tasks.md`
+
+## Tasks
+- [x] T-1 — Threshold constants + pure disk value types
+- [x] T-2 — DiskSpaceProviding seam + actor live impl + fake
+- [x] T-3 — DiskSpaceEstimator (pure calculator) + L2 tests [TDD]
+- [x] T-4 — DiskSpaceMonitor collaborator + L2 tests
+- [x] T-5 — DiskSpaceWarningNotifying seam (warning + auto-stop cause)
+- [x] T-6 — RecordingCoordinator integration + tests
+- [x] T-7 — Pre-flight idle estimate «≈N мин» (AC-1)
+- [x] T-8 — MenuBarExtra badge reflects warning (AC-12a)
+- [x] T-9 — Composition-root wiring (OnsetApp)
+- [x] T-10 — docs/architecture.md update
+- [x] T-11 — L5 calibration & acceptance (AC-10) [hardware-gated] — отчёт: `calibration-l5.md`; (c) purgeable закрыт частично
+
+## Learnings
+- T-1: types landed in `Onset/Configuration/RecordingPolicyTypes.swift` (not `Recording/Pipeline/` — that's where the sibling policy types actually live; plan's Affected-Modules table had it right). Introduced an arg-order bug at `RecordingConfiguration.swift:328` (memberwise-init order) — caught by the Layer-1 build, fixed. `ewmaTimeConstantSeconds`=16.0 (=4×movieFragmentInterval 4.0). All 3 enums got explicit `nonisolated static func ==`.
+- T-2: CONFIRMED `volumeAvailableCapacityForImportantUsage` is `Int64?`; `volumeIdentifier` is NOT Sendable (as the plan anticipated) — kept inside the actor, only the Sendable snapshot crosses. Actor uses a dedicated serial DispatchQueue via withCheckedContinuation + dispatchPrecondition + os_signpost.
+- Layer 1 build: BUILD SUCCEEDED after the arg-order fix.
+- T-2 fake: `FakeDiskSpaceProvider` couldn't be `@MainActor` (DiskSpaceProviding is a nonisolated-async protocol) — converted to an `actor` (tests await its call log). Lesson: fakes for nonisolated-async DI seams are actors, not @MainActor classes.
+- Recurring memberwise-init arg-order bug (RecordingConfiguration:328 in T-1, DiskThresholds sites in T-3 tests) — both caught by the build, fixed. `DiskThresholds` has many fields; call sites must match declaration order.
+- Layer 2 gate: `xcodebuild test` → 975 tests in 176 suites PASSED (incl. new DiskSpaceEstimatorTests + LiveDiskSpaceProviderTests). L0+L2 green through T-5.
+- T-4: `MonotonicClock` seam (`SystemMonotonicClock` live + `FakeMonotonicClock` test) for deterministic readEvery/generation tests. FakeDiskSpaceProvider (actor) needed isolated `configure(...)`/`setOutputFreeBytes(_:)` setters — can't assign an actor's stored var from outside via await. Layer-3 gate: full `xcodebuild test` → 983/983 PASSED, no regressions.
+- T-6: integrated into existing tickTask (cached verdict read + non-awaited tickRefresh); critical -> `Task { await self.stop() }` (not inline); distinct `stoppedDueToLowSpace` (hasPendingAlert force-open untouched); AC-7 regression via `CoordinatorFixtures.diskFullWriteResult()` = `AVError(.diskFull)`; spurious-guard test `slowRefreshRacingManualStop_noSpuriousWarningSingleTeardown`. Gate: xcodebuild test 989/989 PASSED.
+- T-10 done early during the session-limit block (docs edit = main-session-allowed): new disk types added to architecture map (Pipeline/Config/Permissions/UI). Committed 60dd3a3.
+- T-7: coordinator computes idle estimate (off-main provider) one-shot on appear + recompute on record; MainViewModel display-only (`diskSpaceEstimateDisplay`: «≈ N мин»/«> 60 мин»/«оценка недоступна»). Test-fixture bug: 50GB@1080p60=~368min hit «>60» branch not «≈N» — fixture lowered to 5GB. Prod code was correct.
+- T-8: MenuBarLabelMapper (pure) carries low-space warning, mirroring deviceLostWarning (#261); coordinator diskWarning threaded in.
+- Layer 5 gate: xcodebuild test 1002/1002 PASSED.
+- T-9: composition-root wiring reconciled (single LiveDiskSpaceProvider, RecordingSession untouched). Whole-change gate `scripts/preflight.sh` PASS: swiftformat 0/187, swiftlint strict clean, privacy manifest PASS, 1002 tests. Remaining: T-11 (L5 disk-fill calibration, hardware) + /finalize + owner review (meta PR).
+- T-11 ATTEMPT 1 (2026-07-19 08:0x) — **BLOCKED: screen locked**. Harness ready and verified: signed build (team 9PULX5QX5Y) OK; 14 GB APFS sparse image mounted at `/Volumes/OnsetDiskTest`, filled to 10.27 GB free (just above the 10 GB output-warn floor, so a run crosses none→warning in ~70 s at ~4 MB/s); output routed via `defaults write dev.androidbroadcast.Onset onset.output.baseDirectory`. App launched, but `CGSSessionScreenIsLocked == true` → no UI loop, no screenshots, and screen capture on a locked session is not a valid L5 signal. Everything torn down (app quit, image detached+deleted, defaults key deleted → back to the `~/Movies/Onset` default the owner actually uses, hw-lock released). Needs a session with the screen unlocked.
+- T-11 empirical data point for item (c) (purgeable), gathered before the block: on the **system volume** `volumeAvailableCapacityForImportantUsage` = 102.6 GB vs plain `volumeAvailableCapacity` = 68.6 GB — a **34 GB optimism**, far larger than the 10 GB system-warn / 5 GB system-stop thresholds. Design already assumes the conservative floor absorbs this, but the magnitude means the system-volume warning can stay silent while the *plain* free space is already below the floor. Re-check during the real calibration; consider documenting it explicitly in the spec's threshold rationale. On the **sparse image** important == plain (no purgeable), so the image alone cannot exercise purgeable behavior — item (c) needs a fill of the real system volume or an explicitly acknowledged coverage gap.
+- T-11 ATTEMPT 2 (2026-07-19, экран разблокирован владельцем) — **выполнено**, 14 прогонов, полный отчёт в `calibration-l5.md`. Пороги менять не требуется. Главное: (b) запас 2 ГБ избыточен в ~48× (нужно ≈41 МБ), но Run B показал, что при внешнем потреблении 310 МБ/с байтовый пол выгорает за 6.5 с — быстрее одного `readEvery`, и спасает именно ETA-ветка; (e) на каденции 4 с сырой SNR = 0.91 < отсечки 1.0, и только EWMA с постоянной 16 с даёт 2.84 → `ewmaTimeConstantSeconds` понижать нельзя; (d) on-main стоимость ниже порога семплирования (1 семпл из ~60 000), блокирующие чтения провабельно на выделенной очереди, латентность `importantUsageRead` 10 мс медиана / 23 мс max, каденция 3.9 с. Дельта по дропам недостоверна (5 пар из 6 за WITHOUT, но шестая переворачивает знак при разбросе 14× внутри WITH) — причинного механизма нет.
+- T-11 предварительное условие: потребовался одноразовый TCC-грант «Запись экрана» от владельца — подпись платной командой сбросила прежнее разрешение; гипотеза «грант привязан к пути DerivedData» проверена и опровергнута. Приложение жёстко гейтит запись на доступе к экрану, обходного пути (даже camera-only) нет.
+- /finalize: Round-1 PASS after fixes. code-reviewer WARN(2 major+1 minor) + architecture(1 major converged) → all fixed; performance PASS. Fixes: AC-1 floor (was round), AC-11 ETA release-margin + live deescalationDebounceSeconds debounce (was dead), removed dead warningPosted, documented sameVolume. Gate: preflight 1006 tests PASS. Receipt: swarm-report/disk-space-management-quality.md. Deviations: Phase-0 harness folded into panel, Phase-B /simplify skipped (no over-engineering flagged) — acknowledged.

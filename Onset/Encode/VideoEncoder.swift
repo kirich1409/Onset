@@ -285,7 +285,9 @@ actor VideoEncoder {
         precondition(fps > 0, "fps must be positive")
         precondition(width > 0 && height > 0, "dimensions must be positive")
         precondition(maxPendingFrames > 0, "maxPendingFrames must be positive")
-        if let grace { precondition(grace >= 0, "grace must be non-negative") }
+        if let grace {
+            precondition(grace >= 0, "grace must be non-negative")
+        }
 
         self.settings = settings
         self.width = width
@@ -504,7 +506,9 @@ actor VideoEncoder {
                     if remaining > 0 {
                         try? await Task.sleep(for: .seconds(remaining))
                     }
-                    if Task.isCancelled { return }
+                    if Task.isCancelled {
+                        return
+                    }
                     let nowSeconds = CMTimeGetSeconds(PipelineClock.currentHostTime())
                     await self.clockTick(nowSeconds: nowSeconds, targetDeadlineSeconds: targetDeadlineSeconds)
                 } else {
